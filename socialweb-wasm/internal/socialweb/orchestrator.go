@@ -33,6 +33,7 @@ import (
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/component"
 	componentlink "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/componentlink"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketidentity"
+	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/contractevent"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketintents"
 	policyenginectl "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/policyengine"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/repos"
@@ -304,6 +305,16 @@ func Start(parent context.Context, cfg Config) (*Orchestrator, error) {
 		return nil, err
 	}
 	if _, err := marketintents.Register(mgr, marketintents.Options{
+		Bus:     cfg.Bus,
+		Scope:   scope,
+		Log:     log,
+		Clients: workspaceClients(cfg.Rest),
+	}); err != nil {
+		return nil, err
+	}
+	// The requester resolves its market.contractEvents handle (WebRTC
+	// signaling, guest events) from this controller and exits without it.
+	if _, err := contractevent.Register(mgr, contractevent.Options{
 		Bus:     cfg.Bus,
 		Scope:   scope,
 		Log:     log,
