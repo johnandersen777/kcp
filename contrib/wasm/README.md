@@ -267,6 +267,14 @@ kubectl> create -f http://127.0.0.1:8090/demo.yaml
 kubectl> get fetches
 ```
 
+The terminal supports cursor editing, history and Ctrl-C: because kubectl runs
+inside the tab, cancelling restarts the kubectl worker (its Go runtime cannot
+be interrupted mid-command; the kcp worker keeps all state). Below the
+terminal, an activity log shows module load times, every bridge request and
+response with status and latency, kubectl exit codes, kcp snapshot writes and
+diagram state changes. GET polling traffic is tagged `debug` and hidden
+unless the log's `verbose` box is checked.
+
 The Deno process only serves `app.html`, `app.js`, the worker scripts, both
 `.wasm` files and `wasm_exec.js`; it has no kubectl or kcp instance. kcp state
 is snapshotted to `localStorage` and restored on reload. The browser has no

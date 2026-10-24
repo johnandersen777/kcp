@@ -38,6 +38,9 @@ const init = await new Promise((resolve) => {
   self.addEventListener("message", listener);
 });
 
+const log = (level, message) => self.postMessage({ type: "log", level, message });
+const started = performance.now();
+
 // Side-effecting import: Go's wasm_exec.js defines globalThis.Go and a
 // fallback globalThis.fs.
 await import(init.execUrl);
@@ -58,6 +61,7 @@ function base64ToBytes(encoded) {
 globalThis.fetch = async (input, options = {}) => {
   const url = typeof input === "string" ? input : String(input?.url ?? input);
   if (!url.startsWith(apiServer)) {
+    log("info", `native fetch ${options.method ?? "GET"} ${url}`);
     return nativeFetch(input, options);
   }
 
@@ -75,27 +79,42 @@ globalThis.fetch = async (input, options = {}) => {
     );
   }
 
+  const method = options.method ?? "GET";
+  const path = parsed.pathname + parsed.search;
   const id = nextFetchID++;
   return await new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
-      if (pendingFetch.delete(id)) reject(new TypeError("fetch bridge timed out"));
+      if (pendingFetch.delete(id)) {
+        log("error", `${method} ${path} timed out`);
+        reject(new TypeError("fetch bridge timed out"));
+      }
     }, 120_000);
-    pendingFetch.set(id, { resolve, reject, timer });
+    pendingFetch.set(id, {
+      resolve,
+      reject,
+      timer,
+      started: performance.now(),
+      method,
+      path,
+    });
     self.postMessage({
       type: "fetch",
       id,
-      request: {
-        method: options.method ?? "GET",
-        path: parsed.pathname + parsed.search,
-        headers,
-        body,
-      },
+      request: { method, path, headers, body },
     });
   });
 };
 
+const wasmStarted = performance.now();
 const bytes = await (await nativeFetch(init.wasmUrl)).arrayBuffer();
+log("info", `kubectl.wasm ${(bytes.byteLength / 1048576).toFixed(1)} MiB downloaded`);
 const go = new globalThis.Go();
+// Override the default (console.warn) so the page can restart the worker:
+// the kubectl entrypoint blocks forever, so this only fires on os.Exit.
+go.exit = (code) => {
+  log("error", `kubectl Go runtime exited (code ${code})`);
+  self.postMessage({ type: "exit", code });
+};
 const { instance } = await WebAssembly.instantiate(bytes, go.importObject);
 
 go.run(instance).catch((err) => console.error("kubectl-wasm exited:", err));
@@ -120,17 +139,24 @@ self.onmessage = (event) => {
     if (!entry) return;
     pendingFetch.delete(id);
     clearTimeout(entry.timer);
+    const elapsed = Math.round(performance.now() - entry.started);
     if (request?.error) {
+      log("error", `${entry.method} ${entry.path} failed: ${request.error}`);
       entry.reject(new TypeError(String(request.error)));
       return;
     }
     const response = request?.response ?? {};
+    const status = response.status ?? 500;
+    log(
+      status >= 400 ? "warn" : entry.method === "GET" ? "debug" : "info",
+      `${entry.method} ${entry.path} → ${status} · ${elapsed}ms`,
+    );
     const body = response.bodyBase64
       ? base64ToBytes(response.bodyBase64)
       : new TextEncoder().encode(response.body ?? "");
     entry.resolve(
       new Response(body, {
-        status: response.status ?? 500,
+        status,
         headers: response.headers ?? {},
       }),
     );
@@ -147,4 +173,9 @@ self.onmessage = (event) => {
   }
 };
 
+log(
+  "ok",
+  `kubectl ready in ${Math.round(performance.now() - started)}ms ` +
+    `(module ${Math.round(performance.now() - wasmStarted)}ms)`,
+);
 self.postMessage({ type: "ready" });

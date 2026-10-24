@@ -34,7 +34,19 @@ import (
 
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	kubectlcmd "k8s.io/kubectl/pkg/cmd"
+	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 )
+
+// fatalExit is panicked by kubectl's fatal-error handler instead of calling
+// os.Exit, which would terminate the WASM runtime before the result could be
+// returned. Commands routinely call cmdutil.CheckErr from Run, so this is a
+// normal error path, not an exceptional one.
+type fatalExit struct {
+	message string
+	code    int
+}
+
+func (e fatalExit) Error() string { return e.message }
 
 type runRequest struct {
 	Args  []string `json:"args"`
@@ -77,8 +89,22 @@ func run(requestJSON string) (resultJSON string) {
 	result := runResult{Code: 1}
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(&errOut, "panic: %v\n", r)
-			result = runResult{Stdout: out.String(), Stderr: errOut.String(), Code: 1}
+			if exit, ok := r.(fatalExit); ok {
+				if exit.message != "" {
+					errOut.WriteString(exit.message)
+					if !strings.HasSuffix(exit.message, "\n") {
+						errOut.WriteString("\n")
+					}
+				}
+				result = runResult{
+					Stdout: out.String(),
+					Stderr: errOut.String(),
+					Code:   exit.code,
+				}
+			} else {
+				fmt.Fprintf(&errOut, "panic: %v\n", r)
+				result = runResult{Stdout: out.String(), Stderr: errOut.String(), Code: 1}
+			}
 		}
 		resultJSON = marshal(result)
 	}()
@@ -94,6 +120,13 @@ func run(requestJSON string) (resultJSON string) {
 		Out:    &out,
 		ErrOut: &errOut,
 	}
+
+	// kubectl treats many user errors as fatal and calls os.Exit. In WASM
+	// that kills the runtime before __kubectlResolve runs; turn it into a
+	// panic that run() recovers into a normal result.
+	cmdutil.BehaviorOnFatal(func(message string, code int) {
+		panic(fatalExit{message: message, code: code})
+	})
 
 	command := kubectlcmd.NewDefaultKubectlCommandWithArgs(kubectlcmd.KubectlOptions{
 		Arguments: append([]string{"kubectl"}, req.Args...),

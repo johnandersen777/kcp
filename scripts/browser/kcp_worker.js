@@ -32,8 +32,15 @@ const init = await new Promise((resolve) => {
   self.addEventListener("message", listener);
 });
 
+const log = (level, message) => self.postMessage({ type: "log", level, message });
+const started = performance.now();
+
 globalThis.__kcpInitialState = init.initialState ?? "";
+if (globalThis.__kcpInitialState) {
+  log("info", `restoring snapshot (${globalThis.__kcpInitialState.length} bytes)`);
+}
 globalThis.__kcpPersist = (snapshot) => {
+  log("debug", `snapshot ${snapshot.length} bytes`);
   self.postMessage({ type: "persist", snapshot });
 };
 
@@ -41,6 +48,7 @@ globalThis.__kcpPersist = (snapshot) => {
 await import(init.execUrl);
 
 const bytes = await (await fetch(init.wasmUrl)).arrayBuffer();
+log("info", `kcp.wasm ${(bytes.byteLength / 1048576).toFixed(1)} MiB downloaded`);
 const go = new globalThis.Go();
 const { instance } = await WebAssembly.instantiate(bytes, go.importObject);
 
@@ -67,7 +75,6 @@ globalThis.__kcpResolve = (callbackID, payload) => {
   pending.delete(callbackID);
   self.postMessage({ type: "response", id: entry.id, response: JSON.parse(payload) });
 };
-
 self.onmessage = (event) => {
   const { type, id, request } = event.data ?? {};
   if (type !== "request" || typeof id !== "number") return;
@@ -86,4 +93,5 @@ self.onmessage = (event) => {
   }
 };
 
+log("ok", `kcp ready in ${Math.round(performance.now() - started)}ms`);
 self.postMessage({ type: "ready" });

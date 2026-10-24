@@ -49,15 +49,86 @@
     display: grid;
     grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
   }
-  #terminal-pane {
+  #left-pane {
     min-width: 0;
     min-height: 0;
-    padding: 8px;
+    display: flex;
+    flex-direction: column;
     border-right: 1px solid var(--border);
+  }
+  #terminal-pane {
+    flex: 1;
+    min-height: 120px;
+    min-width: 0;
+    padding: 8px;
     overflow: hidden;
   }
   #terminal { width: 100%; height: 100%; }
   .xterm { height: 100%; }
+  #splitter {
+    height: 6px;
+    flex: none;
+    cursor: row-resize;
+    background: var(--border);
+    border-top: 1px solid var(--bg);
+    border-bottom: 1px solid var(--bg);
+  }
+  #splitter:hover { background: var(--accent); }
+  #log-pane {
+    height: 190px;
+    flex: none;
+    min-height: 60px;
+    display: flex;
+    flex-direction: column;
+    background: #070a10;
+    overflow: hidden;
+  }
+  .log-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 10px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  .log-head button {
+    margin-left: auto;
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font: inherit;
+    text-transform: none;
+    letter-spacing: 0;
+    padding: 0 6px;
+    cursor: pointer;
+  }
+  .log-head button:hover { color: var(--fg); border-color: var(--muted); }
+  #log {
+    flex: 1;
+    overflow: auto;
+    padding: 4px 10px;
+    font-size: 11px;
+    line-height: 1.45;
+  }
+  #log > div { white-space: pre-wrap; overflow-wrap: anywhere; }
+  #log:not(.verbose) .log-debug { display: none; }
+  #log .log-info { color: #9aa5b8; }
+  #log .log-ok { color: #9ece6a; }
+  #log .log-warn { color: #e0af68; }
+  #log .log-error { color: var(--critical); }
+  #log .log-debug { color: #5f6b80; }
+  .log-head label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+  }
+  .log-head input { margin: 0; }
   #diagram-pane {
     min-width: 0;
     min-height: 0;
@@ -107,7 +178,14 @@
   <span id="status">starting…</span>
 </header>
 <main>
-  <section id="terminal-pane"><div id="terminal"></div></section>
+  <section id="left-pane">
+    <div id="terminal-pane"><div id="terminal"></div></div>
+    <div id="splitter" title="drag to resize"></div>
+    <div id="log-pane">
+      <div class="log-head">activity log<label><input id="log-verbose" type="checkbox" />verbose</label><button id="log-clear" type="button">clear</button></div>
+      <div id="log"></div>
+    </div>
+  </section>
   <section id="diagram-pane">
     <h2>Live API surface <span id="diagram-updated">waiting for first poll…</span></h2>
     <div id="diagram"></div>
@@ -116,7 +194,7 @@
 <footer>
   kcp.wasm and kubectl.wasm both run in this browser tab (Web Workers);
   the Deno server only serves files. Diagram is polled with kubectl and
-  rendered by Pele.
+  rendered by Pele. Ctrl-C cancels the running kubectl command.
 </footer>
 
 <script src="https://cdn.jsdelivr.net/npm/pele@1/dist/pele.global.js"></script>
