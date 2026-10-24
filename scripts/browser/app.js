@@ -88,14 +88,15 @@ const lowMemory = localStorage.getItem("kcp.lowmem") === "1" ||
   (localStorage.getItem("kcp.lowmem") !== "0" && isIOS);
 
 // --- remote debug log ------------------------------------------------------
-// ?debuglog=1 (sticky; ?debuglog=0 turns it off) sends the activity log,
-// uncaught errors and the kcp heap size to the page's server (/debug/log), so
-// a crash on a phone can be read on the server side. Off unless asked for, and
-// the server ignores it unless started with --debug-log.
+// The activity log, uncaught errors and the kcp heap size go to the page's
+// server (/debug/log), so a crash on a phone can be read on the server side.
+// On by default; ?debuglog=0 (sticky) turns it off, and the page stops on the
+// first refused POST (a static host, or a server without --debug-log).
 const debugLogParam = new URLSearchParams(location.search).get("debuglog");
 if (debugLogParam !== null) localStorage.setItem("kcp.debuglog", debugLogParam === "0" ? "0" : "1");
-const debugLog = localStorage.getItem("kcp.debuglog") === "1";
-// ?debuggo=1 (sticky, like debuglog) forwards the kcp worker's Go console.
+let debugLog = localStorage.getItem("kcp.debuglog") !== "0";
+// The kcp worker's Go console goes to the activity log too; ?debuggo=0
+// (sticky) turns it off.
 const debugGoParam = new URLSearchParams(location.search).get("debuggo");
 if (debugGoParam !== null) localStorage.setItem("kcp.debugGo", debugGoParam === "0" ? "0" : "1");
 const debugSession = Math.random().toString(36).slice(2, 8);
@@ -108,7 +109,11 @@ function debugFlush() {
   if (!debugLog || debugQueue.length === 0) return;
   const body = JSON.stringify({ session: debugSession, ua: navigator.userAgent, lines: debugQueue });
   debugQueue = [];
-  fetch("/debug/log", { method: "POST", body, keepalive: body.length < 60000 }).catch(() => {});
+  fetch("/debug/log", { method: "POST", body, keepalive: body.length < 60000 })
+    .then((res) => {
+      if (!res.ok) debugLog = false;
+    })
+    .catch(() => {});
 }
 if (debugLog) {
   setInterval(debugFlush, 500);
@@ -624,7 +629,7 @@ async function spawnKcp(useSnapshot = true) {
     execUrl: "/wasm_exec.js",
     initialState,
     hibernate,
-    debugGo: localStorage.getItem("kcp.debugGo") === "1",
+    debugGo: localStorage.getItem("kcp.debugGo") !== "0",
     lowMemory,
     debugMemory: debugLog,
     socialweb: {
