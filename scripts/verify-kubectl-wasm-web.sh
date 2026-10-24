@@ -93,6 +93,12 @@ for wasm in kcp.wasm kubectl.wasm; do
   [[ "${size}" -gt 1000000 ]] || fail "${wasm} looks empty (${size} bytes)"
 done
 
+echo "== checking ETag revalidation =="
+etag="$(curl -sD - -o /dev/null "http://${host}:${port}/kcp.wasm" | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}')"
+[[ -n "${etag}" ]] || fail "kcp.wasm has no ETag"
+code="$(curl -s -o /dev/null -w '%{http_code}' -H "If-None-Match: ${etag}" "http://${host}:${port}/kcp.wasm")"
+[[ "${code}" == "304" ]] || fail "conditional kcp.wasm request returned ${code}, want 304"
+
 config="$(curl -sf "http://${host}:${port}/config")"
 [[ "${config}" == *'"apiServer"'* ]] || fail "/config missing apiServer"
 

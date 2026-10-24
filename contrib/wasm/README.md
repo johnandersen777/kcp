@@ -269,11 +269,23 @@ kubectl> get fetches
 
 The terminal supports cursor editing, history and Ctrl-C: because kubectl runs
 inside the tab, cancelling restarts the kubectl worker (its Go runtime cannot
-be interrupted mid-command; the kcp worker keeps all state). Below the
-terminal, an activity log shows module load times, every bridge request and
-response with status and latency, kubectl exit codes, kcp snapshot writes and
-diagram state changes. GET polling traffic is tagged `debug` and hidden
-unless the log's `verbose` box is checked.
+be interrupted mid-command; the kcp worker keeps all state). `apply -f -` and
+`create -f -` enter stdin mode: paste or type a manifest, Ctrl-D runs kubectl
+with it, Ctrl-C aborts. Tab completion calls kubectl's own `__complete`
+(commands, flags, resource types and live resource names). The kubectl
+entrypoint overrides `cmdutil.BehaviorOnFatal` so errors that upstream treats
+as `os.Exit` come back as normal results instead of killing the runtime.
+
+Below the terminal, an activity log shows module load times, every bridge
+request and response with status and latency, kubectl exit codes, kcp snapshot
+writes and diagram state changes. GET polling traffic is tagged `debug` and
+hidden unless the log's `verbose` box is checked; `save` downloads the log.
+The log pane is resizeable and remembers its height.
+
+The Pele diagram colors each Fetch by phase (green resolved, amber pending,
+red error). Clicking a node runs `describe` for that CRD or Fetch in the
+terminal. WASM assets are served with ETags, so reloads revalidate instead of
+re-downloading 140+ MiB.
 
 The Deno process only serves `app.html`, `app.js`, the worker scripts, both
 `.wasm` files and `wasm_exec.js`; it has no kubectl or kcp instance. kcp state

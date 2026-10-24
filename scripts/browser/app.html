@@ -43,6 +43,24 @@
   #status.connected { color: #9ece6a; }
   #status.running { color: #e0af68; }
   #status.disconnected { color: var(--critical); }
+  #retry {
+    background: transparent;
+    color: var(--fg);
+    border: 1px solid var(--critical);
+    border-radius: 4px;
+    padding: 1px 8px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  @media (max-width: 900px) {
+    main {
+      grid-template-columns: 1fr;
+      grid-template-rows: minmax(300px, 60vh) minmax(240px, 40vh);
+    }
+    #left-pane { border-right: none; border-bottom: 1px solid var(--border); }
+    #log-pane { max-height: 40%; }
+  }
   main {
     flex: 1;
     min-height: 0;
@@ -146,6 +164,7 @@
     margin: 0 0 8px;
   }
   #diagram-pane h2 span { text-transform: none; letter-spacing: 0; font-weight: 400; }
+  #diagram-pane h2 .hint { color: #5f6b80; }
   #diagram {
     flex: 1;
     min-height: 240px;
@@ -176,18 +195,20 @@
   <h1>kcp + kubectl in the browser</h1>
   <span class="meta">api <b id="server">…</b></span>
   <span id="status">starting…</span>
+  <button id="retry" type="button" hidden>retry</button>
 </header>
 <main>
   <section id="left-pane">
     <div id="terminal-pane"><div id="terminal"></div></div>
     <div id="splitter" title="drag to resize"></div>
     <div id="log-pane">
-      <div class="log-head">activity log<label><input id="log-verbose" type="checkbox" />verbose</label><button id="log-clear" type="button">clear</button></div>
+      <div class="log-head">activity log<label><input id="log-verbose" type="checkbox" />verbose</label><button id="log-save" type="button">save</button><button id="log-clear" type="button">clear</button></div>
       <div id="log"></div>
     </div>
   </section>
   <section id="diagram-pane">
-    <h2>Live API surface <span id="diagram-updated">waiting for first poll…</span></h2>
+    <h2>Live API surface <span id="diagram-updated">waiting for first poll…</span>
+      <span class="hint">click a node to describe it</span></h2>
     <div id="diagram"></div>
   </section>
 </main>

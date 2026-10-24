@@ -64,16 +64,23 @@ const headers = {
 };
 
 async function fileResponse(
+  request: Request,
   path: string | URL,
   contentType: string,
 ): Promise<Response> {
   const file = await Deno.open(path, { read: true });
   const stat = await file.stat();
+  const etag = `"${stat.size}-${stat.mtime?.getTime() ?? 0}"`;
+  if (request.headers.get("if-none-match") === etag) {
+    file.close();
+    return new Response(null, { status: 304, headers: { ...headers, etag } });
+  }
   return new Response(file.readable, {
     headers: {
       ...headers,
       "content-type": contentType,
       "content-length": String(stat.size),
+      etag,
     },
   });
 }
@@ -122,13 +129,13 @@ Deno.serve({ hostname, port }, async (request) => {
   }
 
   if (url.pathname === "/kcp.wasm") {
-    return await fileResponse(kcpWasmPath, "application/wasm");
+    return await fileResponse(request, kcpWasmPath, "application/wasm");
   }
   if (url.pathname === "/kubectl.wasm") {
-    return await fileResponse(kubectlWasmPath, "application/wasm");
+    return await fileResponse(request, kubectlWasmPath, "application/wasm");
   }
   if (url.pathname === "/wasm_exec.js") {
-    return await fileResponse(wasmExecPath, "text/javascript; charset=utf-8");
+    return await fileResponse(request, wasmExecPath, "text/javascript; charset=utf-8");
   }
 
   const asset = assets.get(url.pathname);
@@ -136,7 +143,7 @@ Deno.serve({ hostname, port }, async (request) => {
     const contentType = asset.endsWith(".js")
       ? "text/javascript; charset=utf-8"
       : "text/html; charset=utf-8";
-    return await fileResponse(new URL(asset, browserDir), contentType);
+    return await fileResponse(request, new URL(asset, browserDir), contentType);
   }
 
   return new Response("not found\n", { status: 404, headers });

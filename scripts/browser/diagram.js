@@ -21,7 +21,7 @@ function label(text) {
   return String(text).replace(/"/g, "'").replace(/\s+/g, " ").trim();
 }
 
-function nodeID(prefix, name) {
+export function nodeID(prefix, name) {
   return `${prefix}_${String(name).replace(/[^A-Za-z0-9_]/g, "_")}`;
 }
 
@@ -39,6 +39,7 @@ export function buildDiagram(apiServer, crds, fetches) {
 
   const fetchCRD = crdIDs.get("fetches.fetch.kcp.io") ?? "api";
   const items = fetches ?? [];
+  const classes = [];
 
   for (const item of items.slice(0, 12)) {
     const name = item?.metadata?.name;
@@ -51,6 +52,11 @@ export function buildDiagram(apiServer, crds, fetches) {
     lines.push(
       `  ${fetchCRD} --> ${id}["Fetch ${label(name)}<br/>${label(phase)}${code}${detail}"]`,
     );
+    classes.push(
+      `  class ${id} ${
+        phase === "Resolved" ? "resolved" : phase === "Error" ? "error" : "pending"
+      }`,
+    );
   }
 
   if (items.length > 12) {
@@ -60,6 +66,13 @@ export function buildDiagram(apiServer, crds, fetches) {
     lines.push('  none["no Fetch resources"]');
     if (fetchCRD !== "api") lines.push(`  ${fetchCRD} --> none`);
   }
+
+  lines.push(
+    "  classDef resolved fill:#14301d,stroke:#9ece6a,color:#d5dbe5",
+    "  classDef error fill:#3a1717,stroke:#ef8b8b,color:#d5dbe5",
+    "  classDef pending fill:#332a12,stroke:#e0af68,color:#d5dbe5",
+    ...classes,
+  );
 
   return lines.join("\n");
 }

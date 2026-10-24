@@ -21,7 +21,8 @@ limitations under the License.
 
 import { Terminal } from "https://esm.sh/@xterm/xterm@5.5.0";
 import { FitAddon } from "https://esm.sh/@xterm/addon-fit@0.10.0";
-import { buildDiagram } from "./diagram.js";
+import { WebLinksAddon } from "https://esm.sh/@xterm/addon-web-links@0.11.0";
+import { buildDiagram, nodeID } from "./diagram.js";
 
 const config = await (await fetch("/config")).json();
 const apiServer = String(config.apiServer);
@@ -30,6 +31,8 @@ const stateKey = "kcp-wasm-state";
 const maxLogEntries = 500;
 
 const statusEl = document.getElementById("status");
+const retryEl = document.getElementById("retry");
+retryEl.addEventListener("click", () => location.reload());
 const serverEl = document.getElementById("server");
 const diagramEl = document.getElementById("diagram");
 const diagramUpdatedEl = document.getElementById("diagram-updated");
@@ -45,6 +48,8 @@ serverEl.textContent = apiServer;
 // --- activity log ----------------------------------------------------------
 
 function addLog(level, message) {
+  const nearBottom =
+    logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
   const row = document.createElement("div");
   row.className = `log-${level}`;
   const time = new Date().toLocaleTimeString(undefined, { hour12: false });
@@ -53,10 +58,21 @@ function addLog(level, message) {
   while (logEl.childElementCount > maxLogEntries) {
     logEl.firstElementChild.remove();
   }
-  logEl.scrollTop = logEl.scrollHeight;
+  if (nearBottom) logEl.scrollTop = logEl.scrollHeight;
 }
 
 logClearEl.addEventListener("click", () => logEl.replaceChildren());
+
+document.getElementById("log-save").addEventListener("click", () => {
+  const text = [...logEl.children].map((row) => row.textContent).join("\n");
+  const blob = new Blob([`${text}\n`], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `kcp-browser-log-${Date.now()}.txt`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+});
 
 const verboseKey = "kcp-log-verbose";
 logVerboseEl.checked = localStorage.getItem(verboseKey) === "1";
@@ -84,6 +100,7 @@ const term = new Terminal({
 });
 const fitAddon = new FitAddon();
 term.loadAddon(fitAddon);
+term.loadAddon(new WebLinksAddon());
 term.open(document.getElementById("terminal"));
 fitAddon.fit();
 new ResizeObserver(() => {
@@ -99,6 +116,10 @@ const promptText = () => cyan("kubectl") + "\x1b[90m>\x1b[0m ";
 
 // --- splitter --------------------------------------------------------------
 
+const splitKey = "kcp-log-height";
+const savedSplit = localStorage.getItem(splitKey);
+if (savedSplit) logPaneEl.style.height = savedSplit;
+
 let draggingSplitter = false;
 splitterEl.addEventListener("pointerdown", (event) => {
   draggingSplitter = true;
@@ -113,6 +134,7 @@ splitterEl.addEventListener("pointermove", (event) => {
 for (const type of ["pointerup", "pointercancel"]) {
   splitterEl.addEventListener(type, () => {
     draggingSplitter = false;
+    localStorage.setItem(splitKey, logPaneEl.style.height || "190px");
   });
 }
 
@@ -163,6 +185,9 @@ function waitReady(worker) {
 }
 
 function attachKcp(worker) {
+  worker.addEventListener("error", (event) => {
+    addLog("error", `kcp worker crashed: ${event.message ?? "worker error"}`);
+  });
   worker.addEventListener("message", (event) => {
     const data = event.data ?? {};
     if (data.type === "response") {
@@ -343,6 +368,7 @@ async function start() {
   await spawnKubectl();
 
   ready = true;
+  retryEl.hidden = true;
   setStatus("connected", "connected");
   term.writeln(dim(`kcp + kubectl running in this browser tab (api ${apiServer})`));
   term.writeln(dim("type 'help' for examples; Ctrl-C cancels a running command"));
@@ -362,6 +388,24 @@ function writePromptHint() {
 
 let lastDiagram = "";
 let polling = false;
+// Maps Pele node ids to the kubectl command that describes them.
+let diagramTargets = new Map();
+
+diagramEl.addEventListener("click", (event) => {
+  const node = event.target.closest?.("[data-id]");
+  if (!node) return;
+  const command = diagramTargets.get(node.getAttribute("data-id"));
+  if (!command) return;
+  if (busy || stdinMode) {
+    addLog("warn", "busy; cannot describe from the diagram right now");
+    return;
+  }
+  term.focus();
+  term.write(`\r\n${promptText()}${command}`);
+  line = command;
+  cursor = line.length;
+  submit();
+});
 
 async function kubectlJSON(args) {
   const result = await runKubectl(withServer([...args, "-o", "json"]));
@@ -383,6 +427,17 @@ async function poll() {
       kubectlJSON(["get", "fetches"]),
     ]);
     mermaid = buildDiagram(apiServer, crds.items ?? [], fetches.items ?? []);
+
+    const targets = new Map();
+    for (const crd of crds.items ?? []) {
+      const name = crd?.metadata?.name;
+      if (name) targets.set(nodeID("crd", name), `describe crd ${name}`);
+    }
+    for (const fetch of fetches.items ?? []) {
+      const name = fetch?.metadata?.name;
+      if (name) targets.set(nodeID("fetch", name), `describe fetch ${name}`);
+    }
+    diagramTargets = targets;
   } catch (err) {
     if (err instanceof CancelledError) return;
     const message = String(err instanceof Error ? err.message : err);
@@ -399,9 +454,12 @@ async function poll() {
 
   if (mermaid !== lastDiagram) {
     lastDiagram = mermaid;
-    renderDiagram(mermaid);
     const crdCount = crds?.items?.length ?? 0;
     const items = fetches?.items ?? [];
+    renderDiagram(
+      mermaid,
+      crds ? `${crdCount} CRD${crdCount === 1 ? "" : "s"} · ${items.length} Fetch${items.length === 1 ? "" : "es"}` : "error",
+    );
     const summary = items
       .map((item) => {
         const name = item?.metadata?.name ?? "?";
@@ -417,9 +475,10 @@ async function poll() {
   }
 }
 
-function renderDiagram(mermaid) {
+function renderDiagram(mermaid, summary = "") {
   diagramEl.replaceChildren();
-  diagramUpdatedEl.textContent = `updated ${new Date().toLocaleTimeString()}`;
+  const stamp = new Date().toLocaleTimeString();
+  diagramUpdatedEl.textContent = summary ? `updated ${stamp} · ${summary}` : `updated ${stamp}`;
   try {
     pele.mount(diagramEl, mermaid);
   } catch (err) {
@@ -436,6 +495,26 @@ let line = "";
 let cursor = 0;
 let history = [];
 let historyIndex = 0;
+
+const historyKey = "kcp-cmd-history";
+try {
+  const saved = JSON.parse(localStorage.getItem(historyKey) ?? "[]");
+  if (Array.isArray(saved)) {
+    history = saved.filter((entry) => typeof entry === "string");
+  }
+} catch {
+  // Corrupt history is not worth surfacing.
+}
+historyIndex = history.length;
+
+// Multi-line stdin for `apply -f -`, `create -f -`, ...
+let stdinMode = false;
+let stdinArgs = null;
+let stdinLines = [];
+let stdinCurrent = "";
+let completing = false;
+
+const stdinPrompt = () => "\x1b[90m...\x1b[0m ";
 
 function prompt() {
   term.write(`\r\n${promptText()}`);
@@ -476,6 +555,88 @@ function deleteWordBeforeCursor() {
   redraw();
 }
 
+function commonPrefix(values) {
+  if (values.length === 0) return "";
+  let prefix = values[0];
+  for (const value of values.slice(1)) {
+    let index = 0;
+    while (index < prefix.length && index < value.length && prefix[index] === value[index]) {
+      index++;
+    }
+    prefix = prefix.slice(0, index);
+  }
+  return prefix;
+}
+
+// Tab completion via kubectl's own __complete command. The partial command is
+// appended after __complete; the virtual API server flag is passed so
+// resource-name completion can query kcp.
+async function completeLine() {
+  if (completing || busy || stdinMode || !ready) return;
+  const original = line;
+  const endsWithSpace = /\s$/.test(original);
+  const parts = splitArgs(original);
+  const token = endsWithSpace ? "" : (parts.pop() ?? "");
+
+  completing = true;
+  try {
+    const result = await runKubectl([
+      "__complete",
+      `--server=${apiServer}`,
+      ...parts,
+      token,
+    ]);
+    // The line changed while completions were in flight; drop the result.
+    if (line !== original || busy) return;
+
+    const candidates = String(result.stdout ?? "")
+      .split("\n")
+      .filter((entry) => entry && !entry.startsWith(":") && !entry.startsWith("_activeHelp_"))
+      .map((entry) => {
+        const [value, ...description] = entry.split("\t");
+        return { value, description: description.join(" ").trim() };
+      });
+
+    if (candidates.length === 0) {
+      term.write("\x07");
+      addLog("debug", `no completions for "${token}"`);
+      return;
+    }
+
+    const base = endsWithSpace ? line : line.slice(0, line.length - token.length);
+    if (candidates.length === 1) {
+      line = `${base}${candidates[0].value} `;
+      cursor = line.length;
+      redraw();
+      return;
+    }
+
+    const prefix = commonPrefix(candidates.map((candidate) => candidate.value));
+    if (prefix.length > token.length) {
+      line = `${base}${prefix}`;
+      cursor = line.length;
+    }
+
+    term.write("\r\n");
+    for (const candidate of candidates.slice(0, 40)) {
+      term.writeln(
+        candidate.description
+          ? `${cyan(candidate.value)}  ${dim(candidate.description)}`
+          : candidate.value,
+      );
+    }
+    if (candidates.length > 40) {
+      term.writeln(dim(`... ${candidates.length - 40} more`));
+    }
+    term.write("\r\n");
+    redraw();
+  } catch (err) {
+    addLog("warn", `completion failed: ${err instanceof Error ? err.message : err}`);
+  } finally {
+    completing = false;
+  }
+}
+
 function printHelp() {
   term.writeln(dim("This terminal runs upstream kubectl compiled to WebAssembly."));
   term.writeln(dim("kcp runs in another Web Worker in this tab; --server is added for you."));
@@ -486,45 +647,89 @@ function printHelp() {
   term.writeln("  describe fetch demo");
   term.writeln(`  create -f ${location.origin}/demo.yaml`);
   term.writeln("  delete fetch demo");
-  term.writeln(dim("keys: Ctrl-C cancel · Ctrl-L clear · ↑/↓ history · ←/→ cursor · Ctrl-A/E/U/W"));
-  term.writeln(dim("no local files in WASM: use URLs with -f (e.g. the demo.yaml above)"));
+  term.writeln("  apply -f -        (paste a manifest; Ctrl-D runs it, Ctrl-C aborts)");
+  term.writeln(dim("builtins: help · clear · reset (wipe kcp state and reload)"));
+  term.writeln(dim("keys: Ctrl-C cancel · Ctrl-D run stdin · Ctrl-L clear · ↑/↓ history"));
+  term.writeln(dim("      ←/→ cursor · Ctrl-A/E/U/W · Tab completion"));
+  term.writeln(dim("no local files in WASM: use URLs with -f, or stdin with -f -"));
 }
 
-function submit() {
-  const command = line.trim();
-  line = "";
-  cursor = 0;
+/** True when kubectl would read the manifest from stdin. */
+function needsStdin(args) {
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if ((arg === "-f" || arg === "--filename") && args[index + 1] === "-") {
+      return true;
+    }
+    if (arg === "--filename=-") return true;
+  }
+  return false;
+}
+
+function saveHistory() {
+  try {
+    localStorage.setItem(historyKey, JSON.stringify(history.slice(-100)));
+  } catch {
+    // History is best-effort.
+  }
+}
+
+function abortStdin() {
+  stdinMode = false;
+  stdinArgs = null;
+  stdinLines = [];
+  stdinCurrent = "";
+  term.write("^C\r\n");
+  addLog("warn", "stdin aborted");
+  prompt();
+}
+
+function finishStdin() {
+  if (stdinCurrent) {
+    stdinLines.push(stdinCurrent);
+    stdinCurrent = "";
+  }
+  const text = stdinLines.length > 0 ? `${stdinLines.join("\n")}\n` : "";
+  const args = stdinArgs;
+  stdinMode = false;
+  stdinArgs = null;
+  stdinLines = [];
   term.write("\r\n");
-  if (!command) {
-    prompt();
-    return;
-  }
-  history.push(command);
-  historyIndex = history.length;
+  term.writeln(dim(`[stdin ${text.split("\n").length - 1} line(s), ${text.length} bytes]`));
+  execute(args, text);
+}
 
-  const args = splitArgs(command);
-  if (args[0] === "kubectl") args.shift();
+function handleStdinData(data) {
+  if (data.startsWith("\u001b")) return;
+  for (const ch of data) {
+    if (ch === "\r" || ch === "\n") {
+      stdinLines.push(stdinCurrent);
+      stdinCurrent = "";
+      term.write("\r\n" + stdinPrompt());
+    } else if (ch === "\u007f") {
+      if (stdinCurrent.length > 0) {
+        stdinCurrent = stdinCurrent.slice(0, -1);
+        term.write("\b \b");
+      }
+    } else if (ch === "\t") {
+      stdinCurrent += "  ";
+      term.write("  ");
+    } else if (ch >= " ") {
+      stdinCurrent += ch;
+      term.write(ch);
+    }
+  }
+}
 
-  if (args[0] === "help") {
-    printHelp();
-    prompt();
-    return;
-  }
-  if (args.length === 0) {
-    prompt();
-    return;
-  }
-  if (!ready) {
-    term.writeln(red("still loading WASM modules…"));
-    prompt();
-    return;
-  }
-
+function execute(args, stdin) {
   busy = true;
   setStatus("running…", "running");
-  addLog("info", `> ${args.join(" ")}`);
+  addLog(
+    "info",
+    stdin === "" ? `> ${args.join(" ")}` : `> ${args.join(" ")} (stdin ${stdin.length} bytes)`,
+  );
   const started = performance.now();
-  runKubectl(withServer(args))
+  runKubectl(withServer(args), stdin)
     .then((result) => {
       const elapsed = Math.round(performance.now() - started);
       if (result.stdout) term.write(normalizeNewlines(result.stdout));
@@ -553,6 +758,64 @@ function submit() {
     });
 }
 
+function submit() {
+  const command = line.trim();
+  line = "";
+  cursor = 0;
+  term.write("\r\n");
+  if (!command) {
+    prompt();
+    return;
+  }
+  history.push(command);
+  saveHistory();
+  historyIndex = history.length;
+
+  const args = splitArgs(command);
+  if (args[0] === "kubectl") args.shift();
+
+  if (args[0] === "help") {
+    printHelp();
+    prompt();
+    return;
+  }
+  if (args[0] === "clear") {
+    term.clear();
+    prompt();
+    return;
+  }
+  if (args[0] === "reset") {
+    localStorage.removeItem(stateKey);
+    addLog("warn", "kcp state cleared from localStorage; reloading");
+    term.writeln(dim("cleared kcp state; reloading…"));
+    setTimeout(() => location.reload(), 300);
+    return;
+  }
+  if (args.length === 0) {
+    prompt();
+    return;
+  }
+  if (!ready) {
+    term.writeln(red("still loading WASM modules…"));
+    prompt();
+    return;
+  }
+
+  if (needsStdin(args)) {
+    stdinMode = true;
+    stdinArgs = args;
+    stdinLines = [];
+    stdinCurrent = "";
+    term.writeln(
+      dim("stdin mode: paste or type the manifest. Ctrl-D runs, Ctrl-C aborts."),
+    );
+    term.write(stdinPrompt());
+    return;
+  }
+
+  execute(args, "");
+}
+
 function cancelRunning() {
   line = "";
   cursor = 0;
@@ -566,6 +829,19 @@ function cancelRunning() {
 }
 
 term.onData((data) => {
+  if (stdinMode) {
+    if (data === "\u0003") {
+      abortStdin();
+      return;
+    }
+    if (data === "\u0004") {
+      finishStdin();
+      return;
+    }
+    handleStdinData(data);
+    return;
+  }
+
   if (busy && data !== "\u0003") return;
 
   if (data === "\r" || data === "\n") {
@@ -645,6 +921,10 @@ term.onData((data) => {
     deleteWordBeforeCursor();
     return;
   }
+  if (data === "\t") {
+    void completeLine();
+    return;
+  }
   if (data === "\u001b[A") {
     if (history.length === 0) return;
     historyIndex = Math.max(0, historyIndex - 1);
@@ -660,11 +940,18 @@ term.onData((data) => {
   if (data.startsWith("\u001b")) return;
 
   let text = "";
-  for (const ch of data) {
+  for (let index = 0; index < data.length; index++) {
+    const ch = data[index];
     if (ch === "\r" || ch === "\n") {
       insertText(text);
       text = "";
       submit();
+      // A paste can carry the command and its stdin manifest in one chunk.
+      const rest = data.slice(index + 1);
+      if (rest) {
+        if (stdinMode) handleStdinData(rest);
+        else insertText(rest);
+      }
       return;
     }
     if (ch >= " ") text += ch;
@@ -675,6 +962,7 @@ term.onData((data) => {
 setStatus("starting…", "running");
 start().catch((err) => {
   setStatus("failed", "disconnected");
+  retryEl.hidden = false;
   addLog("error", `startup failed: ${err instanceof Error ? err.message : err}`);
   term.writeln(red(`startup failed: ${err instanceof Error ? err.message : err}`));
 });
