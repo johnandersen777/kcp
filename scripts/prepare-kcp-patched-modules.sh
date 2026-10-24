@@ -94,6 +94,22 @@ copy_module() {
   set_replace "${module}" "${dest}"
 }
 
+# replace_in <file> <old> <new> applies a literal source patch (backslash
+# escapes such as \n and \t are expanded). It fails when <old> is missing so a
+# dependency bump cannot silently drop a patch, and is a no-op on files that
+# are already patched (copy_module keeps existing copies).
+replace_in() {
+  python3 - "$@" <<'PY'
+import sys
+path, old, new = (sys.argv[1],) + tuple(a.encode().decode("unicode_escape") for a in sys.argv[2:4])
+src = open(path).read()
+if old in src:
+    open(path, "w").write(src.replace(old, new))
+elif new not in src:
+    sys.exit(f"{path}: patch target {old!r} not found")
+PY
+}
+
 overlay="${repo_root}/contrib/wasm/_overlay"
 
 # The storagebackend factory gains a memory:// backend.
@@ -138,6 +154,17 @@ if [[ "${mode}" == "js" ]]; then
     "${work}/moby-term/termios_unix.go"
   cp "${overlay}/moby-term/termios_nonbsd.go" \
     "${work}/moby-term/termios_nonbsd.go"
+
+  # The loopback and serving certificates are self-signed on every boot, each
+  # with an RSA-2048 CA and leaf key. RSA prime search is slow under wasm;
+  # P-256 keys are generated in about a millisecond.
+  copy_module k8s.io/client-go "${work}/client-go"
+  cert_go="${work}/client-go/util/cert/cert.go"
+  replace_in "${cert_go}" '"crypto/rsa"\n' '"crypto/ecdsa"\n\t"crypto/elliptic"\n'
+  replace_in "${cert_go}" 'rsa.GenerateKey(cryptorand.Reader, 2048)' 'ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)'
+  replace_in "${cert_go}" \
+    '\tif err := pem.Encode(&keyBuffer, &pem.Block{Type: keyutil.RSAPrivateKeyBlockType, Bytes: x509.MarshalPKCS1PrivateKey(priv)}); err != nil {' \
+    '\tkeyDER, err := x509.MarshalECPrivateKey(priv)\n\tif err != nil {\n\t\treturn nil, nil, err\n\t}\n\tif err := pem.Encode(&keyBuffer, &pem.Block{Type: keyutil.ECPrivateKeyBlockType, Bytes: keyDER}); err != nil {'
 fi
 
 echo "prepared ${modfile} (mode=${mode})"

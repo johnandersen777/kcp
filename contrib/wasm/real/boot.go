@@ -125,7 +125,10 @@ func Boot(parent context.Context, cfg Config) (*Server, error) {
 	// kcp generates a 4096-bit RSA service-account key on first boot, which
 	// takes 3-12s in wasm (random prime search). The JWT signer accepts ECDSA
 	// keys, so generate a P-256 key instead when none exists yet.
-	_ = ensureServiceAccountKey
+	if err := ensureServiceAccountKey(cfg.RootDir); err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("real: service-account key: %w", err)
+	}
 
 	opts := serveroptions.NewOptions(cfg.RootDir)
 	opts.GenericControlPlane.Etcd.StorageConfig.Transport.ServerList = []string{"memory://main"}
