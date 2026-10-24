@@ -93,6 +93,9 @@ const lowMemory = localStorage.getItem("kcp.lowmem") === "1" ||
 const debugLogParam = new URLSearchParams(location.search).get("debuglog");
 if (debugLogParam !== null) localStorage.setItem("kcp.debuglog", debugLogParam === "0" ? "0" : "1");
 const debugLog = localStorage.getItem("kcp.debuglog") === "1";
+// ?debuggo=1 (sticky, like debuglog) forwards the kcp worker's Go console.
+const debugGoParam = new URLSearchParams(location.search).get("debuggo");
+if (debugGoParam !== null) localStorage.setItem("kcp.debugGo", debugGoParam === "0" ? "0" : "1");
 const debugSession = Math.random().toString(36).slice(2, 8);
 let debugQueue = [];
 function debugSend(level, message) {
