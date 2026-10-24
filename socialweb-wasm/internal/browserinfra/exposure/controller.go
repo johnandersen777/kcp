@@ -218,13 +218,13 @@ func (c *Controller) Reconcile(ctx context.Context, req ctlruntime.Request, obje
 		c.ingress.drop(owner)
 	}
 	if c.handlers != nil && isHTTP(svc.Spec.Protocol) {
-		handler, ok := c.handlers.Handler(target, svc.Spec.Handler)
+		_, ok := c.handlers.Handler(target, svc.Spec.Handler)
 		if !ok {
 			message := fmt.Sprintf("no handler %q is registered for %s/%s in workspace %s", handlerName(svc.Spec.Handler),
 				target.Kind, target.Name, target.Workspace)
 			return c.withdraw(ctx, req, object, exposurev1alpha1.ExposurePending, "HandlerMissing", message, true)
 		}
-		if err := c.registry.Register(owner, host, spec.Path, withCaller(handler, target)); err != nil {
+		if err := c.registry.Register(owner, host, spec.Path, withCaller(c.current(target, svc.Spec.Handler), target)); err != nil {
 			return ctlruntime.Result{}, err
 		}
 		c.log.Debug("the in-browser Exposure route is registered", "host", host, "path", spec.Path,
@@ -292,6 +292,20 @@ func isHTTP(protocol exposurev1alpha1.ServiceProtocol) bool {
 
 // withCaller mirrors the real local publisher: bus-authorized calls made by the
 // handler are attributed to the target component.
+// current resolves the target's handler on every request. A component that
+// restarts registers a new handler under the same key; capturing the one seen
+// at reconcile time would keep answering for the stopped instance.
+func (c *Controller) current(target bus.Key, name string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler, ok := c.handlers.Handler(target, name)
+		if !ok {
+			http.Error(w, "the exposed component has no handler registered", http.StatusServiceUnavailable)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	})
+}
+
 func withCaller(handler http.Handler, target bus.Key) http.Handler {
 	ref := target.Ref()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
