@@ -316,7 +316,7 @@ export function startHibernation({ go, key, ready, seqs, extra, captured = null,
   let lastSeqs = captured;
   let lastAt = 0;
   let want = false;
-  let running = false;
+  let running = null; // the in-flight save
   let disabled = false;
   let lastReason = "";
   let seen = seqs();
@@ -338,7 +338,8 @@ export function startHibernation({ go, key, ready, seqs, extra, captured = null,
       lastReason = reason;
       return;
     }
-    running = true;
+    let done;
+    running = new Promise((resolve) => (done = resolve));
     const t0 = performance.now();
     try {
       const meta = await store.save(go, () => ({ ...extra(), seqs: seqs(), key }), gzip);
@@ -352,7 +353,8 @@ export function startHibernation({ go, key, ready, seqs, extra, captured = null,
       log("warn", `snapshot failed: ${err?.message ?? err}`);
       if (err?.name === "QuotaExceededError") disabled = true;
     } finally {
-      running = false;
+      running = null;
+      done();
     }
   };
   setInterval(tick, 1000);
@@ -363,6 +365,7 @@ export function startHibernation({ go, key, ready, seqs, extra, captured = null,
     },
     async discard() {
       disabled = true;
+      await running; // its sync access handle blocks removal
       await discardSnapshot();
     },
   };
