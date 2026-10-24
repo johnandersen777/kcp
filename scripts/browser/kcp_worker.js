@@ -86,6 +86,20 @@ try {
 installFsShim();
 for (const dir of ["/kcp", "/tmp", "/home", "/home/user"]) makeMemoryDir(dir);
 
+// Go writes its stdout/stderr (klog included) to this worker's console, which
+// browser automation that only sees the page (Safari's MCP) cannot read.
+// localStorage kcp.debugGo=1 forwards it to the activity log at debug level.
+if (init.debugGo) {
+  for (const level of ["log", "error"]) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => {
+      original(...args);
+      const text = args.map((a) => (a instanceof Error ? `${a}\n${a.stack ?? ""}` : String(a))).join(" ").trimEnd();
+      if (text) log("debug", `go: ${text.slice(0, 4000)}`);
+    };
+  }
+}
+
 // Everything Go calls into is defined before it first runs: the status feed
 // and the persist hooks fire as soon as a hot boot (or a restore) is up.
 const pending = new Map();

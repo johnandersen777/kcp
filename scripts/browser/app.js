@@ -534,6 +534,7 @@ async function spawnKcp(useSnapshot = true) {
     execUrl: "/wasm_exec.js",
     initialState,
     hibernate,
+    debugGo: localStorage.getItem("kcp.debugGo") === "1",
     socialweb: {
       origin: location.origin,
       identityMode: localStorage.getItem("socialweb.identity") === "localRepo"
