@@ -56,6 +56,17 @@ type Contract struct {
 	Message   string `json:"message,omitempty"`
 	ChosenDID string `json:"chosenDid,omitempty"`
 	Bids      int    `json:"bids,omitempty"`
+
+	SecretsFetchedAt string    `json:"secretsFetchedAt,omitempty"`
+	Release          bool      `json:"release,omitempty"`
+	Networks         []Network `json:"networks,omitempty"`
+}
+
+// Network is one tagged guest address from status.contract.networks (plan
+// 0032), e.g. the opentunnel URL of the "shell" tunnel.
+type Network struct {
+	Tag     string `json:"tag"`
+	Address string `json:"address"`
 }
 
 // State is a full, idempotent UI snapshot.
@@ -226,6 +237,17 @@ func contract(u *unstructured.Unstructured) Contract {
 	c.ChosenDID, _, _ = unstructured.NestedString(u.Object, "status", "chosen", "did")
 	if bids, ok, _ := unstructured.NestedSlice(u.Object, "status", "bids"); ok {
 		c.Bids = len(bids)
+	}
+	c.SecretsFetchedAt, _, _ = unstructured.NestedString(u.Object, "status", "secretsFetchedAt")
+	c.Release, _, _ = unstructured.NestedBool(u.Object, "spec", "release")
+	networks, _, _ := unstructured.NestedSlice(u.Object, "status", "contract", "networks")
+	for _, raw := range networks {
+		n, _ := raw.(map[string]any)
+		tag, _ := n["tag"].(string)
+		address, _ := n["address"].(string)
+		if tag != "" && address != "" {
+			c.Networks = append(c.Networks, Network{Tag: tag, Address: address})
+		}
 	}
 	return c
 }
