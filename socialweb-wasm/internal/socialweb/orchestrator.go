@@ -84,6 +84,13 @@ type Config struct {
 	// OnSnapshot receives a fresh vault snapshot after every write or delete.
 	OnSnapshot func([]byte)
 
+	// IngressProxyHost is the xrpc-subscription relay ingress-mode Exposures
+	// register with (e.g. xrpc.fedproxy.com). Empty serves them on Origin.
+	IngressProxyHost string
+
+	// OnIngress receives the ingress Exposures the page must subscribe for.
+	OnIngress func([]exposure.Ingress)
+
 	Log *slog.Logger
 }
 
@@ -217,6 +224,7 @@ func Start(parent context.Context, cfg Config) (*Orchestrator, error) {
 	}
 	exposureCtl, err := exposure.Register(mgr, exposure.Options{
 		Origin: cfg.Origin, Handlers: cfg.Bus, Scope: scope, Log: log,
+		IngressProxyHost: cfg.IngressProxyHost, Keys: vaultCtl.Provider().Store, OnIngress: cfg.OnIngress,
 	})
 	if err != nil {
 		return nil, err

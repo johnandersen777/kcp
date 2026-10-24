@@ -21,6 +21,7 @@ import (
 
 	"github.com/johnandersen777/socialweb-computer-kcp/api/v1alpha1"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/bus"
+	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserinfra/exposure"
 	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/socialweb"
 	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/statusfeed"
 	"github.com/kcp-dev/kcp/contrib/wasm/real"
@@ -112,8 +113,12 @@ func startSocialweb(srv *real.Server, kcpHandler js.Func) {
 		IdentityMode: v1alpha1.MarketIdentityModeOAuthBrowser,
 	}
 	statusFeed := true
+	cfg.IngressProxyHost = defaultIngressProxyHost
 	if raw := js.Global().Get("__socialwebConfig"); raw.Type() == js.TypeString && raw.String() != "" {
 		var in struct {
+			// IngressProxyHost overrides the relay; "" serves every Exposure
+			// on the page origin.
+			IngressProxyHost *string `json:"ingressProxyHost"`
 			Origin           string   `json:"origin"`
 			Handle           string   `json:"handle"`
 			DID              string   `json:"did"`
@@ -141,6 +146,9 @@ func startSocialweb(srv *real.Server, kcpHandler js.Func) {
 			if in.StatusFeed != nil {
 				statusFeed = *in.StatusFeed
 			}
+			if in.IngressProxyHost != nil {
+				cfg.IngressProxyHost = strings.TrimSpace(*in.IngressProxyHost)
+			}
 			if in.IdentityMode != "" {
 				cfg.IdentityMode = v1alpha1.MarketIdentityMode(in.IdentityMode)
 			}
@@ -152,13 +160,19 @@ func startSocialweb(srv *real.Server, kcpHandler js.Func) {
 			persist.Invoke(string(snapshot))
 		}
 	}
+	cfg.OnIngress = func(list []exposure.Ingress) {
+		if fn := js.Global().Get("__socialwebIngress"); fn.Type() == js.TypeFunction {
+			raw, _ := json.Marshal(list)
+			fn.Invoke(string(raw))
+		}
+	}
 	orc, err := socialweb.Start(context.Background(), cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "kcp-wasm: socialweb:", err)
 		js.Global().Set("__socialwebError", err.Error())
 		return
 	}
-	_ = orc
+	registerPageExports(orc)
 	if statusFeed {
 		go func() {
 			err := statusfeed.Start(context.Background(), srv.RestConfig(), func(raw []byte) {
