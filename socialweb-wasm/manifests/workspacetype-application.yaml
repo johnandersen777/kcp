@@ -1,0 +1,33 @@
+apiVersion: tenancy.kcp.io/v1alpha1
+kind: WorkspaceType
+metadata:
+  name: socialweb-application
+spec:
+  extend:
+    with:
+      - name: universal
+        path: root
+
+  defaultAPIBindings:
+    - export: applications
+      path: root:socialweb-provider
+    - export: policy
+      path: root:socialweb-provider
+    - export: computevms
+      path: root:socialweb-provider
+    - export: hostprocesses
+      path: root:socialweb-provider
+    - export: clusters
+      path: root:socialweb-provider
+    - export: atprotoidentities
+      path: root:socialweb-provider
+    - export: marketidentities
+      path: root:socialweb-provider
+    - export: computecontracts
+      path: root:socialweb-provider
+    - export: exposures
+      path: root:socialweb-provider
+    - export: pds
+      path: root:socialweb-provider
+    - export: events
+      path: root:socialweb-provider

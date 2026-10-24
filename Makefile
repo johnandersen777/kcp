@@ -150,6 +150,10 @@ build-kubectl-wasm-web-public: build-kcp-wasm build-kubectl-wasm build-goat-wasm
 run-kubectl-wasm-web: build-kcp-wasm build-kubectl-wasm build-goat-wasm build-yq-wasm ## Serve the browser demo (kcp, kubectl, goat, yq WASM in the tab)
 	deno run --allow-read --allow-net ./scripts/kubectl_wasm_web.ts --port=$${WEB_PORT:-8090}
 
+.PHONY: serve-public
+serve-public: ## Serve ./public with generated OAuth client metadata (WEB_PORT=8090)
+	deno run --allow-read --allow-net ./scripts/serve-public.ts --dir=public --port=$${WEB_PORT:-8090}
+
 .PHONY: verify-kubectl-wasm-web
 verify-kubectl-wasm-web: ## Verify the kubectl-wasm terminal UI and live Pele diagram
 	./scripts/verify-kubectl-wasm-web.sh
@@ -161,6 +165,18 @@ verify-kcp-memory: ## Run real kcp on the in-memory storage backend and verify C
 .PHONY: build-kcp-real-wasm
 build-kcp-real-wasm: ## Build the real kcp server for js/wasm (experimental)
 	./scripts/build-kcp-real-wasm.sh
+
+.PHONY: sync-socialweb-manifests
+sync-socialweb-manifests: ## Sync the browser-provider deploy manifests into socialweb-wasm/manifests
+	./scripts/sync-socialweb-manifests.sh
+
+.PHONY: build-socialweb-kcp-wasm
+build-socialweb-kcp-wasm: ## Build the combined real-kcp + socialweb js/wasm module
+	./scripts/build-socialweb-kcp-wasm.sh
+
+.PHONY: dev-socialweb
+dev-socialweb: ## Boot the combined module under Deno with warm state (PORT=18080)
+	./scripts/dev-socialweb.sh
 
 .PHONY: build-e2e
 build-e2e:

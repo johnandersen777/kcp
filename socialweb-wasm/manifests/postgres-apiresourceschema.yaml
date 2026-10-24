@@ -1,0 +1,119 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-1.postgreses.socialweb.computer
+spec:
+  group: socialweb.computer
+  names:
+    kind: Postgres
+    listKind: PostgresList
+    plural: postgreses
+    singular: postgres
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              version:
+                type: string
+              dataDir:
+                type: string
+              databases:
+                type: array
+                items:
+                  type: string
+              settings:
+                type: array
+                items:
+                  type: string
+              deleteData:
+                type: boolean
+          status:
+            type: object
+            properties:
+              observedGeneration:
+                type: integer
+                format: int64
+              phase:
+                type: string
+                enum:
+                  - Pending
+                  - Starting
+                  - Ready
+                  - Failed
+                  - Deleting
+              message:
+                type: string
+              version:
+                type: string
+              dataDir:
+                type: string
+              socketDir:
+                type: string
+              user:
+                type: string
+              dsn:
+                type: string
+              hostProcess:
+                type: string
+              runtime:
+                type: object
+                properties:
+                  backend:
+                    type: string
+                  unit:
+                    type: string
+                  invocationID:
+                    type: string
+                  pid:
+                    type: integer
+                    format: int64
+                  startTicks:
+                    type: integer
+                    format: int64
+                  hostBootID:
+                    type: string
+                  manager:
+                    type: string
+                  activeSince:
+                    type: string
+                required:
+                  - backend
+                  - unit
+              readyAt:
+                type: string
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Version
+          type: string
+          jsonPath: .status.version
+        - name: Socket
+          type: string
+          jsonPath: .status.socketDir
+        - name: PID
+          type: integer
+          jsonPath: .status.runtime.pid
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

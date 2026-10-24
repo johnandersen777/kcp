@@ -18,6 +18,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path"
 	"strings"
@@ -69,6 +70,20 @@ func Prefixed(store *Store, prefix, resourcePrefix string, newFunc func() runtim
 	if !strings.HasPrefix(resourcePrefix, "/") {
 		return nil, fmt.Errorf("resourcePrefix needs to start from /")
 	}
+	if newFunc != nil {
+		keyPrefix := pathPrefix + strings.TrimPrefix(resourcePrefix, "/") + "/"
+		RegisterDecoder(keyPrefix, func(raw []byte) (runtime.Object, error) {
+			obj := newFunc()
+			if codec == nil {
+				if err := json.Unmarshal(raw, obj); err != nil {
+					return nil, err
+				}
+				return obj, nil
+			}
+			decoded, _, err := codec.Decode(raw, nil, obj)
+			return decoded, err
+		})
+	}
 	return &prefixedStore{
 		store:          store,
 		pathPrefix:     pathPrefix,
@@ -82,15 +97,31 @@ func Prefixed(store *Store, prefix, resourcePrefix string, newFunc func() runtim
 // structural-schema defaults the etcd3 store re-applies on decode are also
 // present for the in-memory backend. It returns obj unchanged when no codec is
 // configured (the simplified Fetch-only wasm server).
-func (p *prefixedStore) applyDefaults(obj runtime.Object) (runtime.Object, error) {
+func (p *prefixedStore) applyDefaults(obj runtime.Object) (out runtime.Object, err error) {
 	if p.codec == nil || obj == nil {
 		return obj, nil
 	}
+	// The CRD schema-coercing codec can panic when a dynamic object has no
+	// GVK (observed on server-side apply in the browser shard). Defaults are
+	// best-effort; never take the apiserver down for them.
+	defer func() {
+		if value := recover(); value != nil {
+			out, err = obj, nil
+		}
+	}()
 	data, err := runtime.Encode(p.codec, obj)
 	if err != nil {
 		return nil, fmt.Errorf("encoding %T: %w", obj, err)
 	}
-	decoded, _, err := p.codec.Decode(data, nil, obj)
+	// Decode into the type the caller requested. The store keeps one copy of
+	// each object (at the storage version), while informers watch a served
+	// version such as v1alpha1; decoding into the stored object's type would
+	// hand them a v1alpha2 object and the reflector drops the event.
+	target := obj
+	if p.newFunc != nil {
+		target = p.newFunc()
+	}
+	decoded, _, err := p.codec.Decode(data, nil, target)
 	if err != nil {
 		return nil, fmt.Errorf("decoding %T: %w", obj, err)
 	}

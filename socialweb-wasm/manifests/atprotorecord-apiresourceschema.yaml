@@ -1,0 +1,103 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-5.atprotorecords.socialweb.computer
+spec:
+  group: socialweb.computer
+  names:
+    kind: AtprotoRecord
+    listKind: AtprotoRecordList
+    plural: atprotorecords
+    singular: atprotorecord
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              repoRef:
+                type: object
+                properties:
+                  group:
+                    type: string
+                  kind:
+                    type: string
+                    maxLength: 63
+                  name:
+                    type: string
+                    maxLength: 253
+                  workspace:
+                    type: string
+                required:
+                  - kind
+                  - name
+              collection:
+                type: string
+              rkey:
+                type: string
+              record:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              onMissingReference:
+                type: string
+                enum:
+                  - Keep
+                  - Delete
+            required:
+              - collection
+              - rkey
+              - record
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                enum:
+                  - Pending
+                  - Applied
+                  - Failed
+              observedGeneration:
+                type: integer
+                format: int64
+              did:
+                type: string
+              uri:
+                type: string
+              cid:
+                type: string
+              message:
+                type: string
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Repo
+          type: string
+          jsonPath: .spec.repoRef.name
+        - name: Collection
+          type: string
+          jsonPath: .spec.collection
+        - name: Rkey
+          type: string
+          jsonPath: .spec.rkey
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

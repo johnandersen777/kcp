@@ -1,0 +1,9 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: events
+spec:
+  reference:
+    export:
+      path: root:socialweb-provider
+      name: events

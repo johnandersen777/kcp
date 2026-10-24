@@ -1,0 +1,21 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIExport
+metadata:
+  name: marketidentities
+spec:
+  resources:
+    - group: socialweb.computer
+      name: marketidentities
+      schema: v1alpha1-8.marketidentities.socialweb.computer
+      storage:
+        crd: {}
+    - group: socialweb.computer
+      name: atprotorecords
+      schema: v1alpha1-5.atprotorecords.socialweb.computer
+      storage:
+        crd: {}
+    - group: socialweb.computer
+      name: atprotorecordwatches
+      schema: v1alpha1-5.atprotorecordwatches.socialweb.computer
+      storage:
+        crd: {}

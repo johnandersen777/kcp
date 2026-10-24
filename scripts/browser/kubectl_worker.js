@@ -154,8 +154,10 @@ self.onmessage = (event) => {
     const body = response.bodyBase64
       ? base64ToBytes(response.bodyBase64)
       : new TextEncoder().encode(response.body ?? "");
+    // Fetch forbids a body on these statuses; kcp's discovery cache emits 304.
+    const nullBody = status === 204 || status === 304;
     entry.resolve(
-      new Response(body, {
+      new Response(nullBody ? null : body, {
         status,
         headers: response.headers ?? {},
       }),

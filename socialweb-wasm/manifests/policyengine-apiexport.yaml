@@ -1,0 +1,26 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIExport
+metadata:
+  name: policy
+spec:
+  resources:
+    - group: policy.socialweb.computer
+      name: policyengines
+      schema: v1alpha1-1.policyengines.policy.socialweb.computer
+      storage:
+        crd: {}
+    - group: policy.socialweb.computer
+      name: policyworkflows
+      schema: v1alpha1-2.policyworkflows.policy.socialweb.computer
+      storage:
+        crd: {}
+    - group: policy.socialweb.computer
+      name: policyworkflowruns
+      schema: v1alpha1-1.policyworkflowruns.policy.socialweb.computer
+      storage:
+        crd: {}
+    - group: policy.socialweb.computer
+      name: policytriggers
+      schema: v1alpha1-2.policytriggers.policy.socialweb.computer
+      storage:
+        crd: {}

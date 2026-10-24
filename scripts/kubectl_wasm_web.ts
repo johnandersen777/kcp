@@ -28,6 +28,13 @@ limitations under the License.
  *     --port=8090
  */
 
+import {
+  buildClientMetadata,
+  DEFAULT_SCOPE,
+  METADATA_PATH,
+  normalizeOrigin,
+} from "./serve-public.ts";
+
 const options = new Map<string, string>();
 for (const arg of Deno.args) {
   const match = arg.match(/^--([^=]+)=(.*)$/);
@@ -54,6 +61,7 @@ const wasmExecCliPath = Deno.realPathSync(
 );
 const hostname = options.get("host") ?? "127.0.0.1";
 const port = Number(options.get("port") ?? "8090");
+const origin = options.get("origin");
 const apiServer = options.get("api-server") ?? "http://kcp.local";
 const intervalMs = Number(options.get("interval") ?? "1500");
 const browserDir = new URL("./browser/", import.meta.url);
@@ -67,17 +75,59 @@ const assets = new Map<string, string>([
   ["/kubectl_worker.js", "kubectl_worker.js"],
   ["/cli_worker.js", "cli_worker.js"],
   ["/fs_shim.js", "fs_shim.js"],
+  ["/oauth-callback.html", "oauth-callback.html"],
+  ["/oauth.js", "oauth.js"],
+  ["/state_store.js", "state_store.js"],
 ]);
 
 const headers = {
   "cache-control": "no-cache",
+  "vary": "accept-encoding",
 };
+
+function acceptsGzip(request: Request): boolean {
+  return (request.headers.get("accept-encoding") ?? "").includes("gzip");
+}
+
+// Serve a build-time `<file>.gz` sibling when it is not older than the source.
+// The wasm modules are ~5x smaller compressed, which matters over a tunnel.
+async function gzipSibling(path: string): Promise<Deno.FileInfo | null> {
+  try {
+    const source = await Deno.stat(path);
+    const gz = await Deno.stat(`${path}.gz`);
+    if (source.mtime && gz.mtime && gz.mtime.getTime() >= source.mtime.getTime()) {
+      return gz;
+    }
+  } catch {
+    // No precompressed sibling; serve the plain file.
+  }
+  return null;
+}
 
 async function fileResponse(
   request: Request,
   path: string | URL,
   contentType: string,
 ): Promise<Response> {
+  if (typeof path === "string" && acceptsGzip(request)) {
+    const gz = await gzipSibling(path);
+    if (gz) {
+      const etag = `"${gz.size}-${gz.mtime?.getTime() ?? 0}-gz"`;
+      if (request.headers.get("if-none-match") === etag) {
+        return new Response(null, { status: 304, headers: { ...headers, etag } });
+      }
+      const file = await Deno.open(`${path}.gz`, { read: true });
+      return new Response(file.readable, {
+        headers: {
+          ...headers,
+          "content-type": contentType,
+          "content-length": String(gz.size),
+          "content-encoding": "gzip",
+          etag,
+        },
+      });
+    }
+  }
   const file = await Deno.open(path, { read: true });
   const stat = await file.stat();
   const etag = `"${stat.size}-${stat.mtime?.getTime() ?? 0}"`;
@@ -102,6 +152,27 @@ Deno.serve({ hostname, port }, async (request) => {
     return Response.json(
       { apiServer, intervalMs },
       { headers },
+    );
+  }
+
+  if (url.pathname === METADATA_PATH) {
+    const forwarded = request.headers.get("x-forwarded-proto");
+    const host = request.headers.get("host");
+    const derived = forwarded && host ? `${forwarded}://${host}` : url.origin;
+    const metadata = buildClientMetadata(
+      origin ? normalizeOrigin(origin) : derived,
+      DEFAULT_SCOPE,
+    );
+    return new Response(`${JSON.stringify(metadata, null, 2)}\n`, {
+      headers: { ...headers, "content-type": "application/json" },
+    });
+  }
+
+  if (url.pathname.startsWith("/oauth/callback/")) {
+    return await fileResponse(
+      request,
+      new URL("oauth-callback.html", browserDir),
+      "text/html; charset=utf-8",
     );
   }
 

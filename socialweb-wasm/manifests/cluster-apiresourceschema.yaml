@@ -1,0 +1,81 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-3.clusters.socialweb.computer
+spec:
+  group: socialweb.computer
+  names:
+    kind: Cluster
+    listKind: ClusterList
+    plural: clusters
+    singular: cluster
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              account:
+                type: string
+              running:
+                type: boolean
+            required:
+              - account
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                enum:
+                  - Initializing
+                  - Ready
+                  - Unavailable
+                  - Draining
+              URL:
+                type: string
+              instance:
+                type: string
+              front:
+                type: object
+                properties:
+                  address:
+                    type: string
+                  ready:
+                    type: boolean
+                  message:
+                    type: string
+                  heldPorts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        port:
+                          type: integer
+                          format: int32
+                        purpose:
+                          type: string
+                        holderRef:
+                          type: string
+                      required:
+                        - port
+              nodeExpiry:
+                type: integer
+                format: int64
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true

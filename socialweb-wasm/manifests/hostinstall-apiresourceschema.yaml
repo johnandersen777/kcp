@@ -1,0 +1,77 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-1.hostinstalls.socialweb.computer
+spec:
+  group: socialweb.computer
+  names:
+    kind: HostInstall
+    listKind: HostInstallList
+    plural: hostinstalls
+    singular: hostinstall
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              account:
+                type: string
+              version:
+                type: string
+              profile:
+                type: string
+            required:
+              - account
+              - version
+          status:
+            type: object
+            properties:
+              observedGeneration:
+                type: integer
+                format: int64
+              installedVersion:
+                type: string
+              steps:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    phase:
+                      type: string
+                    message:
+                      type: string
+                    at:
+                      type: string
+                  required:
+                    - name
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Account
+          type: string
+          jsonPath: .spec.account
+        - name: Version
+          type: string
+          jsonPath: .status.installedVersion
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

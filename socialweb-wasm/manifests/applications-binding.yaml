@@ -1,0 +1,9 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: applications
+spec:
+  reference:
+    export:
+      path: root:socialweb-provider
+      name: applications

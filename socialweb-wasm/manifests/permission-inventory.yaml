@@ -1,0 +1,199 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: socialweb-materialiser
+  namespace: kcp-system
+  labels:
+    app.kubernetes.io/part-of: socialweb-computer
+    socialweb.computer/role: materialiser
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: socialweb-cluster-provider
+  namespace: kcp-system
+  labels:
+    app.kubernetes.io/part-of: socialweb-computer
+    socialweb.computer/role: cluster-provider
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: socialweb-fleet
+  namespace: kcp-system
+  labels:
+    app.kubernetes.io/part-of: socialweb-computer
+    socialweb.computer/role: fleet
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: socialweb-lifecycle
+  namespace: kcp-system
+  labels:
+    app.kubernetes.io/part-of: socialweb-computer
+    socialweb.computer/role: lifecycle
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: socialweb-materialiser
+  labels:
+    socialweb.computer/role: materialiser
+rules:
+  - nonResourceURLs: ["/"]
+    verbs: ["access"]
+  - apiGroups: ["socialweb.computer"]
+    resources: ["clusters"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["socialweb.computer"]
+    resources: ["clusters/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["socialweb.computer"]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["socialweb.computer"]
+    resources: ["nodes/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["tenancy.kcp.io"]
+    resources: ["workspaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["core.kcp.io"]
+    resources: ["logicalclusters"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["core.kcp.io"]
+    resources: ["shards"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["", "events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: socialweb-cluster-provider
+  labels:
+    socialweb.computer/role: cluster-provider
+rules:
+  - nonResourceURLs: ["/"]
+    verbs: ["access"]
+  - apiGroups: ["socialweb.computer"]
+    resources: ["clusters", "clusters/status"]
+    verbs: ["*"]
+  - apiGroups: ["socialweb.computer"]
+    resources: ["nodes", "nodes/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["socialweb.computer"]
+    resources: ["nodeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["socialweb.computer"]
+    resources: ["clusterlinks", "clusterlinks/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "serviceaccounts/token"]
+    verbs: ["get", "list", "watch", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: socialweb-fleet
+  labels:
+    socialweb.computer/role: fleet
+rules:
+  - nonResourceURLs: ["/"]
+    verbs: ["access"]
+  - apiGroups: ["socialweb.computer"]
+    resources: ["nodes", "nodes/status"]
+    verbs: ["*"]
+  - apiGroups: ["apis.kcp.io"]
+    resources:
+      ["apiexports", "apibindings", "apiresourceschemas", "apiexportendpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: socialweb-lifecycle
+  labels:
+    socialweb.computer/role: lifecycle
+rules:
+  - nonResourceURLs: ["/"]
+    verbs: ["access"]
+  - apiGroups: ["tenancy.kcp.io"]
+    resources: ["workspaces"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["tenancy.kcp.io"]
+    resources: ["workspacetypes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["core.kcp.io"]
+    resources: ["logicalclusters"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["apis.kcp.io"]
+    resources: ["apibindings"]
+    verbs: ["create", "delete"]
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: socialweb-materialiser
+  labels:
+    socialweb.computer/role: materialiser
+subjects:
+  - kind: User
+    name: system:kcp:serviceaccount:{{.ProviderCluster}}:kcp-system:socialweb-materialiser
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: socialweb-materialiser
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: socialweb-cluster-provider
+  labels:
+    socialweb.computer/role: cluster-provider
+subjects:
+  - kind: User
+    name: system:kcp:serviceaccount:{{.ProviderCluster}}:kcp-system:socialweb-cluster-provider
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: socialweb-cluster-provider
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: socialweb-fleet
+  labels:
+    socialweb.computer/role: fleet
+subjects:
+  - kind: User
+    name: system:kcp:serviceaccount:{{.ProviderCluster}}:kcp-system:socialweb-fleet
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: socialweb-fleet
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: socialweb-lifecycle
+  labels:
+    socialweb.computer/role: lifecycle
+subjects:
+  - kind: User
+    name: system:kcp:serviceaccount:{{.ProviderCluster}}:kcp-system:socialweb-lifecycle
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: socialweb-lifecycle

@@ -1,0 +1,108 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-2.services.exposure.socialweb.computer
+spec:
+  group: exposure.socialweb.computer
+  names:
+    kind: Service
+    listKind: ServiceList
+    plural: services
+    singular: service
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              targetRef:
+                type: object
+                properties:
+                  group:
+                    type: string
+                  kind:
+                    type: string
+                    maxLength: 63
+                  name:
+                    type: string
+                    maxLength: 253
+                  workspace:
+                    type: string
+                required:
+                  - kind
+                  - name
+              protocol:
+                type: string
+                enum:
+                  - http
+                  - ws
+                  - tcp
+                  - ssh
+              handler:
+                type: string
+              auth:
+                type: object
+                properties:
+                  required:
+                    type: boolean
+                  allowedSubjects:
+                    type: array
+                    items:
+                      type: string
+              suspend:
+                type: boolean
+            required:
+              - targetRef
+              - protocol
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                enum:
+                  - Pending
+                  - Ready
+                  - Failed
+              ready:
+                type: boolean
+              endpoints:
+                type: array
+                items:
+                  type: string
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Protocol
+          type: string
+          jsonPath: .spec.protocol
+        - name: Target
+          type: string
+          jsonPath: .spec.targetRef.name
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Ready
+          type: boolean
+          jsonPath: .status.ready
+        - name: Suspend
+          type: boolean
+          jsonPath: .spec.suspend
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

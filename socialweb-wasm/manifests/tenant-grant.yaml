@@ -1,0 +1,50 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: socialweb-owner
+  labels:
+    app.kubernetes.io/part-of: socialweb-computer
+    socialweb.computer/role: owner
+subjects:
+  - kind: ServiceAccount
+    name: __SOCIALWEB_OWNER_SERVICE_ACCOUNT__
+    namespace: users
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: socialweb.computer:cluster-owners
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: socialweb-mint-identity
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["secrets"]
+        scope: Namespaced
+  matchConditions:
+    - name: only-in-users
+      expression: request.namespace == 'users'
+  validations:
+    - expression: >-
+        (request.userInfo.username == 'system:admin' && 'system:masters' in request.userInfo.groups)
+          || request.userInfo.username == '__SOCIALWEB_ESO_USER__'
+      message: "only the provisioning cluster-admin or the External Secrets controller that materialises its vault-backed Secrets may write Secrets in this namespace"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: socialweb-mint-identity
+spec:
+  policyName: socialweb-mint-identity
+  validationActions: ["Deny"]
+  matchResources: {}

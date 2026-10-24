@@ -30,18 +30,40 @@ case "${mode}" in
   native|js) ;;
   *) echo "KCP_PATCH_MODE must be 'native' or 'js', got '${mode}'" >&2; exit 1 ;;
 esac
-default_work="${TMPDIR:-/tmp}/kcp-patched-modules-${mode}"
+tmp_root="${TMPDIR:-/tmp}"
+tmp_root="${tmp_root%/}"
+default_work="${tmp_root}/kcp-patched-modules-${mode}"
 if [[ "${mode}" == "native" ]]; then
   # Shared with earlier manual builds so the Go build cache stays warm.
-  default_work="${TMPDIR:-/tmp}/kcp-mem-build"
+  default_work="${tmp_root}/kcp-mem-build"
 fi
 work="${1:-${default_work}}"
+work="${work%/}"
 modfile="${2:-${repo_root}/.go.memory.mod}"
 sumfile="${modfile%.mod}.sum"
 
 mkdir -p "${work}"
-cp "${repo_root}/go.mod" "${modfile}"
-cp "${repo_root}/go.sum" "${sumfile}"
+# KCP_SOURCE_MODFILE lets a nested module (the combined socialweb wasm main)
+# seed its own go.mod while reusing the patched-module replaces.
+source_modfile="${KCP_SOURCE_MODFILE:-${repo_root}/go.mod}"
+source_sumfile="${source_modfile%.mod}.sum"
+cp "${source_modfile}" "${modfile}"
+if [[ -f "${source_sumfile}" ]]; then
+  cp "${source_sumfile}" "${sumfile}"
+else
+  : > "${sumfile}"
+fi
+
+# A nested module's modfile may use paths relative to its own directory. The
+# kcp staging modules always live under the kcp repo root; normalize both
+# spellings to an absolute path so the modfile works from any directory.
+python3 - "${modfile}" "${repo_root}" <<'PY'
+import re, sys
+path, root = sys.argv[1:3]
+src = open(path).read()
+src = re.sub(r'=>\s+(?:\.\./|\./)staging/', f'=> {root}/staging/', src)
+open(path, 'w').write(src)
+PY
 
 set_replace() {
   local mod="$1" target="$2"
@@ -81,6 +103,8 @@ cp "${overlay}/apiserver/factory.go" \
 if [[ "${mode}" == "js" ]]; then
   cp "${overlay}/apiserver/serving_unix.go" \
     "${work}/apiserver/pkg/server/options/serving_unix.go"
+  cp "${overlay}/apiserver/serving_with_loopback.go" \
+    "${work}/apiserver/pkg/server/options/serving_with_loopback.go"
 fi
 
 if [[ "${mode}" == "js" ]]; then

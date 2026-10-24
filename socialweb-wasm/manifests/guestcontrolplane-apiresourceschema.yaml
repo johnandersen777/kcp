@@ -1,0 +1,402 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-7.guestcontrolplanes.socialweb.computer
+spec:
+  group: socialweb.computer
+  names:
+    kind: GuestControlPlane
+    listKind: GuestControlPlaneList
+    plural: guestcontrolplanes
+    singular: guestcontrolplane
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              suspend:
+                type: boolean
+              restartedAt:
+                type: string
+              restartPolicy:
+                type: string
+                enum:
+                  - Never
+                  - OnFailure
+                  - Always
+              stateDir:
+                type: string
+              network:
+                type: object
+                properties:
+                  plcDirectoryUrl:
+                    type: string
+                  ingressProxyHost:
+                    type: string
+                  qrOrigin:
+                    type: string
+                  caBundle:
+                    type: string
+                  hosts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        address:
+                          type: string
+                      required:
+                        - name
+                        - address
+                    x-kubernetes-list-type: map
+                    x-kubernetes-list-map-keys:
+                      - name
+                  comms:
+                    type: object
+                    properties:
+                      mode:
+                        type: string
+                        enum:
+                          - XRPC
+                          - Firehose
+                          - Both
+                      eventSourceRefs:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            group:
+                              type: string
+                            kind:
+                              type: string
+                              maxLength: 63
+                            name:
+                              type: string
+                              maxLength: 253
+                            workspace:
+                              type: string
+                          required:
+                            - kind
+                            - name
+                  ingress:
+                    type: object
+                    properties:
+                      provider:
+                        type: string
+                      ingressRef:
+                        type: object
+                        properties:
+                          group:
+                            type: string
+                          kind:
+                            type: string
+                            maxLength: 63
+                          name:
+                            type: string
+                            maxLength: 253
+                          workspace:
+                            type: string
+                        required:
+                          - kind
+                          - name
+                      publicHost:
+                        type: string
+                      xrpc:
+                        type: object
+                        properties:
+                          ingressProxyHost:
+                            type: string
+                          relayURL:
+                            type: string
+                          relayRef:
+                            type: object
+                            properties:
+                              group:
+                                type: string
+                              kind:
+                                type: string
+                                maxLength: 63
+                              name:
+                                type: string
+                                maxLength: 253
+                              workspace:
+                                type: string
+                            required:
+                              - kind
+                              - name
+                          identityRef:
+                            type: object
+                            properties:
+                              group:
+                                type: string
+                              kind:
+                                type: string
+                                maxLength: 63
+                              name:
+                                type: string
+                                maxLength: 253
+                              workspace:
+                                type: string
+                            required:
+                              - kind
+                              - name
+                      opentunnel:
+                        type: object
+                        properties:
+                          command:
+                            type: array
+                            items:
+                              type: string
+                          routeName:
+                            type: string
+                            maxLength: 63
+                            pattern: ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
+                          proxyProtocol:
+                            type: string
+                            enum:
+                              - v1
+                              - v2
+                          localHost:
+                            type: string
+                required:
+                  - plcDirectoryUrl
+                  - ingressProxyHost
+                  - qrOrigin
+              limits:
+                type: object
+                properties:
+                  cpuMillicores:
+                    type: integer
+                    format: int32
+                  memoryBytes:
+                    type: integer
+                    format: int64
+                  diskBytes:
+                    type: integer
+                    format: int64
+              tls:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                  hostnames:
+                    type: array
+                    items:
+                      type: string
+                  certRef:
+                    type: string
+                  caBundle:
+                    type: string
+                  caRef:
+                    type: object
+                    properties:
+                      group:
+                        type: string
+                      kind:
+                        type: string
+                        maxLength: 63
+                      name:
+                        type: string
+                        maxLength: 253
+                      workspace:
+                        type: string
+                    required:
+                      - kind
+                      - name
+              serviceAuth:
+                type: object
+                properties:
+                  issuer:
+                    type: string
+                  audience:
+                    type: array
+                    items:
+                      type: string
+                  hostname:
+                    type: string
+                  keyRef:
+                    type: string
+              identity:
+                type: object
+                properties:
+                  marketIdentityRef:
+                    type: object
+                    properties:
+                      group:
+                        type: string
+                      kind:
+                        type: string
+                        maxLength: 63
+                      name:
+                        type: string
+                        maxLength: 253
+                      workspace:
+                        type: string
+                    required:
+                      - kind
+                      - name
+                  did:
+                    type: string
+                  handle:
+                    type: string
+              pdsRef:
+                type: object
+                properties:
+                  group:
+                    type: string
+                  kind:
+                    type: string
+                    maxLength: 63
+                  name:
+                    type: string
+                    maxLength: 253
+                  workspace:
+                    type: string
+                required:
+                  - kind
+                  - name
+              vaultRef:
+                type: object
+                properties:
+                  group:
+                    type: string
+                  kind:
+                    type: string
+                    maxLength: 63
+                  name:
+                    type: string
+                    maxLength: 253
+                  workspace:
+                    type: string
+                required:
+                  - kind
+                  - name
+              hostnames:
+                type: array
+                items:
+                  type: string
+              storage:
+                type: object
+                properties:
+                  dataDir:
+                    type: string
+                  blobsDir:
+                    type: string
+                  certsDir:
+                    type: string
+              serve:
+                type: object
+                default: {}
+                properties:
+                  host:
+                    type: string
+                    default: 127.0.0.1
+                  port:
+                    type: integer
+                    format: int32
+                    minimum: 0
+                    maximum: 65535
+                  healthPath:
+                    type: string
+              hostKeyRef:
+                type: string
+              guestLoginMount:
+                type: string
+                default: sshsig
+                pattern: ^[a-z0-9][a-z0-9-]{0,62}$
+              role:
+                type: string
+                default: kcp
+              grantSyncSeconds:
+                type: integer
+                format: int32
+                default: 30
+                minimum: 1
+              issuerRetrySeconds:
+                type: integer
+                format: int32
+                default: 30
+                minimum: 1
+              hostKeyAttempts:
+                type: integer
+                format: int32
+                minimum: 1
+              relayEnabled:
+                type: boolean
+          status:
+            type: object
+            properties:
+              observedGeneration:
+                type: integer
+                format: int64
+              phase:
+                type: string
+                enum:
+                  - Pending
+                  - Starting
+                  - Running
+                  - Ready
+                  - Failed
+                  - Stopping
+                  - Suspended
+              ready:
+                type: boolean
+              endpoint:
+                type: string
+              endpoints:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    url:
+                      type: string
+                    address:
+                      type: string
+                    protocol:
+                      type: string
+                  required:
+                    - name
+              message:
+                type: string
+              restarts:
+                type: integer
+                format: int32
+              startedAt:
+                type: string
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+            required:
+              - ready
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Ready
+          type: boolean
+          jsonPath: .status.ready
+        - name: Endpoint
+          type: string
+          jsonPath: .status.endpoint
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

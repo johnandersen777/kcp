@@ -1,0 +1,11 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIExport
+metadata:
+  name: pds
+spec:
+  resources:
+    - group: pds.socialweb.computer
+      name: remotepds
+      schema: v1alpha1-3.remotepds.pds.socialweb.computer
+      storage:
+        crd: {}

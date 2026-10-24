@@ -46,6 +46,12 @@ limitations under the License.
  * RoundTripper or call-site changes are involved.
  */
 
+import {
+  buildClientMetadata,
+  DEFAULT_SCOPE,
+  METADATA_PATH,
+} from "./serve-public.ts";
+
 const options = new Map<string, string>();
 for (const arg of Deno.args) {
   const match = arg.match(/^--([^=]+)=(.*)$/);
@@ -58,6 +64,7 @@ for (const arg of Deno.args) {
 
 const hostname = options.get("host") ?? "127.0.0.1";
 const port = Number(options.get("port") ?? "18080");
+const socialwebOrigin = options.get("socialweb-origin") ?? `http://${hostname}:${port}`;
 const wasmPath = Deno.realPathSync(
   options.get("wasm") ?? "bin/wasm/kcp.wasm",
 );
@@ -139,6 +146,16 @@ worker.postMessage({
   execPath: wasmExecPath,
   execUrl: "file://" + encodeURI(wasmExecPath),
   initialState,
+  socialweb: {
+    origin: socialwebOrigin,
+    identityMode: options.get("identity-mode") ?? "oauthBrowser",
+    handle: options.get("handle") ?? "",
+    did: options.get("did") ?? "",
+    oauthClientId: `${socialwebOrigin}/oauth-client-metadata.json`,
+    oauthRedirectUri: `${socialwebOrigin}/oauth/callback/requester`,
+    forceApply: options.get("force-apply") === "true",
+    statusFeed: options.get("status-feed") !== "false",
+  },
 });
 
 let pendingSnapshot: string | null = null;
@@ -211,6 +228,31 @@ console.error(
 const server = Deno.serve({ hostname, port }, async (request) => {
   const url = new URL(request.url);
 
+  // The PDS fetches the client metadata document from the public origin, so it
+  // must not wait for kcp readiness and must use the tunnel origin when set.
+  if (url.pathname === METADATA_PATH) {
+    const metadata = buildClientMetadata(
+      request.headers.get("x-forwarded-proto") && request.headers.get("host")
+        ? `${request.headers.get("x-forwarded-proto")}://${request.headers.get("host")}`
+        : socialwebOrigin,
+      DEFAULT_SCOPE,
+    );
+    return new Response(`${JSON.stringify(metadata, null, 2)}\n`, {
+      headers: { "cache-control": "no-cache", "content-type": "application/json" },
+    });
+  }
+
+  // The OAuth popup only relays code/state/iss back to the opener. Keeping this
+  // static means sign-in works while the Requester component is still composing.
+  if (url.pathname.startsWith("/oauth/callback/")) {
+    const page = await Deno.readTextFile(
+      new URL("./browser/oauth-callback.html", import.meta.url),
+    );
+    return new Response(page, {
+      headers: { "cache-control": "no-cache", "content-type": "text/html; charset=utf-8" },
+    });
+  }
+
   if (!ready) {
     await Promise.race([readyPromise, new Promise((r) => setTimeout(r, 30_000))]);
     if (!ready) {
@@ -243,8 +285,9 @@ const server = Deno.serve({ hostname, port }, async (request) => {
     const responseBody = (response.bodyBase64
       ? decodeBase64(response.bodyBase64)
       : (response.body ?? "")) as unknown as BodyInit;
-    return new Response(responseBody, {
-      status: response.status ?? 500,
+    const status = response.status ?? 500;
+    return new Response(status === 204 || status === 304 ? null : responseBody, {
+      status,
       headers: response.headers ?? {},
     });
   } catch (err) {

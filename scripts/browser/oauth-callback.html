@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="referrer" content="no-referrer" />
+<title>socialweb sign-in</title>
+<style>
+  body {
+    margin: 0;
+    display: grid;
+    min-height: 100vh;
+    place-items: center;
+    background: #11151c;
+    color: #d5dbe5;
+    font: 15px/1.5 system-ui, sans-serif;
+  }
+  #status {
+    max-width: 24rem;
+    padding: 1.5rem;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<p id="status">Completing sign-in…</p>
+<script>
+  (() => {
+    const params = new URLSearchParams(location.search);
+    const status = document.getElementById("status");
+    const message = {
+      type: "socialweb-oauth-callback",
+      code: params.get("code"),
+      state: params.get("state"),
+      iss: params.get("iss"),
+      href: location.href,
+    };
+
+    // Bluesky's authorize page sends COOP, which severs window.opener. A
+    // BroadcastChannel is same-origin and survives that navigation.
+    try {
+      const channel = new BroadcastChannel("socialweb-oauth");
+      channel.postMessage(message);
+      channel.close();
+    } catch {
+      // Fall through to the opener relay when BroadcastChannel is missing.
+    }
+
+    if (window.opener) {
+      try {
+        // Same-origin only: targetOrigin drops the message for any other opener.
+        window.opener.postMessage(message, location.origin);
+      } catch {
+        // BroadcastChannel already carried the message.
+      }
+    }
+
+    status.textContent = "Returning to the app…";
+    setTimeout(() => window.close(), 500);
+  })();
+</script>
+</body>
+</html>

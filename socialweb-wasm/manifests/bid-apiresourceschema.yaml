@@ -1,0 +1,196 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-8.bids.socialweb.computer
+spec:
+  group: socialweb.computer
+  names:
+    kind: Bid
+    listKind: BidList
+    plural: bids
+    singular: bid
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              rfp:
+                type: object
+                properties:
+                  uri:
+                    type: string
+                  cid:
+                    type: string
+                required:
+                  - uri
+                  - cid
+              requester:
+                type: string
+              payloadNsid:
+                type: string
+              offer:
+                type: object
+                properties:
+                  kind:
+                    type: string
+                  cost:
+                    type: integer
+                    format: int64
+                required:
+                  - kind
+              provider:
+                type: string
+              policy:
+                type: object
+                properties:
+                  scope:
+                    type: string
+                  attached:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        uri:
+                          type: string
+                        cid:
+                          type: string
+                      required:
+                        - uri
+                        - cid
+                  verdict:
+                    type: string
+                required:
+                  - verdict
+              expiresAt:
+                type: string
+              ttlSecondsAfterFinished:
+                type: integer
+                format: int32
+                default: 86400
+                minimum: 0
+            required:
+              - rfp
+              - requester
+              - offer
+              - provider
+              - policy
+              - expiresAt
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                enum:
+                  - Deciding
+                  - Published
+                  - Won
+                  - Lost
+                  - Expired
+                  - Failed
+              message:
+                type: string
+              bid:
+                type: object
+                properties:
+                  uri:
+                    type: string
+                  cid:
+                    type: string
+                required:
+                  - uri
+                  - cid
+              accept:
+                type: object
+                properties:
+                  uri:
+                    type: string
+                  cid:
+                    type: string
+                required:
+                  - uri
+                  - cid
+              claimedBy:
+                type: string
+              computeVM:
+                type: string
+              timings:
+                type: object
+                properties:
+                  rfpSeenAt:
+                    type: string
+                  decidedAt:
+                    type: string
+                  publishedAt:
+                    type: string
+                  acceptedAt:
+                    type: string
+                  finishedAt:
+                    type: string
+              terminated:
+                type: object
+                properties:
+                  receiptUri:
+                    type: string
+                  receiptCid:
+                    type: string
+                  acceptAuthor:
+                    type: string
+                  reason:
+                    type: string
+                  at:
+                    type: string
+                  payloadUri:
+                    type: string
+                  payloadCid:
+                    type: string
+                  eventUri:
+                    type: string
+                  eventCid:
+                    type: string
+                required:
+                  - receiptUri
+                  - acceptAuthor
+                  - reason
+                  - at
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+              publishAttempts:
+                type: integer
+              lastError:
+                type: string
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Requester
+          type: string
+          jsonPath: .spec.requester
+        - name: Verdict
+          type: string
+          jsonPath: .spec.policy.verdict
+        - name: Published
+          type: string
+          jsonPath: .status.timings.publishedAt
+        - name: ComputeVM
+          type: string
+          jsonPath: .status.computeVM
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

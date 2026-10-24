@@ -31,6 +31,7 @@ type InitMessage = {
   execPath: string;
   execUrl: string;
   initialState?: string;
+  socialweb?: Record<string, unknown>;
 };
 
 type Pending = {
@@ -70,10 +71,33 @@ if (init.execUrl) {
   await import(pathToFileURL(init.execPath));
 }
 
+// Real kcp writes certs/keys/kubeconfigs. Give Go's syscall package a
+// synchronous filesystem before the runtime starts (Deno's real FS for reads,
+// an in-memory overlay for writes).
+const { installFsShim } = await import("./kubectl_wasm_fs.ts");
+const proc = (globalThis as Record<string, unknown>).process as {
+  cwd: () => string;
+  chdir: (path: string) => void;
+} | undefined;
+if (proc) {
+  try {
+    proc.cwd = () => "/";
+    proc.chdir = () => {};
+  } catch {
+    // absolute rootDir keeps the boot working without cwd.
+  }
+}
+installFsShim();
+
 // The Go side reads this before starting the controller, and calls
 // __kcpPersist after every mutation. Deno's main thread owns the file.
 (globalThis as Record<string, unknown>).__kcpInitialState =
   init.initialState ?? "";
+if (init.socialweb) {
+  (globalThis as Record<string, unknown>).__socialwebConfig = JSON.stringify(
+    init.socialweb,
+  );
+}
 (globalThis as Record<string, unknown>).__kcpPersist = (
   snapshot: string,
 ) => {
@@ -110,10 +134,10 @@ workerScope.onmessage = async (event: MessageEvent) => {
   });
 
   try {
-    const handle = (globalThis as Record<string, unknown>)
-      .kcpHandleRequest as
-        | ((requestJSON: string, callbackID: number) => void)
-        | undefined;
+    const globals = globalThis as Record<string, unknown>;
+    const handle = (globals.socialwebHandleRequest ?? globals.kcpHandleRequest) as
+      | ((requestJSON: string, callbackID: number) => void)
+      | undefined;
     if (!handle) throw new Error("kcpHandleRequest is not registered yet");
     handle(JSON.stringify(request), callbackID);
     const result = await response;
@@ -143,14 +167,24 @@ go.run(instance).catch((err) => {
 });
 
 // Wait until the Go program has registered its handler.
-for (let i = 0; i < 400; i++) {
+for (let i = 0; i < 7200; i++) {
   if (
     typeof (globalThis as Record<string, unknown>).kcpHandleRequest ===
       "function"
   ) {
     break;
   }
+  if ((globalThis as Record<string, unknown>).__kcpBootError) break;
+  if (i > 0 && i % 400 === 0) {
+    console.error(`kcp-wasm: waiting for real kcp readiness (${i / 40}s)`);
+  }
   await new Promise((r) => setTimeout(r, 25));
+}
+if ((globalThis as Record<string, unknown>).__kcpBootError) {
+  throw new Error(
+    "kcp-wasm boot failed: " +
+      String((globalThis as Record<string, unknown>).__kcpBootError),
+  );
 }
 if (
   typeof (globalThis as Record<string, unknown>).kcpHandleRequest !==

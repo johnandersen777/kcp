@@ -1,0 +1,44 @@
+apiVersion: tenancy.kcp.io/v1alpha1
+kind: WorkspaceType
+metadata:
+  name: dev-instances
+spec:
+  extend:
+    with:
+      - name: universal
+        path: root
+  defaultChildWorkspaceType:
+    name: dev-instance
+    path: root
+  limitAllowedChildren:
+    types:
+      - name: dev-instance
+        path: root
+---
+apiVersion: tenancy.kcp.io/v1alpha1
+kind: WorkspaceType
+metadata:
+  name: dev-instance
+spec:
+  extend:
+    with:
+      - name: universal
+        path: root
+  limitAllowedParents:
+    types:
+      - name: dev-instances
+        path: root
+  limitAllowedChildren:
+    none: true
+  defaultAPIBindings:
+    - export: hostprocesses
+      path: root:socialweb-provider
+---
+apiVersion: tenancy.kcp.io/v1alpha1
+kind: Workspace
+metadata:
+  name: dev
+spec:
+  type:
+    name: dev-instances
+    path: root

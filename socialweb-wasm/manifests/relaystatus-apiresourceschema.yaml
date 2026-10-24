@@ -1,0 +1,86 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-2.relaystatuses.socialweb.computer
+spec:
+  group: socialweb.computer
+  names:
+    kind: RelayStatus
+    listKind: RelayStatusList
+    plural: relaystatuses
+    singular: relaystatus
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              relayRef:
+                type: object
+                properties:
+                  group:
+                    type: string
+                  kind:
+                    type: string
+                    maxLength: 63
+                  name:
+                    type: string
+                    maxLength: 253
+                  workspace:
+                    type: string
+                required:
+                  - kind
+                  - name
+            required:
+              - relayRef
+          status:
+            type: object
+            properties:
+              observedGeneration:
+                type: integer
+                format: int64
+              phase:
+                type: string
+                enum:
+                  - Pending
+                  - Running
+                  - Failed
+              cursor:
+                type: integer
+                format: int64
+              lastEventAt:
+                type: string
+              events:
+                type: integer
+                format: int64
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Relay
+          type: string
+          jsonPath: .spec.relayRef.name
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Cursor
+          type: integer
+          jsonPath: .status.cursor
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

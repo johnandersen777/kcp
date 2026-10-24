@@ -1,0 +1,11 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIExport
+metadata:
+  name: atprotoidentities
+spec:
+  resources:
+    - group: socialweb.computer
+      name: atprotoidentities
+      schema: v1alpha1-2.atprotoidentities.socialweb.computer
+      storage:
+        crd: {}

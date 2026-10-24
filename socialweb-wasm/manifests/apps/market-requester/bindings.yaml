@@ -1,0 +1,19 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: computecontracts
+spec:
+  reference:
+    export:
+      path: root:socialweb-provider
+      name: computecontracts
+---
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: marketidentities
+spec:
+  reference:
+    export:
+      path: root:socialweb-provider
+      name: marketidentities

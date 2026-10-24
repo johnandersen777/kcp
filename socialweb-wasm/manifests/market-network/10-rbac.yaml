@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: deno-runner
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: deno-runner-read-pods
+rules:
+  - apiGroups: ["socialweb.computer"]
+    resources: ["openbaoservers"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: deno-runner-read-pods
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: deno-runner-read-pods
+subjects:
+  - kind: ServiceAccount
+    name: deno-runner
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pds-components
+rules:
+  - nonResourceURLs: ["/"]
+    verbs: ["access"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pds-components
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pds-components
+subjects:
+  - kind: User
+    name: "system:kcp:serviceaccount:{{.BaseCluster}}:default:pds"

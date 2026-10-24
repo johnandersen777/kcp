@@ -1,0 +1,31 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIExport
+metadata:
+  name: events
+spec:
+  resources:
+    - group: events.socialweb.computer
+      name: eventstreams
+      schema: v1alpha1-4.eventstreams.events.socialweb.computer
+      storage:
+        crd: {}
+    - group: events.socialweb.computer
+      name: eventsources
+      schema: v1alpha1-1.eventsources.events.socialweb.computer
+      storage:
+        crd: {}
+    - group: events.socialweb.computer
+      name: pdseventsources
+      schema: v1alpha1-1.pdseventsources.events.socialweb.computer
+      storage:
+        crd: {}
+    - group: events.socialweb.computer
+      name: relayeventsources
+      schema: v1alpha1-1.relayeventsources.events.socialweb.computer
+      storage:
+        crd: {}
+    - group: events.socialweb.computer
+      name: jetstreameventsources
+      schema: v1alpha1-1.jetstreameventsources.events.socialweb.computer
+      storage:
+        crd: {}

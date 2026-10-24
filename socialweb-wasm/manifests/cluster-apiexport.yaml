@@ -1,0 +1,31 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIExport
+metadata:
+  name: clusters
+spec:
+  resources:
+    - group: socialweb.computer
+      name: clusters
+      schema: v1alpha1-3.clusters.socialweb.computer
+      storage:
+        crd: {}
+    - group: socialweb.computer
+      name: nodes
+      schema: v1alpha1-2.nodes.socialweb.computer
+      storage:
+        crd: {}
+    - group: socialweb.computer
+      name: nodeclaims
+      schema: v1alpha1-8.nodeclaims.socialweb.computer
+      storage:
+        crd: {}
+    - group: socialweb.computer
+      name: clusterlinks
+      schema: v1alpha1-2.clusterlinks.socialweb.computer
+      storage:
+        crd: {}
+    - group: socialweb.computer
+      name: clusterclientcertificates
+      schema: v1alpha1-2.clusterclientcertificates.socialweb.computer
+      storage:
+        crd: {}

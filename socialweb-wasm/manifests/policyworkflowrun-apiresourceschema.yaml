@@ -1,0 +1,191 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-1.policyworkflowruns.policy.socialweb.computer
+spec:
+  group: policy.socialweb.computer
+  names:
+    kind: PolicyWorkflowRun
+    listKind: PolicyWorkflowRunList
+    plural: policyworkflowruns
+    singular: policyworkflowrun
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              engineRef:
+                type: string
+              workflowRef:
+                type: string
+              workflow:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              inputs:
+                type: object
+                additionalProperties:
+                  type: string
+              args:
+                type: object
+                additionalProperties:
+                  type: string
+              perspective:
+                type: string
+              selfDid:
+                type: string
+              subjectDid:
+                type: string
+              counterpartyDid:
+                type: string
+              rootRequesterDid:
+                type: string
+              rfp:
+                type: object
+                properties:
+                  uri:
+                    type: string
+                  cid:
+                    type: string
+                required:
+                  - uri
+                  - cid
+              bid:
+                type: object
+                properties:
+                  uri:
+                    type: string
+                  cid:
+                    type: string
+                required:
+                  - uri
+                  - cid
+              accept:
+                type: object
+                properties:
+                  uri:
+                    type: string
+                  cid:
+                    type: string
+                required:
+                  - uri
+                  - cid
+              cache:
+                type: object
+                additionalProperties:
+                  type: object
+                  additionalProperties:
+                    type: object
+                    properties:
+                      data:
+                        type: string
+                      encoding:
+                        type: string
+                        enum:
+                          - text
+                          - base64
+                    required:
+                      - data
+                      - encoding
+              suspend:
+                type: boolean
+              cancel:
+                type: boolean
+              activeDeadlineSeconds:
+                type: integer
+                format: int64
+              ttlSecondsAfterFinished:
+                type: integer
+                format: int64
+            required:
+              - engineRef
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                enum:
+                  - Pending
+                  - Running
+                  - Succeeded
+                  - Failed
+                  - Cancelled
+              runID:
+                type: string
+              exitStatus:
+                type: string
+                enum:
+                  - success
+                  - failure
+              outputs:
+                type: object
+                additionalProperties:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+              cache:
+                type: object
+                additionalProperties:
+                  type: object
+                  additionalProperties:
+                    type: object
+                    properties:
+                      data:
+                        type: string
+                      encoding:
+                        type: string
+                        enum:
+                          - text
+                          - base64
+                    required:
+                      - data
+                      - encoding
+              consoleOutput:
+                type: string
+              annotations:
+                type: object
+                additionalProperties:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+              restarts:
+                type: integer
+                format: int32
+              startTime:
+                type: string
+                format: date-time
+              completionTime:
+                type: string
+                format: date-time
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Engine
+          type: string
+          jsonPath: .spec.engineRef
+        - name: Exit
+          type: string
+          jsonPath: .status.exitStatus
+        - name: Restarts
+          type: integer
+          jsonPath: .status.restarts
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

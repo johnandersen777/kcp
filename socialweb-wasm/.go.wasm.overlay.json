@@ -1,0 +1,10 @@
+{
+  "Replace": {
+    "/tmp/linux-kcp-mirror/internal/hostos/lock_js.go": "/Users/johnandersen777/src/kcp/wasm/socialweb-wasm/overlays/hostos/lock_js.go",
+    "/tmp/linux-kcp-mirror/internal/hostos/proc_js.go": "/Users/johnandersen777/src/kcp/wasm/socialweb-wasm/overlays/hostos/proc_js.go",
+    "/tmp/linux-kcp-mirror/internal/portscan/scan_js.go": "/Users/johnandersen777/src/kcp/wasm/socialweb-wasm/overlays/portscan/scan_js.go",
+    "/tmp/linux-kcp-mirror/internal/atproto/repo/sqlite.go": "/Users/johnandersen777/src/kcp/wasm/socialweb-wasm/overlays/atproto/repo_sqlite.go",
+    "/tmp/linux-kcp-mirror/internal/atproto/pds/store.go": "/Users/johnandersen777/src/kcp/wasm/socialweb-wasm/overlays/atproto/pds_store.go",
+    "/tmp/linux-kcp-mirror/internal/app/compose/compose.go": "/Users/johnandersen777/src/kcp/wasm/socialweb-wasm/overlays/compose/compose.go"
+  }
+}

@@ -17,14 +17,19 @@
 set -euo pipefail
 
 # Builds ./public, the static browser demo that scripts/kubectl_wasm_web.ts
-# serves: the page, worker scripts, WASM modules and wasm_exec scripts. Serve
-# the directory with any static file server, for example:
+# serves: the page, worker scripts, WASM modules, wasm_exec scripts and the
+# socialweb OAuth popup shell. Serve the directory with:
+#
+#   deno run --allow-read --allow-net scripts/serve-public.ts --dir=public
+#
+# or with any static file server, for example:
 #
 #   python3 -m http.server -d public 8090
 #
-# /config is written as a static JSON file. The Deno server's dynamic /echo
-# and /demo.yaml routes are not part of the bundle; the page does not request
-# them at runtime.
+# /config is written as a static JSON file. serve-public.ts also generates it
+# when missing and serves /oauth-client-metadata.json from the request Host
+# header; the Deno server's dynamic /echo and /demo.yaml routes are not part of
+# the bundle.
 #
 # Usage: scripts/build-kubectl-wasm-web-public.sh [outdir] [artifacts]
 #   outdir     default: <repo>/public
@@ -47,6 +52,9 @@ assets=(
   kubectl_worker.js
   cli_worker.js
   fs_shim.js
+  oauth-callback.html
+  oauth.js
+  state_store.js
 )
 modules=(
   kcp.wasm

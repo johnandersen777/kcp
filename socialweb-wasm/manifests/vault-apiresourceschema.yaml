@@ -1,0 +1,87 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-1.vaults.socialweb.computer
+spec:
+  group: socialweb.computer
+  names:
+    kind: Vault
+    listKind: VaultList
+    plural: vaults
+    singular: vault
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              backendRef:
+                type: object
+                properties:
+                  group:
+                    type: string
+                  kind:
+                    type: string
+                    maxLength: 63
+                  name:
+                    type: string
+                    maxLength: 253
+                  workspace:
+                    type: string
+                required:
+                  - kind
+                  - name
+            required:
+              - backendRef
+          status:
+            type: object
+            properties:
+              observedGeneration:
+                type: integer
+                format: int64
+              address:
+                type: string
+              ready:
+                type: boolean
+              initialized:
+                type: boolean
+              sealed:
+                type: boolean
+              caBundle:
+                type: string
+              version:
+                type: string
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Backend
+          type: string
+          jsonPath: .spec.backendRef.kind
+        - name: Address
+          type: string
+          jsonPath: .status.address
+        - name: Ready
+          type: boolean
+          jsonPath: .status.ready
+        - name: Sealed
+          type: boolean
+          jsonPath: .status.sealed
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

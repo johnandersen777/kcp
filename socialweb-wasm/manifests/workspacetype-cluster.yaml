@@ -1,0 +1,14 @@
+apiVersion: tenancy.kcp.io/v1alpha1
+kind: WorkspaceType
+metadata:
+  name: cluster
+spec:
+  extend:
+    with:
+      - name: universal
+        path: root
+
+  defaultAPIBindings:
+    - export: clusters
+      path: root:socialweb-provider
+

@@ -1,0 +1,94 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-2.policyworkflows.policy.socialweb.computer
+spec:
+  group: policy.socialweb.computer
+  names:
+    kind: PolicyWorkflow
+    listKind: PolicyWorkflowList
+    plural: policyworkflows
+    singular: policyworkflow
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              engineRef:
+                type: string
+              workflow:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              recordRef:
+                type: object
+                properties:
+                  uri:
+                    type: string
+                  cid:
+                    type: string
+                required:
+                  - uri
+                  - cid
+              defaultInputs:
+                type: object
+                additionalProperties:
+                  type: string
+              defaultArgs:
+                type: object
+                additionalProperties:
+                  type: string
+              defaultPerspective:
+                type: string
+              defaultSelfDid:
+                type: string
+              timeoutSeconds:
+                type: integer
+                format: int64
+              ttlSecondsAfterFinished:
+                type: integer
+                format: int64
+            required:
+              - engineRef
+              - workflow
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                enum:
+                  - Pending
+                  - Ready
+                  - Invalid
+                  - Failed
+              observedGeneration:
+                type: integer
+                format: int64
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Engine
+          type: string
+          jsonPath: .spec.engineRef
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

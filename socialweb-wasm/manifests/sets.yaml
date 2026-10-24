@@ -1,0 +1,560 @@
+sets:
+  - name: provider
+    scope: kcp
+    summary: the socialweb provider workspace, its cluster, identity, contract and ComputeVM schemas and exports, the policy schema files and export, the policy binding in root, and the account, cluster and application WorkspaceTypes (was install-provider.sh)
+    values: None
+    phases:
+      - name: workspace
+        workspace: root
+        files:
+          - path: workspace-socialweb-provider.yaml
+        after:
+          - kind: Workspace
+            for: Ready
+      - name: schemas
+        workspace: root:socialweb-provider
+        files:
+          - path: cluster-apiresourceschema.yaml
+          - path: node-apiresourceschema.yaml
+          - path: nodeclaim-apiresourceschema.yaml
+          - path: clusterlink-apiresourceschema.yaml
+          - path: clusterclientcertificate-apiresourceschema.yaml
+          - path: atprotoidentity-apiresourceschema.yaml
+          - path: cluster-apiexport.yaml
+          - path: atprotoidentity-apiexport.yaml
+          - path: service-apiresourceschema.yaml
+          - path: exposure-apiresourceschema.yaml
+          - path: componentlink-apiresourceschema.yaml
+          - path: service-apiexport.yaml
+          - path: remotepds-apiresourceschema.yaml
+          - path: remotepds-apiexport.yaml
+          - path: eventstream-apiresourceschema.yaml
+          - path: eventsource-apiresourceschema.yaml
+          - path: pdseventsource-apiresourceschema.yaml
+          - path: relayeventsource-apiresourceschema.yaml
+          - path: jetstreameventsource-apiresourceschema.yaml
+          - path: eventstream-apiexport.yaml
+          - path: marketidentity-apiresourceschema.yaml
+          - path: atprotorecord-apiresourceschema.yaml
+          - path: atprotorecordwatch-apiresourceschema.yaml
+          - path: marketidentity-apiexport.yaml
+          - path: computecontract-apiresourceschema.yaml
+          - path: computecontract-apiexport.yaml
+          - path: computevm-apiresourceschema.yaml
+          - path: firecrackervm-apiresourceschema.yaml
+          - path: bid-apiresourceschema.yaml
+          - path: guestidentitygrant-apiresourceschema.yaml
+          - path: computevm-apiexport.yaml
+      - name: policy
+        workspace: root:socialweb-provider
+        files:
+          - path: policyengine-apiresourceschema.yaml
+          - path: policyworkflow-apiresourceschema.yaml
+          - path: policyworkflowrun-apiresourceschema.yaml
+          - path: policytrigger-apiresourceschema.yaml
+          - path: policyengine-apiexport.yaml
+        after:
+          - kind: APIExport
+            name: policy
+            for: IdentityValid
+      - name: bindings
+        workspace: root
+        files:
+          - path: policy-binding.yaml
+          - path: exposures-binding.yaml
+          - path: pds-binding.yaml
+          - path: events-binding.yaml
+        after:
+          - kind: APIBinding
+            for: Ready
+      - name: workspacetypes
+        workspace: root
+        files:
+          - path: workspacetype-account.yaml
+          - path: workspacetype-cluster.yaml
+          - path: workspacetype-application.yaml
+        after:
+          - kind: APIExport
+            name: clusters
+            workspace: root:socialweb-provider
+            for: IdentityValid
+          - kind: APIExport
+            name: atprotoidentities
+            workspace: root:socialweb-provider
+            for: IdentityValid
+          - kind: APIExport
+            name: policy
+            workspace: root:socialweb-provider
+            for: IdentityValid
+          - kind: APIExport
+            name: exposures
+            workspace: root:socialweb-provider
+            for: IdentityValid
+          - kind: APIExport
+            name: pds
+            workspace: root:socialweb-provider
+            for: IdentityValid
+          - kind: APIExport
+            name: events
+            workspace: root:socialweb-provider
+            for: IdentityValid
+          - kind: APIExport
+            name: computevms
+            workspace: root:socialweb-provider
+            for: IdentityValid
+  - name: permission-inventory
+    scope: kcp
+    summary: the four provider ServiceAccounts, then their ClusterRoles and bindings named to the live provider cluster (was apply-permission-inventory.sh)
+    values: PermissionInventory
+    phases:
+      - name: provider-cluster
+        workspace: root
+        before:
+          - kind: Workspace
+            name: socialweb-provider
+            for: Ready
+            capture:
+              into: ProviderCluster
+              from: LogicalCluster
+      - name: subjects
+        workspace: root:socialweb-provider
+        files:
+          - path: permission-inventory.yaml
+            kinds: [ServiceAccount]
+      - name: grants
+        workspace: root:socialweb-provider
+        files:
+          - path: permission-inventory.yaml
+            exceptKinds: [ServiceAccount]
+  - name: bidder
+    summary: the ComputeVM, Bid and GuestIdentityGrant schemas and their export (computevms) beside the provider's, the bidder WorkspaceType binding computevms and hostprocesses (plan 0007 M1-API), and the computevms binding in root that the ComputeVM controller of a bidder application instance applies with it (plan 0007 M2-CONTROLLER); needs the provider workspace and the hostprocesses set
+    values: None
+    phases:
+      - name: schemas
+        workspace: root:socialweb-provider
+        files:
+          - path: computevm-apiresourceschema.yaml
+          - path: firecrackervm-apiresourceschema.yaml
+          - path: bid-apiresourceschema.yaml
+          - path: guestidentitygrant-apiresourceschema.yaml
+          - path: computevm-apiexport.yaml
+        after:
+          - kind: APIExport
+            name: computevms
+            for: IdentityValid
+          - kind: APIExport
+            name: hostprocesses
+            for: IdentityValid
+      - name: workspacetypes
+        workspace: root
+        files:
+          - path: workspacetype-bidder.yaml
+      - name: bindings
+        workspace: root
+        files:
+          - path: computevms-binding.yaml
+        after:
+          - kind: APIBinding
+            for: Ready
+  - name: hostprocesses
+    summary: the HostProcess, Postgres and OpenBaoServer schemas and their export in the provider workspace and its binding in root, applied by every core so the application's own kcp holds its host processes, the bootstrap mirrors, its postgres servers and its OpenBao servers (plan 0006 M2-HOSTPROCESS-KIND, M2-POSTGRES, M2-OPENBAO-SERVER); needs the provider workspace
+    values: None
+    phases:
+      - name: schemas
+        workspace: root:socialweb-provider
+        files:
+          - path: hostprocess-apiresourceschema.yaml
+          - path: postgres-apiresourceschema.yaml
+          - path: openbaoserver-apiresourceschema.yaml
+          - path: remoteopenbao-apiresourceschema.yaml
+          - path: vault-apiresourceschema.yaml
+          - path: hostprocess-apiexport.yaml
+        after:
+          - kind: APIExport
+            name: hostprocesses
+            for: IdentityValid
+      - name: bindings
+        workspace: root
+        files:
+          - path: hostprocesses-binding.yaml
+        after:
+          - kind: APIBinding
+            for: Ready
+  - name: dev-host
+    scope: kcp
+    summary: the dev-instances and dev-instance WorkspaceTypes and the root:dev workspace of a dev host, whose root:dev:<instance> workspaces hold each child instance's HostProcess objects (plan 0006 M4-DEV-PARENT-KCP); needs the hostprocesses set
+    values: None
+    phases:
+      - name: workspacetypes
+        workspace: root
+        before:
+          - kind: APIExport
+            name: hostprocesses
+            workspace: root:socialweb-provider
+            for: IdentityValid
+        files:
+          - path: workspacetype-dev-instance.yaml
+            kinds: [WorkspaceType]
+      - name: workspace
+        workspace: root
+        files:
+          - path: workspacetype-dev-instance.yaml
+            kinds: [Workspace]
+        after:
+          - kind: Workspace
+            name: dev
+            for: Ready
+  - name: market-identity
+    summary: the MarketIdentity schema and export in an application's own workspace (plan 0007 M1-MARKET-IDENTITY)
+    values: MarketIdentity
+    phases:
+      - name: schemas
+        workspace: "{{.Workspace}}"
+        files:
+          - path: marketidentity-apiresourceschema.yaml
+          - path: atprotorecord-apiresourceschema.yaml
+          - path: atprotorecordwatch-apiresourceschema.yaml
+          - path: marketidentity-apiexport.yaml
+        after:
+          - kind: APIExport
+            name: marketidentities
+            for: IdentityValid
+  - name: applications
+    summary: the MarketNetwork, MarketBidder, MarketRequester, Gateway and SshGateway and component schemas and their export in the provider workspace and its binding in root, applied by every core so each application's root object and components live in its own kcp (plan 0006 M2-APP-CONTROLLER); needs the provider workspace
+    values: None
+    phases:
+      - name: schemas
+        workspace: root:socialweb-provider
+        files:
+          - path: marketnetwork-apiresourceschema.yaml
+          - path: marketbidder-apiresourceschema.yaml
+          - path: marketrequester-apiresourceschema.yaml
+          - path: gateway-apiresourceschema.yaml
+          - path: sshgateway-apiresourceschema.yaml
+          - path: bidder-apiresourceschema.yaml
+          - path: guestcontrolplane-apiresourceschema.yaml
+          - path: pds-apiresourceschema.yaml
+          - path: requester-apiresourceschema.yaml
+          - path: gatewayapi-apiresourceschema.yaml
+          - path: sshserver-apiresourceschema.yaml
+          - path: plc-apiresourceschema.yaml
+          - path: relay-apiresourceschema.yaml
+          - path: ingressproxy-apiresourceschema.yaml
+          - path: dispatchertls-apiresourceschema.yaml
+          - path: marketpresence-apiresourceschema.yaml
+          - path: kcpinstallation-apiresourceschema.yaml
+          - path: hostinstall-apiresourceschema.yaml
+          - path: hostrelease-apiresourceschema.yaml
+          - path: childapplication-apiresourceschema.yaml
+          - path: atprotorepo-apiresourceschema.yaml
+          - path: localrepo-apiresourceschema.yaml
+          - path: remoterepo-apiresourceschema.yaml
+          - path: pdsaccount-apiresourceschema.yaml
+          - path: atprotosession-apiresourceschema.yaml
+          - path: plcidentity-apiresourceschema.yaml
+          - path: portlease-apiresourceschema.yaml
+          - path: subnetlease-apiresourceschema.yaml
+          - path: clusterroll-apiresourceschema.yaml
+          - path: relaystatus-apiresourceschema.yaml
+          - path: vaultcredential-apiresourceschema.yaml
+          - path: vaultcertificate-apiresourceschema.yaml
+          - path: statesync-apiresourceschema.yaml
+          - path: marketnetwork-apiexport.yaml
+        after:
+          - kind: APIExport
+            name: applications
+            for: IdentityValid
+      - name: bindings
+        workspace: root
+        files:
+          - path: applications-binding.yaml
+          - path: policy-binding.yaml
+          - path: exposures-binding.yaml
+          - path: pds-binding.yaml
+          - path: events-binding.yaml
+        after:
+          - kind: APIBinding
+            for: Ready
+  - name: market-bidder
+    summary: the components of a MarketBidder application in its own kcp - the MarketIdentity schema bound in root (the bidder signs in through its MarketIdentity bidder in every profile), its own OpenBaoServer and the account that reads it in root, the root:app workspace and, per profile (prod-qr, market-network, dev-local), the bidder's own PDS pds (its repo, its AtprotoRecord objects, the association; deploy/apps/repo-pds, shared with any application that owns a PDS; plan 0018), the bidder and its guest-kcp (the provider relay, OIDC issuer, /v1/on-network and /v1/host-keys; plan 0007 M5-BIDDER-COMPONENTS) (a phase named <component>@<profile> belongs to that profile only); applied by internal/appctl (plan 0007 M5-RUN-BIDDER)
+    values: MarketBidder
+    phases:
+      - name: identity-schemas
+        workspace: root:socialweb-provider
+        files:
+          - path: marketidentity-apiresourceschema.yaml
+          - path: atprotorecord-apiresourceschema.yaml
+          - path: atprotorecordwatch-apiresourceschema.yaml
+          - path: marketidentity-apiexport.yaml
+        after:
+          - kind: APIExport
+            name: marketidentities
+            for: IdentityValid
+      - name: identity-binding
+        workspace: root
+        files:
+          - path: apps/gateway/marketidentities-binding.yaml
+        after:
+          - kind: APIBinding
+            for: Ready
+      - name: vault
+        workspace: root
+        files:
+          - path: apps/market-bidder/vault.yaml
+        after:
+          - kind: OpenBaoServer
+            name: bidder
+            for: Ready
+      - name: pds-rbac
+        workspace: root
+        files:
+          - path: apps/repo-pds/rbac.yaml
+      - name: workspace
+        workspace: root
+        files:
+          - path: apps/workspace-app.yaml
+        after:
+          - kind: Workspace
+            for: Ready
+      - name: rbac
+        workspace: root:app
+        before:
+          - kind: APIBinding
+            for: Ready
+        files:
+          - path: market-network/10-rbac.yaml
+          - path: apps/repo-pds/components-rbac.yaml
+      - name: association-watch@market-network
+        workspace: root
+        files:
+          - path: apps/repo-pds/association-watch.market-network.yaml
+      - name: association-watch@prod-qr
+        workspace: root
+        files:
+          - path: apps/repo-pds/association-watch.prod.yaml
+      - name: association-watch@dev-local
+        workspace: root
+        files:
+          - path: apps/repo-pds/association-watch.market-network.yaml
+  - name: gateway
+    summary: the components of a Gateway application in its own kcp - the root:app workspace, the MarketIdentity schema bound there (one MarketIdentity per web app account) and, per profile, the socialweb-computer-k8s web app, the requester's own PDS pds (deploy/apps/repo-pds; its repo holds every market record the requester writes, associated once by the operator's claim record that its AtprotoRecordWatch association verifies; plan 0018) and the requester (a phase named <component>@<profile> belongs to that profile only); its root vault is the OpenBaoServer root-vault the app controller declares; applied by internal/appctl
+    values: Gateway
+    phases:
+      - name: computevms
+        workspace: root:socialweb-provider
+        files:
+          - path: computevm-apiresourceschema.yaml
+          - path: firecrackervm-apiresourceschema.yaml
+          - path: bid-apiresourceschema.yaml
+          - path: guestidentitygrant-apiresourceschema.yaml
+          - path: computevm-apiexport.yaml
+        after:
+          - kind: APIExport
+            name: computevms
+            for: IdentityValid
+      - name: computevms-binding
+        workspace: root
+        files:
+          - path: computevms-binding.yaml
+        after:
+          - kind: APIBinding
+            for: Ready
+      - name: workspace
+        workspace: root
+        files:
+          - path: apps/workspace-app.yaml
+        after:
+          - kind: Workspace
+            for: Ready
+      - name: rbac
+        workspace: root:app
+        before:
+          - kind: APIBinding
+            for: Ready
+        files:
+          - path: apps/gateway/web-app-rbac.yaml
+          - path: apps/gateway/requester-rbac.yaml
+          - path: apps/repo-pds/rbac.yaml
+      - name: identity-schemas
+        workspace: root:socialweb-provider
+        files:
+          - path: marketidentity-apiresourceschema.yaml
+          - path: atprotorecord-apiresourceschema.yaml
+          - path: atprotorecordwatch-apiresourceschema.yaml
+          - path: marketidentity-apiexport.yaml
+          - path: computecontract-apiresourceschema.yaml
+          - path: computecontract-apiexport.yaml
+        after:
+          - kind: APIExport
+            name: marketidentities
+            for: IdentityValid
+          - kind: APIExport
+            name: computecontracts
+            for: IdentityValid
+      - name: identity-binding
+        workspace: root
+        files:
+          - path: apps/gateway/marketidentities-binding.yaml
+          - path: apps/gateway/computecontracts-binding.yaml
+        after:
+          - kind: APIBinding
+            for: Ready
+      - name: association-watch@prod
+        workspace: root:app
+        files:
+          - path: apps/repo-pds/association-watch.prod.yaml
+      - name: association-watch@market-network
+        workspace: root:app
+        files:
+          - path: apps/repo-pds/association-watch.market-network.yaml
+  - name: market-requester
+    summary: the components of a MarketRequester application (one `run request` invocation) in its own kcp - the ComputeContract and MarketIdentity schemas bound in root, its own OpenBaoServer and the account the requester reads its objects with, the root:app workspace and, per profile, the requester; applied by internal/appctl (plan 0008 M4-RUN-REQUEST)
+    values: MarketRequester
+    phases:
+      - name: schemas
+        workspace: root:socialweb-provider
+        files:
+          - path: computecontract-apiresourceschema.yaml
+          - path: computecontract-apiexport.yaml
+          - path: marketidentity-apiresourceschema.yaml
+          - path: atprotorecord-apiresourceschema.yaml
+          - path: atprotorecordwatch-apiresourceschema.yaml
+          - path: marketidentity-apiexport.yaml
+        after:
+          - kind: APIExport
+            name: computecontracts
+            for: IdentityValid
+          - kind: APIExport
+            name: marketidentities
+            for: IdentityValid
+      - name: bindings
+        workspace: root
+        files:
+          - path: apps/market-requester/bindings.yaml
+        after:
+          - kind: APIBinding
+            for: Ready
+      - name: vault
+        workspace: root
+        files:
+          - path: apps/market-requester/vault.yaml
+        after:
+          - kind: OpenBaoServer
+            name: requester
+            for: Ready
+      - name: workspace
+        workspace: root
+        files:
+          - path: apps/workspace-app.yaml
+        after:
+          - kind: Workspace
+            for: Ready
+      - name: rbac
+        workspace: root:app
+        before:
+          - kind: APIBinding
+            for: Ready
+        files:
+          - path: market-network/10-rbac.yaml
+  - name: ssh-gateway
+    summary: the components of an SshGateway application (socialweb-computer run gateway ssh) in its own kcp - its own OpenBaoServer holding the OAuth sessions and keys and the account that reads it, the iroh dialer HostProcess (internal iroh-dial, the only process that runs dumbpipe), the ComputeContract schema bound in root (every held ssh session is a contract the requester holds), the root:app workspace and, per profile, the hono-socialweb-computer-ssh service; applied by internal/appctl (plan 0008 M4-RUN-GATEWAY-SSH)
+    values: SshGateway
+    phases:
+      - name: vault
+        workspace: root
+        files:
+          - path: apps/ssh-gateway/vault.yaml
+        after:
+          - kind: OpenBaoServer
+            name: ssh-gateway
+            for: Ready
+      - name: iroh-dial
+        workspace: root
+        files:
+          - path: apps/ssh-gateway/iroh-dial.yaml
+      - name: workspace
+        workspace: root
+        files:
+          - path: apps/workspace-app.yaml
+        after:
+          - kind: Workspace
+            for: Ready
+      - name: bindings
+        workspace: root
+        files:
+          - path: apps/gateway/computecontracts-binding.yaml
+        after:
+          - kind: APIExport
+            name: computecontracts
+            workspace: root:socialweb-provider
+            for: IdentityValid
+          - kind: APIBinding
+            for: Ready
+      - name: rbac
+        workspace: root:app
+        before:
+          - kind: APIBinding
+            for: Ready
+        files:
+          - path: market-network/10-rbac.yaml
+  - name: market-network
+    scope: kcp
+    summary: the shared services of a MarketNetwork application - its OpenBaoServer network (the PKI the services' certificates come from, through a client that holds only that policy), PLC, relay, dispatcher and its TLS front, two PDSes and the verifier - applied by its reconciler (internal/appctl); the bidders are child applications with their own kcp; needs the provider workspace and the hostprocesses set
+    values: MarketNetwork
+    phases:
+      - name: vault
+        workspace: root
+        files:
+          - path: market-network/05-vault.yaml
+        after:
+          - kind: OpenBaoServer
+            name: network
+            for: Ready
+      - name: workspaces
+        workspace: root
+        files:
+          - path: market-network/00-workspaces.yaml
+        after:
+          - kind: Workspace
+            for: Ready
+      - name: rbac-global
+        workspace: root:global
+        before:
+          - kind: APIBinding
+            for: Ready
+        files:
+          - path: market-network/10-rbac.yaml
+      - name: rbac-relay
+        workspace: root:relay
+        before:
+          - kind: APIBinding
+            for: Ready
+        files:
+          - path: market-network/10-rbac.yaml
+      - name: rbac-alice
+        workspace: root:alice
+        before:
+          - kind: APIBinding
+            for: Ready
+        files:
+          - path: market-network/10-rbac.yaml
+      - name: rbac-bob
+        workspace: root:bob
+        before:
+          - kind: APIBinding
+            for: Ready
+        files:
+          - path: market-network/10-rbac.yaml
+unapplied:
+  - path: sets.yaml
+    why: this index
+  - path: audit-policy.yaml
+    why: an audit.k8s.io Policy file a k3s apiserver reads at start through --audit-policy-file, never an object
+  - path: kcp-audit-policy.yaml
+    why: the Policy file kcp reads at start through --audit-policy-file (run-kcp-instance.sh, the image), never an object
+  - path: tenant-grant.yaml
+    why: applied into each tenant k3s cluster by internal/clusterprovider (tenant.go) with its owner placeholder rewritten, never into kcp
+  - path: eso/cluster-secret-store.yaml
+    why: applied into each tenant k3s cluster by internal/eso with its vault values rewritten, never into kcp
+  - path: eso/external-secret.yaml
+    why: applied into each tenant k3s cluster by internal/eso, never into kcp

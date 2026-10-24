@@ -1,0 +1,11 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIExport
+metadata:
+  name: computecontracts
+spec:
+  resources:
+    - group: socialweb.computer
+      name: computecontracts
+      schema: v1alpha1-10.computecontracts.socialweb.computer
+      storage:
+        crd: {}

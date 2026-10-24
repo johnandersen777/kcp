@@ -260,6 +260,9 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		})
 		return rt
 	})
+	// Re-install the in-process dialer after the network wrapper swapped
+	// DialContext. This is a no-op for native builds that never set one.
+	c.GenericConfig.LoopbackClientConfig.Wrap(wrapLoopbackDial)
 
 	// Set effective version to the default kube version of the vendored libs.
 	c.GenericConfig.EffectiveVersion = compatibility.DefaultBuildEffectiveVersion()

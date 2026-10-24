@@ -1,0 +1,247 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-4.hostprocesses.socialweb.computer
+spec:
+  group: socialweb.computer
+  names:
+    kind: HostProcess
+    listKind: HostProcessList
+    plural: hostprocesses
+    singular: hostprocess
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              unit:
+                type: string
+              description:
+                type: string
+              asset:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  sha256:
+                    type: string
+                required:
+                  - name
+                  - sha256
+              exec:
+                type: string
+              argv:
+                type: array
+                items:
+                  type: string
+              env:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    value:
+                      type: string
+                  required:
+                    - name
+                    - value
+              envFiles:
+                type: array
+                items:
+                  type: string
+              workDir:
+                type: string
+              output:
+                type: object
+                properties:
+                  stdout:
+                    type: string
+                  stderr:
+                    type: string
+                  capBytes:
+                    type: integer
+                    format: int64
+              limits:
+                type: object
+                properties:
+                  memoryMax:
+                    type: string
+                  cpuWeight:
+                    type: integer
+                    format: int64
+                  cpuQuotaPercent:
+                    type: integer
+                    format: int32
+                  tasksMax:
+                    type: integer
+                    format: int64
+              restartPolicy:
+                type: string
+                enum:
+                  - Never
+                  - OnFailure
+                  - Always
+              stop:
+                type: object
+                properties:
+                  signal:
+                    type: string
+                  graceSeconds:
+                    type: integer
+                    format: int32
+              after:
+                type: array
+                items:
+                  type: string
+              wants:
+                type: array
+                items:
+                  type: string
+              slice:
+                type: string
+              privateHostname:
+                type: string
+              fdStore:
+                type: integer
+                format: int32
+              readiness:
+                type: object
+                properties:
+                  exec:
+                    type: array
+                    items:
+                      type: string
+                  tcp:
+                    type: boolean
+                  httpPath:
+                    type: string
+                  pgxSocketDir:
+                    type: string
+                  unixSocket:
+                    type: string
+              restartKey:
+                type: string
+              placement:
+                type: string
+                enum:
+                  - supervisor
+                  - bootstrap
+            required:
+              - unit
+              - placement
+          status:
+            type: object
+            properties:
+              observedGeneration:
+                type: integer
+                format: int64
+              phase:
+                type: string
+                enum:
+                  - Pending
+                  - Starting
+                  - Running
+                  - Stopping
+                  - Stopped
+                  - Failed
+                  - Lost
+              lostReason:
+                type: string
+                enum:
+                  - HostRebooted
+                  - UnitGone
+                  - UnitFailed
+                  - OOMKilled
+                  - IdentityMismatch
+                  - ManagerRestarted
+              message:
+                type: string
+              runtime:
+                type: object
+                properties:
+                  backend:
+                    type: string
+                  unit:
+                    type: string
+                  invocationID:
+                    type: string
+                  pid:
+                    type: integer
+                    format: int64
+                  startTicks:
+                    type: integer
+                    format: int64
+                  hostBootID:
+                    type: string
+                  manager:
+                    type: string
+                  activeSince:
+                    type: string
+                required:
+                  - backend
+                  - unit
+              lastResult:
+                type: object
+                properties:
+                  result:
+                    type: string
+                  exitCode:
+                    type: integer
+                    format: int32
+                  signal:
+                    type: string
+                  at:
+                    type: string
+              restartKey:
+                type: string
+              listeners:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    address:
+                      type: string
+                  required:
+                    - name
+                    - address
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Placement
+          type: string
+          jsonPath: .spec.placement
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Backend
+          type: string
+          jsonPath: .status.runtime.backend
+        - name: Unit
+          type: string
+          jsonPath: .spec.unit
+        - name: PID
+          type: integer
+          jsonPath: .status.runtime.pid
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

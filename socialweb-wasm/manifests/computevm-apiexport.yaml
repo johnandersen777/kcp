@@ -1,0 +1,26 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIExport
+metadata:
+  name: computevms
+spec:
+  resources:
+    - group: socialweb.computer
+      name: computevms
+      schema: v1alpha1-9.computevms.socialweb.computer
+      storage:
+        crd: {}
+    - group: socialweb.computer
+      name: firecrackervms
+      schema: v1alpha1-3.firecrackervms.socialweb.computer
+      storage:
+        crd: {}
+    - group: socialweb.computer
+      name: bids
+      schema: v1alpha1-8.bids.socialweb.computer
+      storage:
+        crd: {}
+    - group: socialweb.computer
+      name: guestidentitygrants
+      schema: v1alpha1-3.guestidentitygrants.socialweb.computer
+      storage:
+        crd: {}

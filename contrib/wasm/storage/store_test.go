@@ -19,6 +19,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -497,5 +498,50 @@ func TestSnapshotHandler(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("snapshot handler was not called")
+	}
+}
+
+func TestOnSnapshotCoalesces(t *testing.T) {
+	s := Shared("on-snapshot-test")
+	snapshots := make(chan []byte, 8)
+	stop := OnSnapshot(func(b []byte) {
+		select {
+		case snapshots <- b:
+		default:
+		}
+	})
+	defer stop()
+
+	// The coalescer watches mutations; an idle store stays quiet.
+	select {
+	case <-snapshots:
+		t.Fatal("snapshot without a mutation")
+	case <-time.After(time.Second):
+	}
+
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if err := s.Create(ctx, key(fmt.Sprintf("coalesce-%d", i)), newFetch(fmt.Sprintf("coalesce-%d", i)), nil, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var raw []byte
+	select {
+	case raw = <-snapshots:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no snapshot after mutations")
+	}
+
+	var all All
+	if err := json.Unmarshal(raw, &all); err != nil {
+		t.Fatalf("snapshot envelope: %v", err)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(all.Stores["on-snapshot-test"], &snap); err != nil {
+		t.Fatalf("store snapshot: %v", err)
+	}
+	if len(snap.Items) < 3 {
+		t.Fatalf("snapshot has %d items, want at least 3", len(snap.Items))
 	}
 }

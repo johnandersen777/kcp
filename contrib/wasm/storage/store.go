@@ -31,6 +31,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/fields"
@@ -87,6 +89,22 @@ type Store struct {
 // older than the history, it receives the current state as ADDED events.
 const maxWatchHistory = 4096
 
+// mutationSeq counts writes across all stores. Coalescing snapshotters (see
+// OnSnapshot) poll it instead of receiving a serialized snapshot after every
+// mutation: encoding the whole store on each write is O(state) per write and
+// dominated boot time for the real kcp shard (a 6 MB store meant roughly a
+// second of JSON per write in wasm).
+var mutationSeq atomic.Uint64
+
+// lastMutationNanos is the wall-clock time of the newest mutation, used to
+// persist once writes settle rather than while controllers stream them.
+var lastMutationNanos atomic.Int64
+
+func noteMutation() {
+	mutationSeq.Add(1)
+	lastMutationNanos.Store(time.Now().UnixNano())
+}
+
 type storedEvent struct {
 	rv   uint64
 	typ  watch.EventType
@@ -142,6 +160,12 @@ func (s *Store) Snapshot() ([]byte, error) {
 // Restore replaces the store contents with a snapshot. decode turns the raw
 // JSON of one item back into its runtime.Object (e.g. a *Fetch).
 func (s *Store) Restore(data []byte, decode func([]byte) (runtime.Object, error)) error {
+	return s.RestoreWith(data, func(_ string, raw []byte) (runtime.Object, error) { return decode(raw) })
+}
+
+// RestoreWith is Restore with the storage key passed to the decoder. The
+// key lets a heterogeneous apiserver pick the resource's typed decoder.
+func (s *Store) RestoreWith(data []byte, decode func(key string, raw []byte) (runtime.Object, error)) error {
 	var snap Snapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
 		return fmt.Errorf("decoding snapshot: %w", err)
@@ -154,7 +178,7 @@ func (s *Store) Restore(data []byte, decode func([]byte) (runtime.Object, error)
 		maxRV = 1
 	}
 	for key, raw := range snap.Items {
-		obj, err := decode(raw)
+		obj, err := decode(key, raw)
 		if err != nil {
 			return fmt.Errorf("decoding item %q: %w", key, err)
 		}
@@ -187,6 +211,15 @@ func (s *Store) Restore(data []byte, decode func([]byte) (runtime.Object, error)
 	// Restored objects are the current state; any watch older than the
 	// snapshot gets a fresh ADDED view rather than replaying nothing.
 	s.compactedRV = maxRV
+	// Watchers that connected before the restore have a stale view: their
+	// initial list saw the old (usually empty) store and the restore emits no
+	// events. The apiserver's watch cache is one of them, so leaving it open
+	// means restored objects never reach informers (a restored kcp shard then
+	// hangs waiting for its system CRDs). Close them so clients relist.
+	for w := range s.watchers {
+		delete(s.watchers, w)
+		w.close()
+	}
 	s.mu.Unlock()
 	return nil
 }
@@ -221,7 +254,8 @@ func (s *Store) Create(ctx context.Context, key string, obj, out runtime.Object,
 	s.objectMeta[key] = metaFromContext(ctx)
 	s.recordEventLocked(key, watch.Added, stored)
 	s.broadcastLocked(key, watch.Added, stored)
-	snap := s.snapshotBytesLocked()
+	noteMutation()
+	snap := s.snapshotForHandlerLocked()
 	s.mu.Unlock()
 
 	s.persist(snap)
@@ -395,7 +429,8 @@ func (s *Store) GuaranteedUpdate(
 	}
 	s.recordEventLocked(key, eventType, stored)
 	s.broadcastLocked(key, eventType, stored)
-	snap := s.snapshotBytesLocked()
+	noteMutation()
+	snap := s.snapshotForHandlerLocked()
 	s.mu.Unlock()
 
 	s.persist(snap)
@@ -442,7 +477,8 @@ func (s *Store) Delete(
 	s.broadcastLocked(key, watch.Deleted, obj)
 	m := s.objectMeta[key]
 	delete(s.objectMeta, key)
-	snap := s.snapshotBytesLocked()
+	noteMutation()
+	snap := s.snapshotForHandlerLocked()
 	s.mu.Unlock()
 
 	s.persist(snap)
@@ -643,6 +679,16 @@ func (s *Store) snapshotBytesLocked() []byte {
 		return nil
 	}
 	return b
+}
+
+// snapshotForHandlerLocked serializes the store only when a snapshot handler
+// actually consumes the bytes. Handlers that only need to know *that*
+// something changed (OnSnapshot) use mutationSeq instead.
+func (s *Store) snapshotForHandlerLocked() []byte {
+	if s.onChange == nil {
+		return nil
+	}
+	return s.snapshotBytesLocked()
 }
 
 func (s *Store) persist(snap []byte) {

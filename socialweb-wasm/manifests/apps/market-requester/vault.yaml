@@ -1,0 +1,48 @@
+apiVersion: socialweb.computer/v1alpha1
+kind: OpenBaoServer
+metadata:
+  name: requester
+spec:
+  asset:
+    name: bao
+    sha256: ""
+  clients:
+    - name: requester
+      kvMount: requester
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: requester
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: requester
+rules:
+  - apiGroups: ["socialweb.computer"]
+    resources: ["openbaoservers"]
+    verbs: ["get", "list"]
+  - apiGroups: ["socialweb.computer"]
+    resources: ["marketidentities", "computecontracts"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["socialweb.computer"]
+    resources: ["marketidentities/status", "computecontracts/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["socialweb.computer"]
+    resources: ["marketrequesters", "marketrequesters/status"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: requester
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: requester
+subjects:
+  - kind: ServiceAccount
+    name: requester
+    namespace: default

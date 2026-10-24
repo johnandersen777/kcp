@@ -1,0 +1,107 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-3.guestidentitygrants.socialweb.computer
+spec:
+  group: socialweb.computer
+  names:
+    kind: GuestIdentityGrant
+    listKind: GuestIdentityGrantList
+    plural: guestidentitygrants
+    singular: guestidentitygrant
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              computeVMRef:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    maxLength: 253
+                required:
+                  - name
+              entity:
+                type: string
+              api:
+                type: string
+              actx:
+                type: string
+              scopes:
+                type: array
+                items:
+                  type: string
+              claims:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    value:
+                      type: string
+                  required:
+                    - name
+                    - value
+            required:
+              - computeVMRef
+              - entity
+              - api
+              - actx
+          status:
+            type: object
+            properties:
+              observedGeneration:
+                type: integer
+                format: int64
+              applied:
+                type: boolean
+              role:
+                type: string
+              audience:
+                type: string
+              appliedAt:
+                type: string
+              lastError:
+                type: string
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+            required:
+              - applied
+      additionalPrinterColumns:
+        - name: ComputeVM
+          type: string
+          jsonPath: .spec.computeVMRef.name
+        - name: API
+          type: string
+          jsonPath: .spec.api
+        - name: Actx
+          type: string
+          jsonPath: .spec.actx
+        - name: Applied
+          type: boolean
+          jsonPath: .status.applied
+        - name: Role
+          type: string
+          jsonPath: .status.role
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

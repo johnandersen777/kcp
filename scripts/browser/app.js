@@ -28,11 +28,17 @@ import {
   getCommandNames,
 } from "https://esm.sh/just-bash@3.6.0/browser";
 import { buildDiagram, nodeID } from "./diagram.js";
+import { OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
+import { openBestBackend } from "./state_store.js";
 
 const config = await (await fetch("/config")).json();
 const apiServer = String(config.apiServer);
 const intervalMs = Number(config.intervalMs ?? 1500);
-const stateKey = "kcp-wasm-state";
+const stateKey = "kcp";
+const socialwebStateKey = "socialweb";
+const legacyStateKey = "kcp-wasm-state";
+const stateDB = "kcp-wasm";
+const stateMaxBytes = 256 * 1024 * 1024;
 const shellStateKey = "kcp-shell-state";
 const maxLogEntries = 500;
 const homeDir = "/home/user";
@@ -43,6 +49,8 @@ retryEl.addEventListener("click", () => location.reload());
 const serverEl = document.getElementById("server");
 const diagramEl = document.getElementById("diagram");
 const diagramUpdatedEl = document.getElementById("diagram-updated");
+const diagramToggleEl = document.getElementById("diagram-toggle");
+let diagramVisible = localStorage.getItem("kcp-diagram-open") === "1";
 const logEl = document.getElementById("log");
 const logClearEl = document.getElementById("log-clear");
 const logVerboseEl = document.getElementById("log-verbose");
@@ -50,6 +58,15 @@ const leftPaneEl = document.getElementById("left-pane");
 const logPaneEl = document.getElementById("log-pane");
 const splitterEl = document.getElementById("splitter");
 const logToggleEl = document.getElementById("log-toggle");
+const identityModeEl = document.getElementById("identity-mode");
+const identityHandleEl = document.getElementById("identity-handle");
+const identitySignInEl = document.getElementById("identity-signin");
+const identityStatusEl = document.getElementById("identity-status");
+const contractNameEl = document.getElementById("contract-name");
+const contractSSHEl = document.getElementById("contract-ssh");
+const contractTTLEl = document.getElementById("contract-ttl");
+const contractCreateEl = document.getElementById("contract-create");
+const contractStatusEl = document.getElementById("contract-status");
 
 serverEl.textContent = apiServer;
 
@@ -335,6 +352,25 @@ function serializeQueue() {
 
 let kcpWorker = null;
 const pendingBridges = new Map();
+const pendingPageRequests = new Map();
+let nextPageRequestID = -1;
+
+// Send a request straight to the kcp/socialweb bridge. kubectl has its own
+// worker; the identity callback needs this page-origin path.
+function kcpPageRequest(request, timeoutMs = 60_000) {
+  const worker = kcpWorker;
+  if (!worker) return Promise.reject(new Error("kcp worker is not running"));
+  const id = nextPageRequestID--;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (pendingPageRequests.delete(id)) {
+        reject(new Error("kcp request timed out"));
+      }
+    }, timeoutMs);
+    pendingPageRequests.set(id, { resolve, reject, timer });
+    worker.postMessage({ type: "request", id, request });
+  });
+}
 
 function attachKcp(worker) {
   worker.addEventListener("error", (event) => {
@@ -351,7 +387,19 @@ function attachKcp(worker) {
   });
   worker.addEventListener("message", (event) => {
     const data = event.data ?? {};
+    if (data.type === "state") {
+      applyState(data.state);
+      return;
+    }
     if (data.type === "response") {
+      const page = pendingPageRequests.get(data.id);
+      if (page) {
+        pendingPageRequests.delete(data.id);
+        clearTimeout(page.timer);
+        if (data.error) page.reject(new Error(String(data.error)));
+        else page.resolve(data.response);
+        return;
+      }
       pendingBridges.delete(data.id);
       kubectlWorker?.postMessage({
         type: "fetchResult",
@@ -360,25 +408,77 @@ function attachKcp(worker) {
       });
     } else if (data.type === "persist") {
       schedulePersist(data.snapshot);
+    } else if (data.type === "socialweb-persist") {
+      schedulePersist(data.snapshot, socialwebStateKey);
     } else if (data.type === "log") {
       addLog(data.level ?? "info", `kcp: ${data.message}`);
+      const message = String(data.message);
+      if (message.includes("MiB downloaded")) {
+        setStatus(message.replace("kcp.wasm ", "kcp "), "running");
+      } else if (message.includes("waiting for real kcp readiness")) {
+        const match = message.match(/\((\d+)s\)/);
+        setStatus(`booting kcp ${match ? match[1] : ""}s…`, "running");
+      }
     }
   });
 }
 
-let persistTimer = null;
-function schedulePersist(snapshot) {
-  if (persistTimer) clearTimeout(persistTimer);
-  persistTimer = setTimeout(() => {
-    try {
-      localStorage.setItem(stateKey, snapshot);
-    } catch {
-      addLog("warn", `snapshot too large for localStorage (${snapshot.length} bytes)`);
+let stateBackendPromise = null;
+function stateBackend() {
+  if (!stateBackendPromise) {
+    stateBackendPromise = openBestBackend({ dbName: stateDB, maxBytes: stateMaxBytes })
+      .then(({ backend, kind, reason }) => {
+        addLog("info", `kcp state backend: ${kind}`);
+        if (kind === "memory" && reason) {
+          addLog("warn", `IndexedDB unavailable (${reason.message ?? reason}); state will not survive reload`);
+        }
+        return backend;
+      });
+  }
+  return stateBackendPromise;
+}
+
+async function loadInitialState(key = stateKey) {
+  const backend = await stateBackend();
+  const saved = await backend.load(key);
+  if (saved || key !== stateKey) return saved ?? "";
+  // One-time migration from the 5 MB localStorage era.
+  const legacy = localStorage.getItem(legacyStateKey);
+  if (legacy) {
+    await backend.save(stateKey, legacy).catch(() => {});
+    localStorage.removeItem(legacyStateKey);
+    return legacy;
+  }
+  return "";
+}
+
+const persistTimers = new Map();
+const persistInFlight = new Set();
+function schedulePersist(snapshot, key = stateKey) {
+  if (persistTimers.has(key)) clearTimeout(persistTimers.get(key));
+  persistTimers.set(key, setTimeout(async () => {
+    persistTimers.delete(key);
+    if (persistInFlight.has(key)) {
+      schedulePersist(snapshot, key);
+      return;
     }
-  }, 250);
+    persistInFlight.add(key);
+    try {
+      const backend = await stateBackend();
+      await backend.save(key, snapshot);
+    } catch (err) {
+      addLog("warn", `state save failed (${key}): ${err instanceof Error ? err.message : err}`);
+    } finally {
+      persistInFlight.delete(key);
+    }
+  }, 250));
 }
 
 async function spawnKcp() {
+  const [initialState, socialwebSnapshot] = await Promise.all([
+    loadInitialState(stateKey),
+    loadInitialState(socialwebStateKey),
+  ]);
   const worker = new Worker("/kcp_worker.js", { type: "module" });
   attachKcp(worker);
   const readyPromise = waitReady(worker);
@@ -386,10 +486,25 @@ async function spawnKcp() {
     type: "init",
     wasmUrl: "/kcp.wasm",
     execUrl: "/wasm_exec.js",
-    initialState: localStorage.getItem(stateKey) ?? "",
+    initialState,
+    socialweb: {
+      origin: location.origin,
+      identityMode: localStorage.getItem("socialweb.identity") === "localRepo"
+        ? "oauthBrowser"
+        : (localStorage.getItem("socialweb.identity") ?? "oauthBrowser"),
+      handle: localStorage.getItem("socialweb.handle") ?? "",
+      did: localStorage.getItem("socialweb.did") ?? "",
+      pdsUrl: localStorage.getItem("socialweb.pdsUrl") ?? "",
+      oauthClientId: `${location.origin}/oauth-client-metadata.json`,
+      oauthRedirectUri: `${location.origin}/oauth/callback/requester`,
+      forceApply: localStorage.getItem("socialweb.forceApply") === "1",
+      statusFeed: localStorage.getItem("socialweb.statusFeed") !== "0",
+      restore: socialwebSnapshot,
+    },
   });
   await readyPromise;
   kcpWorker = worker;
+  worker.postMessage({ type: "state-subscribe" });
 }
 
 // --- kubectl worker --------------------------------------------------------
@@ -790,9 +905,16 @@ function makeCommands() {
   });
 
   const reset = defineCommand("reset", async () => {
-    localStorage.removeItem(stateKey);
+    try {
+      const backend = await stateBackend();
+      await backend.remove(stateKey);
+      await backend.remove(socialwebStateKey);
+    } catch {
+      // A missing or read-only store is already a reset.
+    }
+    localStorage.removeItem(legacyStateKey);
     localStorage.removeItem(shellStateKey);
-    addLog("warn", "shell and kcp state cleared; reloading");
+    addLog("warn", "shell, kcp and socialweb state cleared; reloading");
     setTimeout(() => location.reload(), 300);
     return { stdout: "cleared shell and kcp state; reloading…\n", stderr: "", exitCode: 0 };
   });
@@ -1326,6 +1448,20 @@ async function completeLine() {
 
 let lastDiagram = "";
 let polling = false;
+
+function applyDiagramVisibility() {
+  diagramEl.classList.toggle("hidden", !diagramVisible);
+  diagramToggleEl.textContent = diagramVisible ? "hide" : "show";
+  if (!diagramVisible) diagramUpdatedEl.textContent = "closed";
+}
+
+diagramToggleEl.addEventListener("click", () => {
+  diagramVisible = !diagramVisible;
+  localStorage.setItem("kcp-diagram-open", diagramVisible ? "1" : "0");
+  applyDiagramVisibility();
+  if (diagramVisible) void poll();
+});
+applyDiagramVisibility();
 let pendingDiagramCommand = null;
 let diagramTargets = new Map();
 
@@ -1370,20 +1506,16 @@ async function kubectlJSON(args) {
 }
 
 async function poll() {
-  if (!ready || polling) return;
+  if (!ready || polling || busy || bootActive || stdinMode || !diagramVisible) return;
   polling = true;
   let mermaid = null;
   let crds = null;
-  let fetches = null;
   try {
-    [crds, fetches] = await Promise.all([
-      kubectlJSON(["get", "crds"]),
-      kubectlJSON(["get", "fetches"]),
-    ]);
+    crds = await kubectlJSON(["get", "crds"]);
     mermaid = buildDiagram(
       apiServer,
       crds.items ?? [],
-      fetches.items ?? [],
+      [],
       isNarrow() ? "TD" : "LR",
     );
 
@@ -1391,10 +1523,6 @@ async function poll() {
     for (const crd of crds.items ?? []) {
       const name = crd?.metadata?.name;
       if (name) targets.set(nodeID("crd", name), `kubectl describe crd ${name}`);
-    }
-    for (const fetch of fetches.items ?? []) {
-      const name = fetch?.metadata?.name;
-      if (name) targets.set(nodeID("fetch", name), `kubectl describe fetch ${name}`);
     }
     diagramTargets = targets;
   } catch (err) {
@@ -1414,25 +1542,11 @@ async function poll() {
   if (mermaid !== lastDiagram) {
     lastDiagram = mermaid;
     const crdCount = crds?.items?.length ?? 0;
-    const items = fetches?.items ?? [];
     renderDiagram(
       mermaid,
-      crds
-        ? `${crdCount} CRD${crdCount === 1 ? "" : "s"} · ${items.length} Fetch${items.length === 1 ? "" : "es"}`
-        : "error",
+      crds ? `${crdCount} CRD${crdCount === 1 ? "" : "s"}` : "error",
     );
-    const summary = items
-      .map((item) => {
-        const name = item?.metadata?.name ?? "?";
-        const phase = item?.status?.phase ?? "Unresolved";
-        const code = item?.status?.statusCode ? `/${item.status.statusCode}` : "";
-        return `${name}=${phase}${code}`;
-      })
-      .join(", ");
-    addLog(
-      crds ? "info" : "warn",
-      `state: ${crdCount} CRD(s)${summary ? ` · ${summary}` : " · no Fetch resources"}`,
-    );
+    addLog(crds ? "info" : "warn", `state: ${crdCount} CRD(s)`);
   }
 }
 
@@ -1451,16 +1565,13 @@ function renderDiagram(mermaid, summary = "") {
 }
 
 
-// Boot sequence: resolve socialweb.computer via goat, build the PDS getRecord
-// URL for its profile, apply it as a Fetch, wait for completion, tee the
-// Fetch to a file while printing it with yq, then print the fetched body from
-// that file. Each step is typed and auto-entered in the terminal on load.
-const BOOT_APPLY = `DID=$(goat resolve socialweb.computer | jq -r .id); PDS=$(goat resolve "$DID" | jq -r '.service[] | select(.type=="AtprotoPersonalDataServer") | .serviceEndpoint'); URL="$PDS/xrpc/com.atproto.repo.getRecord?repo=$DID&collection=app.bsky.actor.profile&rkey=self"; printf 'apiVersion: fetch.kcp.io/v1alpha1\\nkind: Fetch\\nmetadata:\\n  name: socialweb-profile\\nspec:\\n  url: "%s"\\n' "$URL" | kubectl apply -f -; kubectl wait --for=jsonpath='{.status.phase}'=Resolved fetch/socialweb-profile --timeout=20s || true`;
-
+// Boot sequence: show the real in-browser kcp surface. The full socialweb
+// provider/app manifests are applied by the worker; these commands are a
+// clean, copy-pasteable checkpoint that they are being served.
 const BOOT_STEPS = [
-  BOOT_APPLY,
-  "kubectl get fetch socialweb-profile -o json | tee /tmp/socialweb-profile.json | yq -P",
-  "jq -r '.status.body' /tmp/socialweb-profile.json | yq -P",
+  "kubectl get workspaces",
+  "kubectl get shards.core.kcp.io",
+  "kubectl get --raw /clusters/root/version | jq -r '.gitVersion'",
 ];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1519,11 +1630,223 @@ async function typeBootSteps(steps) {
   runQueuedDiagramCommand();
 }
 
+// --- socialweb requester UI ------------------------------------------------
+
+const identityPrefs = {
+  mode: "socialweb.identity",
+  handle: "socialweb.handle",
+  pdsUrl: "socialweb.pdsUrl",
+};
+
+let pendingSignInURL = "";
+let signInWaiting = false;
+let lastContractName = "";
+
+function setAppStatus(el, text, className = "") {
+  el.textContent = text;
+  el.className = `app-status ${className}`.trim();
+}
+
+function requesterIdentity() {
+  return {
+    mode: identityModeEl.value,
+    handle: identityHandleEl.value.trim(),
+    association: "Skip",
+  };
+}
+
+async function patchRequesterIdentity() {
+  const identity = requesterIdentity();
+  localStorage.setItem(identityPrefs.mode, identity.mode);
+  localStorage.setItem(identityPrefs.handle, identity.handle);
+  const patch = JSON.stringify({ spec: { identity } });
+  const result = await runKubectl(withServer([
+    "patch", "marketrequester", "app", "--type=merge", "-p", patch,
+  ]));
+  if (result.code !== 0) {
+    throw new Error(String(result.stderr ?? "patch failed").trim());
+  }
+  addLog("info", `identity ${identity.mode} handle=${identity.handle || "(unset)"}`);
+}
+
+async function completeOAuth(message) {
+  const query = new URLSearchParams();
+  for (const key of ["code", "state", "iss", "error", "error_description"]) {
+    const value = message?.[key];
+    if (value) query.set(key, String(value));
+  }
+  setAppStatus(identityStatusEl, "completing sign-in…", "warn");
+  const response = await kcpPageRequest({
+    method: "GET",
+    path: `/oauth/callback/requester?${query.toString()}`,
+    headers: { Host: location.host, Accept: "text/plain" },
+  });
+  if (response.status >= 400) {
+    throw new Error(String(response.body ?? `callback returned ${response.status}`));
+  }
+  addLog("ok", "OAuth callback accepted");
+  setAppStatus(identityStatusEl, "signed in; waiting for MarketIdentity", "ok");
+}
+
+async function beginSignIn() {
+  try {
+    identitySignInEl.disabled = true;
+    await patchRequesterIdentity();
+    if (pendingSignInURL) {
+      await openSignInPopup();
+    } else {
+      signInWaiting = true;
+      setAppStatus(identityStatusEl, "starting OAuth… waiting for the PDS", "warn");
+    }
+  } catch (err) {
+    signInWaiting = false;
+    addLog("error", `sign-in failed: ${err instanceof Error ? err.message : err}`);
+    setAppStatus(identityStatusEl, String(err.message ?? err), "err");
+    identitySignInEl.disabled = false;
+  }
+}
+
+async function openSignInPopup() {
+  const url = pendingSignInURL;
+  if (!url) throw new Error("the identity has no pending sign-in URL yet");
+  signInWaiting = false;
+  setAppStatus(identityStatusEl, "waiting for the AT Protocol popup…", "warn");
+  const message = await openOAuthPopup(url);
+  if (message.type !== OAUTH_CALLBACK_MESSAGE) return;
+  await completeOAuth(message);
+}
+
+function parseTTLSeconds(value) {
+  const text = value.trim();
+  if (!text) return null;
+  const match = text.match(/^(\d+)\s*(s|m|h|d)?$/i);
+  if (!match) throw new Error("TTL must look like 30m, 1h or 3600s");
+  const units = { s: 1, m: 60, h: 3600, d: 86400 };
+  return Number(match[1]) * units[(match[2] ?? "s").toLowerCase()];
+}
+
+async function createContract() {
+  try {
+    contractCreateEl.disabled = true;
+    const name = contractNameEl.value.trim().toLowerCase();
+    if (!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(name)) {
+      throw new Error("name must be a lowercase DNS label");
+    }
+    const ssh = contractSSHEl.value.trim();
+    const spec = { vmName: name };
+    if (ssh) spec.sshAuthorizedKeys = [ssh];
+    const ttl = parseTTLSeconds(contractTTLEl.value);
+    if (ttl !== null) spec.ttlSecondsAfterFinished = ttl;
+    const identity = await kubectlJSON(["get", "marketidentity", "requester"])
+      .catch(() => null);
+    const did = identity?.status?.did ?? "";
+    if (did) spec.ownerDid = did;
+    const manifest = {
+      apiVersion: "socialweb.computer/v1alpha1",
+      kind: "ComputeContract",
+      metadata: { name },
+      spec,
+    };
+    const result = await runKubectl(
+      withServer(["apply", "-f", "-"]),
+      JSON.stringify(manifest),
+    );
+    if (result.code !== 0) {
+      throw new Error(String(result.stderr || result.stdout || "apply failed").trim());
+    }
+    lastContractName = name;
+    setAppStatus(contractStatusEl, `created ${name}; waiting for bids`, "ok");
+    addLog("ok", `ComputeContract ${name} applied`);
+  } catch (err) {
+    setAppStatus(contractStatusEl, String(err.message ?? err), "err");
+  } finally {
+    contractCreateEl.disabled = false;
+  }
+}
+
+function applyState(state) {
+  if (!state) return;
+  if (!state.marketRequester) {
+    setAppStatus(identityStatusEl, "waiting for the MarketRequester app…", "warn");
+    return;
+  }
+  identitySignInEl.disabled = false;
+  const identity = state.marketIdentity;
+  const phase = identity?.phase ?? "Pending";
+  const action = identity?.pendingAction;
+  pendingSignInURL = action && (action.kind === "visitUrl" || action.kind === "signInAgain")
+    ? String(action.url ?? "")
+    : "";
+  if (pendingSignInURL && signInWaiting) {
+    void openSignInPopup().catch((err) => {
+      setAppStatus(identityStatusEl, String(err.message ?? err), "err");
+    });
+  }
+  if (phase === "Ready") {
+    const label = identity?.handle || identity?.did || "ready";
+    contractCreateEl.disabled = false;
+    setAppStatus(identityStatusEl, `MarketIdentity ready: ${label}`, "ok");
+  } else if (pendingSignInURL) {
+    setAppStatus(identityStatusEl, `sign-in required (${action.kind})\nclick Sign in to continue`, "warn");
+  } else {
+    setAppStatus(identityStatusEl, `MarketIdentity ${phase}`, "warn");
+  }
+
+  if (lastContractName || contractNameEl.value.trim()) {
+    const name = lastContractName || contractNameEl.value.trim().toLowerCase();
+    const contract = (state.contracts ?? []).find((c) => c.name === name);
+    if (contract) {
+      const cphase = contract.phase ?? "Pending";
+      setAppStatus(contractStatusEl,
+        [name, cphase, contract.chosenDid ? `bidder ${contract.chosenDid}` : "",
+          contract.message ? String(contract.message) : ""].filter(Boolean).join(" · "),
+        cphase === "Failed" ? "err" : cphase === "Ready" ? "ok" : "warn");
+    } else {
+      setAppStatus(contractStatusEl, `${name}: not served yet (waiting for the app binding)`, "warn");
+    }
+  }
+  if (diagramVisible && Array.isArray(state.crds)) {
+    const crds = state.crds.map((name) => ({
+      metadata: { name },
+      spec: { names: { kind: name.split(".")[0] } },
+    }));
+    const mermaid = buildDiagram(apiServer, crds, [], isNarrow() ? "TD" : "LR");
+    if (mermaid !== lastDiagram) {
+      lastDiagram = mermaid;
+      renderDiagram(mermaid, `${crds.length} CRD${crds.length === 1 ? "" : "s"}`);
+    }
+  }
+}
+
+function initSocialwebUI() {
+  const storedMode = localStorage.getItem(identityPrefs.mode);
+  identityModeEl.value = storedMode === "localRepo" ? "oauthBrowser" : (storedMode ?? "oauthBrowser");
+  if (storedMode === "localRepo") {
+    // The local PDS adapter is not wired yet; boot with the supported mode.
+    localStorage.setItem(identityPrefs.mode, "oauthBrowser");
+  }
+  identityHandleEl.value = localStorage.getItem(identityPrefs.handle) ?? "";
+  identityModeEl.addEventListener("change", () => {
+    localStorage.setItem(identityPrefs.mode, identityModeEl.value);
+    setAppStatus(identityStatusEl, "mode saved; click Sign in to apply", "warn");
+  });
+  identityHandleEl.addEventListener("change", () => {
+    localStorage.setItem(identityPrefs.handle, identityHandleEl.value.trim());
+    setAppStatus(identityStatusEl, "handle saved; click Sign in to apply", "warn");
+  });
+  identitySignInEl.addEventListener("click", () => {
+    void beginSignIn().catch((err) => {
+      setAppStatus(identityStatusEl, String(err.message ?? err), "err");
+    });
+  });
+  contractCreateEl.addEventListener("click", () => void createContract());
+}
+
 // --- startup ---------------------------------------------------------------
 
 async function start() {
-  term.writeln(cyan("kcp-wasm") + dim(" loading kcp.wasm…"));
-  setStatus("loading kcp…", "running");
+  term.writeln(cyan("kcp-wasm") + dim(" loading real kcp.wasm…"));
+  setStatus("loading real kcp…", "running");
   await spawnKcp();
 
   term.writeln(cyan("kubectl-wasm") + dim(" loading kubectl.wasm (122 MB)…"));
@@ -1550,7 +1873,8 @@ async function start() {
   term.focus();
 
   void poll();
-  setInterval(() => void poll(), intervalMs);
+  setInterval(() => void poll(), Math.max(intervalMs, 5000));
+  initSocialwebUI();
   void typeBootSteps(BOOT_STEPS);
 }
 

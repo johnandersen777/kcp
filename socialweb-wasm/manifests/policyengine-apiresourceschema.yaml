@@ -1,0 +1,111 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-1.policyengines.policy.socialweb.computer
+spec:
+  group: policy.socialweb.computer
+  names:
+    kind: PolicyEngine
+    listKind: PolicyEngineList
+    plural: policyengines
+    singular: policyengine
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              limits:
+                type: object
+                properties:
+                  maxConcurrentRuns:
+                    type: integer
+                    format: int32
+                  queueDepth:
+                    type: integer
+                    format: int32
+                  activeDeadlineSeconds:
+                    type: integer
+                    format: int64
+                  maxConsoleBytes:
+                    type: integer
+                    format: int64
+                  maxOutputBytes:
+                    type: integer
+                    format: int64
+                  maxCacheEntries:
+                    type: integer
+                    format: int32
+                  maxCacheBytes:
+                    type: integer
+                    format: int64
+              trust:
+                type: object
+                properties:
+                  ttlSeconds:
+                    type: integer
+                    format: int64
+              cache:
+                type: object
+                properties:
+                  verdictTTLSeconds:
+                    type: integer
+                    format: int64
+                  scopeTTLSeconds:
+                    type: integer
+                    format: int64
+                  recordTTLSeconds:
+                    type: integer
+                    format: int64
+              bundledActionsEnabled:
+                type: boolean
+              suspend:
+                type: boolean
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                enum:
+                  - Pending
+                  - Running
+                  - Failed
+              ready:
+                type: boolean
+              activeRuns:
+                type: integer
+                format: int32
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Ready
+          type: boolean
+          jsonPath: .status.ready
+        - name: Active
+          type: integer
+          jsonPath: .status.activeRuns
+        - name: Suspend
+          type: boolean
+          jsonPath: .spec.suspend
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

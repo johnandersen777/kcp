@@ -91,6 +91,11 @@ type Server struct {
 	// They are reserved for controllers that only maintain per-process, in-memory state (and
 	// never write to storage) which that replica's own API server depends on.
 	controllersWithoutLeaderElection map[string]*controllerWrapper
+
+	// PreRunHook runs after the cache server is installed and before any
+	// informer or controller starts. The WASM boot path uses it to restore
+	// the in-memory snapshot into the already-registered stores.
+	PreRunHook func(ctx context.Context) error
 }
 
 func (s *Server) AddPostStartHook(name string, hook genericapiserver.PostStartHookFunc) error {
@@ -744,6 +749,12 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	if len(s.Options.Cache.Client.KubeconfigFile) == 0 {
 		if err := s.installCacheServer(ctx); err != nil {
+			return err
+		}
+	}
+
+	if s.PreRunHook != nil {
+		if err := s.PreRunHook(ctx); err != nil {
 			return err
 		}
 	}

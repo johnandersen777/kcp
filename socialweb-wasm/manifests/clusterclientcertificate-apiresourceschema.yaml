@@ -1,0 +1,82 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-2.clusterclientcertificates.socialweb.computer
+spec:
+  group: socialweb.computer
+  names:
+    kind: ClusterClientCertificate
+    listKind: ClusterClientCertificateList
+    plural: clusterclientcertificates
+    singular: clusterclientcertificate
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              clusterRef:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    maxLength: 253
+                required:
+                  - name
+              did:
+                type: string
+              serial:
+                type: string
+              notAfter:
+                type: string
+              noExpiry:
+                type: boolean
+              revoked:
+                type: boolean
+            required:
+              - clusterRef
+              - did
+              - serial
+              - notAfter
+          status:
+            type: object
+            properties:
+              revokedAt:
+                type: string
+              lastError:
+                type: string
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterRef.name
+        - name: DID
+          type: string
+          jsonPath: .spec.did
+        - name: Serial
+          type: string
+          jsonPath: .spec.serial
+        - name: NotAfter
+          type: string
+          jsonPath: .spec.notAfter
+        - name: NoExpiry
+          type: boolean
+          jsonPath: .spec.noExpiry
+        - name: Revoked
+          type: boolean
+          jsonPath: .spec.revoked
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

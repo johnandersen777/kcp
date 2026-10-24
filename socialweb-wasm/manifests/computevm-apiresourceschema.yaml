@@ -1,0 +1,279 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v1alpha1-9.computevms.socialweb.computer
+spec:
+  group: socialweb.computer
+  names:
+    kind: ComputeVM
+    listKind: ComputeVMList
+    plural: computevms
+    singular: computevm
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              backendRef:
+                type: object
+                properties:
+                  group:
+                    type: string
+                  kind:
+                    type: string
+                    maxLength: 63
+                  name:
+                    type: string
+                    maxLength: 253
+                  workspace:
+                    type: string
+                required:
+                  - kind
+                  - name
+              vm:
+                type: object
+                properties:
+                  cpus:
+                    type: integer
+                    format: int32
+                  mem:
+                    type: string
+                  disk:
+                    type: string
+                  role:
+                    type: string
+                required:
+                  - cpus
+                  - mem
+                  - disk
+                  - role
+              owner:
+                type: object
+                properties:
+                  handle:
+                    type: string
+                required:
+                  - handle
+              userData:
+                type: object
+                properties:
+                  vault:
+                    type: object
+                    properties:
+                      vault:
+                        type: object
+                        properties:
+                          group:
+                            type: string
+                          kind:
+                            type: string
+                            maxLength: 63
+                          name:
+                            type: string
+                            maxLength: 253
+                          workspace:
+                            type: string
+                        required:
+                          - kind
+                          - name
+                      mount:
+                        type: string
+                      path:
+                        type: string
+                      key:
+                        type: string
+                    required:
+                      - mount
+                      - path
+                required:
+                  - vault
+              requester:
+                type: object
+                properties:
+                  did:
+                    type: string
+                  plc:
+                    type: string
+                required:
+                  - did
+              contract:
+                type: object
+                properties:
+                  receipt:
+                    type: object
+                    properties:
+                      uri:
+                        type: string
+                      cid:
+                        type: string
+                    required:
+                      - uri
+                      - cid
+                  accept:
+                    type: object
+                    properties:
+                      uri:
+                        type: string
+                      cid:
+                        type: string
+                    required:
+                      - uri
+                      - cid
+                  submitEventUrl:
+                    type: string
+                  acceptedAt:
+                    type: string
+              image:
+                type: object
+                properties:
+                  reuseStale:
+                    type: boolean
+              stopGraceSeconds:
+                type: integer
+                format: int32
+              guestLogin:
+                type: object
+                properties:
+                  mount:
+                    type: string
+                  bindSecretSha256:
+                    type: string
+                required:
+                  - mount
+                  - bindSecretSha256
+              accept:
+                type: object
+                properties:
+                  uri:
+                    type: string
+                  cid:
+                    type: string
+                required:
+                  - uri
+                  - cid
+              release:
+                type: object
+                properties:
+                  requestedAt:
+                    type: string
+                  request:
+                    type: object
+                    properties:
+                      uri:
+                        type: string
+                      cid:
+                        type: string
+                    required:
+                      - uri
+                      - cid
+                required:
+                  - requestedAt
+            required:
+              - backendRef
+              - vm
+              - owner
+              - userData
+              - requester
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                enum:
+                  - Pending
+                  - Preparing
+                  - Booting
+                  - Running
+                  - Releasing
+                  - Lost
+                  - Failed
+              lostReason:
+                type: string
+                enum:
+                  - HostRebooted
+                  - UnitGone
+                  - UnitFailed
+                  - OOMKilled
+                  - VMMExited
+                  - GuestPoweroff
+                  - IdentityMismatch
+              observedGeneration:
+                type: integer
+                format: int64
+              addresses:
+                type: object
+                properties:
+                  guest:
+                    type: string
+                  host:
+                    type: string
+              bootedAt:
+                type: string
+              message:
+                type: string
+              conditions:
+                type: array
+                items:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+              market:
+                type: object
+                properties:
+                  guest:
+                    type: object
+                    properties:
+                      address:
+                        type: string
+                      reportedAt:
+                        type: string
+                      hostKeys:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            type:
+                              type: string
+                            publicKey:
+                              type: string
+                            fingerprint:
+                              type: string
+                          required:
+                            - type
+                            - publicKey
+                  published:
+                    type: object
+                    properties:
+                      onNetworkUri:
+                        type: string
+                      hostKeysUri:
+                        type: string
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Backend
+          type: string
+          jsonPath: .spec.backendRef.kind
+        - name: GuestIP
+          type: string
+          jsonPath: .status.addresses.guest
+        - name: Requester
+          type: string
+          jsonPath: .spec.requester.did
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
