@@ -181,8 +181,25 @@ async function fileResponse(
   });
 }
 
+// The OAuth client_id is the --origin's metadata URL, and the authorization
+// server rejects an authorization started from any other host name ("client_id
+// does not match"). Page loads from another public host name of this server
+// are sent to the origin; local access (loopback) is left alone.
+function canonicalRedirect(request: Request, url: URL): Response | null {
+  if (!origin || (request.method !== "GET" && request.method !== "HEAD")) return null;
+  const host = request.headers.get("host") ?? url.host;
+  const want = new URL(normalizeOrigin(origin));
+  const bare = host.replace(/:\d+$/, "");
+  if (host === want.host || bare === "localhost" || bare === "127.0.0.1" || bare === "[::1]") {
+    return null;
+  }
+  return Response.redirect(new URL(url.pathname + url.search, want).toString(), 308);
+}
+
 Deno.serve({ hostname, port }, async (request) => {
   const url = new URL(request.url);
+  const canonical = canonicalRedirect(request, url);
+  if (canonical) return canonical;
 
   if (url.pathname === "/debug/log" && request.method === "POST") {
     if (!debugLogPath) return new Response("debug log disabled", { status: 404, headers });
