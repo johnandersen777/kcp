@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"runtime"
 	"strings"
 	"syscall/js"
 	"time"
@@ -42,10 +41,7 @@ type response struct {
 }
 
 func main() {
-	// Allocation profiling samples callers through the wasm pclntab; with this
-	// module size the js runtime occasionally reports an invalid symbol table
-	// and aborts. The browser has no use for heap profiles.
-	runtime.MemProfileRate = 0
+	startHeapDebug()
 
 	rootDir := "/kcp"
 	cfg := real.Config{
