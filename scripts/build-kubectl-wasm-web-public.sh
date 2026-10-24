@@ -106,6 +106,11 @@ for pid in "${pids[@]}"; do
   wait "${pid}"
 done
 
+# serve-public.ts serves the OAuth client metadata scope from this file.
+if [[ -f "${artifacts}/requester-scope.txt" ]]; then
+  cp "${artifacts}/requester-scope.txt" "${out_dir}/requester-scope.txt"
+fi
+
 printf '%s\n' '{"apiServer":"http://kcp.local","intervalMs":1500}' \
   > "${out_dir}/config"
 

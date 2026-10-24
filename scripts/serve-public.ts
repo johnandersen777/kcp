@@ -35,15 +35,15 @@ limitations under the License.
 // linux-kcp. The PDS rejects a token whose scope exceeds the client metadata.
 export const REQUESTER_SCOPE = [
   "atproto",
-  "repo:com.publicdomainrelay.temp.compute.vm?action=create",
-  "repo:com.publicdomainrelay.temp.market.rfp?action=create",
-  "repo:com.publicdomainrelay.temp.market.accept?action=create",
-  "repo:com.publicdomainrelay.temp.market.event?action=create",
-  "repo:com.publicdomainrelay.temp.compute.events.vm.delete?action=create",
-  "repo:com.publicdomainrelay.temp.compute.events.vm.onNetwork?action=create",
+  "repo:com.publicdomainrelay.temp.compute.vm?action=create&action=update",
+  "repo:com.publicdomainrelay.temp.market.rfp?action=create&action=update",
+  "repo:com.publicdomainrelay.temp.market.accept?action=create&action=update",
+  "repo:com.publicdomainrelay.temp.market.event?action=create&action=update",
+  "repo:com.publicdomainrelay.temp.compute.events.vm.delete?action=create&action=update",
+  "repo:com.publicdomainrelay.temp.compute.events.vm.onNetwork?action=create&action=update",
+  "repo:computer.socialweb.temp.policy.ghalite?action=create&action=update",
+  "repo:computer.socialweb.temp.policy.typescript?action=create&action=update",
   "repo:com.fedproxy.rbac?action=create&action=update&action=delete",
-  "repo:computer.socialweb.temp.policy.ghalite?action=create",
-  "repo:computer.socialweb.temp.policy.typescript?action=create",
   "repo:com.publicdomainrelay.temp.badgeBlueKeys?action=create&action=update&action=delete",
   "rpc:com.publicdomainrelay.temp.market.submitRfp?aud=*",
   "rpc:com.publicdomainrelay.temp.market.submitAccept?aud=*",
@@ -52,6 +52,25 @@ export const REQUESTER_SCOPE = [
 ].join(" ");
 
 export const DEFAULT_SCOPE = REQUESTER_SCOPE;
+
+// The socialweb build writes the requester's exact scope next to kcp.wasm
+// (scripts/build-socialweb-kcp-wasm.sh), generated from RequesterOAuthScope.
+export const SCOPE_FILE = "requester-scope.txt";
+
+// loadScope reads a scope file; a missing optional file falls back to
+// DEFAULT_SCOPE, which may lag behind socialweb.
+export async function loadScope(path: string, required = false): Promise<string> {
+  let text: string;
+  try {
+    text = await Deno.readTextFile(path);
+  } catch (err) {
+    if (!required && err instanceof Deno.errors.NotFound) return DEFAULT_SCOPE;
+    throw err;
+  }
+  const scope = text.trim().split(/\s+/).join(" ");
+  if (!scope) throw new Error(`scope file is empty: ${path}`);
+  return scope;
+}
 export const DEFAULT_PORT = 8090;
 export const METADATA_PATH = "/oauth-client-metadata.json";
 export const CALLBACK_PATH = "/oauth/callback/requester";
@@ -329,18 +348,8 @@ async function main(): Promise<void> {
     normalizeOrigin(originOverride);
   }
 
-  let scope = flags.get("scope");
-  if (scope === undefined) {
-    const scopeFile = flags.get("scope-file");
-    if (scopeFile === undefined) {
-      scope = DEFAULT_SCOPE;
-    } else {
-      scope = (await Deno.readTextFile(scopeFile)).trim().split(/\s+/).join(" ");
-      if (!scope) {
-        throw new Error(`scope file is empty: ${scopeFile}`);
-      }
-    }
-  }
+  const scope = flags.get("scope") ??
+    await loadScope(flags.get("scope-file") ?? `${root}/${SCOPE_FILE}`, flags.has("scope-file"));
 
   Deno.serve(
     { hostname: "127.0.0.1", port },

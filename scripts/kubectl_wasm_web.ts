@@ -30,11 +30,12 @@ limitations under the License.
 
 import {
   buildClientMetadata,
-  DEFAULT_SCOPE,
   etagMatches,
   fileETag,
+  loadScope,
   METADATA_PATH,
   normalizeOrigin,
+  SCOPE_FILE,
 } from "./serve-public.ts";
 
 const options = new Map<string, string>();
@@ -62,6 +63,10 @@ const wasmExecCliPath = Deno.realPathSync(
   options.get("wasm-exec-cli") ?? "bin/wasm/wasm_exec_cli.js",
 );
 const hostname = options.get("host") ?? "127.0.0.1";
+const scope = await loadScope(
+  options.get("scope-file") ?? kcpWasmPath.replace(/[^/]*$/, SCOPE_FILE),
+  options.has("scope-file"),
+);
 const port = Number(options.get("port") ?? "8090");
 const origin = options.get("origin");
 const apiServer = options.get("api-server") ?? "http://kcp.local";
@@ -175,7 +180,7 @@ Deno.serve({ hostname, port }, async (request) => {
     const derived = forwarded && host ? `${forwarded}://${host}` : url.origin;
     const metadata = buildClientMetadata(
       origin ? normalizeOrigin(origin) : derived,
-      DEFAULT_SCOPE,
+      scope,
     );
     return new Response(`${JSON.stringify(metadata, null, 2)}\n`, {
       headers: { ...headers, "content-type": "application/json" },

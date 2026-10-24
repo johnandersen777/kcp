@@ -46,6 +46,13 @@ echo "building combined kcp + socialweb wasm..."
     ./cmd/kcp-wasm
 )
 
+# The page's OAuth client metadata must carry exactly the scope the requester
+# asks for; generate it from socialweb's constant next to the module.
+(
+  cd "${module_dir}"
+  go run -modfile="${modfile}" ./cmd/requester-scope
+) > "$(dirname "${out}")/requester-scope.txt"
+
 # Export Go's mutable globals so the browser worker can hibernate the
 # instance into a per-user memory snapshot (scripts/browser/wasm_snapshot.js).
 deno run --allow-read --allow-write "${repo_root}/scripts/wasm_globals.js" "${out}"
