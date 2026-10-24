@@ -104,6 +104,11 @@ if (init.socialweb) {
   workerScope.postMessage({ type: "persist", snapshot });
 };
 
+// The socialweb status feed calls js.Global().Call("__kcpState", json) on
+// every change; calling an undefined global panics the Go runtime. The Deno
+// host has no UI to show it, so drop the snapshots.
+(globalThis as Record<string, unknown>).__kcpState = () => {};
+
 const pending = new Map<number, Pending>();
 let nextCallbackID = 1;
 
