@@ -51,7 +51,11 @@ class FakeWebSocket {
 }
 
 function nonceFetch(nonce, calls = []) {
-  return async (url, init) => {
+  // Like window.fetch, refuse to run as a method of another object.
+  return async function (url, init) {
+    if (this !== undefined && this !== globalThis) {
+      throw new TypeError("Failed to execute 'fetch': Illegal invocation");
+    }
     calls.push({ url, init });
     return new Response(JSON.stringify({ nonce: encodeBase64(nonce) }), {
       status: 200,

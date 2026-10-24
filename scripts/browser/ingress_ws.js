@@ -210,7 +210,9 @@ var SubscriberConnection = class {
     }
     const nonceToken = await this.serviceToken(GET_NONCE_NSID);
     const nonceUrl = `${httpBase(proxyHost)}/xrpc/${GET_NONCE_NSID}`;
-    const response = await this.fetchImpl(nonceUrl, {
+    // Call unbound: window.fetch throws "Illegal invocation" as a method.
+    const fetchImpl = this.fetchImpl;
+    const response = await fetchImpl(nonceUrl, {
       method: "POST",
       headers: {
         Accept: "application/json",
