@@ -87,7 +87,13 @@ done < <(
   } | LC_ALL=C sort
 )
 
-commit=$(git -c safe.directory="$source_dir" -C "$source_dir" rev-parse HEAD)
+# A mirror made with `git archive` has no .git of its own; it records the
+# source commit in .mirror-commit (see the socialweb build helpers).
+if [[ -f "$source_dir/.mirror-commit" ]]; then
+  commit=$(cat "$source_dir/.mirror-commit")
+else
+  commit=$(git -c safe.directory="$source_dir" -C "$source_dir" rev-parse HEAD)
+fi
 
 {
   printf '# Socialweb KCP manifests\n\n'

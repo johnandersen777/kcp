@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-8.bids.socialweb.computer
+  name: v1alpha1-9.bids.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -166,6 +166,20 @@ spec:
                   - acceptAuthor
                   - reason
                   - at
+              submit:
+                type: object
+                properties:
+                  endpoint:
+                    type: string
+                  attempts:
+                    type: integer
+                    format: int32
+                  lastAttemptAt:
+                    type: string
+                  submittedAt:
+                    type: string
+                  lastError:
+                    type: string
               conditions:
                 type: array
                 items:

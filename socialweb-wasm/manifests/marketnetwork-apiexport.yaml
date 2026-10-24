@@ -51,7 +51,7 @@ spec:
         crd: {}
     - group: socialweb.computer
       name: gatewayapis
-      schema: v1alpha1-11.gatewayapis.socialweb.computer
+      schema: v1alpha1-12.gatewayapis.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer

@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-11.gatewayapis.socialweb.computer
+  name: v1alpha1-12.gatewayapis.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -369,10 +369,6 @@ spec:
                     type: string
                   nodePolicyArgs:
                     type: string
-                  extraBidderDIDs:
-                    type: array
-                    items:
-                      type: string
                   infraRecord:
                     type: object
                     properties:
