@@ -2124,6 +2124,7 @@ async function requestVM() {
     const ssh = computeSSHEl.value.trim();
     const ttlSeconds = parseTTLSeconds(computeTTLEl.value);
     const name = vmshell.contractName();
+    addLog("info", `requesting ComputeContract ${name} from ${bidders.join(", ")}`);
     if (shell) {
       const token = vmshell.randomToken();
       localStorage.setItem(computePrefs.token(name), token);
@@ -2142,6 +2143,7 @@ async function requestVM() {
     setAppStatus(computeStatusEl, `${name} requested from ${bidders.join(", ")}`, "ok");
     addLog("ok", `ComputeContract ${name} requested from ${bidders.join(", ")}${shell ? " with a web shell" : ""}`);
   } catch (err) {
+    addLog("error", `Request VM failed: ${err instanceof Error ? err.message : err}`);
     setAppStatus(computeStatusEl, String(err.message ?? err), "err");
     computeBusy = false;
   }
@@ -2238,6 +2240,9 @@ function applyComputeState(state) {
   }
   const render = JSON.stringify(contracts) + [...computeReleaseAsked].join();
   if (render === computeLastRender) return;
+  for (const c of contracts) {
+    addLog("info", `ComputeContract ${c.name} ${c.phase ?? "Pending"}${c.release ? " (release asked)" : ""}${c.message ? `: ${c.message}` : ""}`);
+  }
   computeLastRender = render;
   computeListEl.replaceChildren(...contracts.map(computeRow));
 }
