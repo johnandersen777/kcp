@@ -588,13 +588,31 @@ function schedulePersist(snapshot, key = stateKey, seq = 0) {
   }, 250));
 }
 
+// socialweb skips its provider manifests when the restored kcp state already
+// has Ready APIBindings, so state saved by an older kcp.wasm would keep that
+// build's schemas. Re-apply once whenever kcp.wasm changed since the state was
+// saved (its ETag is the build's identity).
+async function kcpBuildChanged() {
+  try {
+    const etag = (await fetch("/kcp.wasm", { method: "HEAD" })).headers.get("etag") ?? "";
+    const previous = localStorage.getItem("kcp.stateBuild");
+    localStorage.setItem("kcp.stateBuild", etag);
+    // No record means state from before this check: re-apply to be safe.
+    return previous !== etag;
+  } catch {
+    return false;
+  }
+}
+
 async function spawnKcp(useSnapshot = true) {
   const spawnStarted = performance.now();
-  const [initialState, socialwebSnapshot, hibernate] = await Promise.all([
+  const [initialState, socialwebSnapshot, hibernate, buildChanged] = await Promise.all([
     loadKcpState(),
     loadInitialState(socialwebStateKey),
     hibernateInit(useSnapshot),
+    kcpBuildChanged(),
   ]);
+  if (buildChanged && initialState) addLog("info", "kcp.wasm changed since the saved state; re-applying the socialweb manifests");
   const worker = new Worker("/kcp_worker.js", { type: "module" });
   attachKcp(worker);
   const readyPromise = waitReady(worker);
@@ -617,7 +635,7 @@ async function spawnKcp(useSnapshot = true) {
       pdsUrl: localStorage.getItem("socialweb.pdsUrl") ?? "",
       oauthClientId: `${location.origin}/oauth-client-metadata.json`,
       oauthRedirectUri: `${location.origin}/oauth/callback/requester`,
-      forceApply: localStorage.getItem("socialweb.forceApply") === "1",
+      forceApply: buildChanged || localStorage.getItem("socialweb.forceApply") === "1",
       statusFeed: localStorage.getItem("socialweb.statusFeed") !== "0",
       restore: socialwebSnapshot,
     },

@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-3.firecrackervms.socialweb.computer
+  name: v1alpha1-4.firecrackervms.socialweb.computer
   labels:
     contracts.socialweb.computer/computevms: v1alpha1
 spec:
@@ -85,6 +85,12 @@ spec:
               stopGraceSeconds:
                 type: integer
                 format: int32
+              hostPorts:
+                type: array
+                items:
+                  type: integer
+                  format: int32
+                x-kubernetes-list-type: set
             required:
               - owner
               - vcpu

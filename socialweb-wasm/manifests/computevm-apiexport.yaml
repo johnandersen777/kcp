@@ -6,12 +6,12 @@ spec:
   resources:
     - group: socialweb.computer
       name: computevms
-      schema: v1alpha1-11.computevms.socialweb.computer
+      schema: v1alpha1-12.computevms.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
       name: firecrackervms
-      schema: v1alpha1-3.firecrackervms.socialweb.computer
+      schema: v1alpha1-4.firecrackervms.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
