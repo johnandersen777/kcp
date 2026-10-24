@@ -718,7 +718,9 @@ func (s *Store) recordEventLocked(key string, typ watch.EventType, obj runtime.O
 		obj:  obj, // stored objects are immutable
 		meta: s.objectMeta[key],
 	})
-	if len(s.events) > maxWatchHistory {
+	// Trim in batches: copying the whole history on every write once it is
+	// full dominated update cost (~500 KB copied per write).
+	if len(s.events) > maxWatchHistory+maxWatchHistory/4 {
 		drop := len(s.events) - maxWatchHistory
 		s.compactedRV = s.events[drop-1].rv
 		s.events = append([]storedEvent(nil), s.events[drop:]...)
