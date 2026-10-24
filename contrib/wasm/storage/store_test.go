@@ -547,6 +547,53 @@ func TestOnSnapshotCoalesces(t *testing.T) {
 	}
 }
 
+// TestNoopUpdateDetection checks which updates bump the resource version: a
+// semantically identical result must not (nil and empty maps are equal), and
+// an update func that modifies its input in place and returns it must (the
+// registry's graceful deletion does exactly that).
+func TestNoopUpdateDetection(t *testing.T) {
+	ctx := context.Background()
+	s := New()
+	defer s.Close()
+
+	if err := s.Create(ctx, key("a"), newFetch("a"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	update := func(fn func(*fetchv1alpha1.Fetch) runtime.Object) string {
+		t.Helper()
+		var out fetchv1alpha1.Fetch
+		if err := s.GuaranteedUpdate(ctx, key("a"), &out, false, nil,
+			func(input runtime.Object, _ kstorage.ResponseMeta) (runtime.Object, *uint64, error) {
+				return fn(input.(*fetchv1alpha1.Fetch)), nil, nil
+			}, nil); err != nil {
+			t.Fatal(err)
+		}
+		return out.ResourceVersion
+	}
+
+	if rv := update(func(f *fetchv1alpha1.Fetch) runtime.Object {
+		f = f.DeepCopy()
+		f.Labels = map[string]string{} // nil before: semantically equal
+		return f
+	}); rv != "2" {
+		t.Fatalf("empty-labels update RV = %s, want 2 (no-op)", rv)
+	}
+	if rv := update(func(f *fetchv1alpha1.Fetch) runtime.Object {
+		now := metav1.Now()
+		f.DeletionTimestamp = &now // in place
+		return f
+	}); rv != "3" {
+		t.Fatalf("in-place update RV = %s, want 3", rv)
+	}
+	var got fetchv1alpha1.Fetch
+	if err := s.Get(ctx, key("a"), kstorage.GetOptions{}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DeletionTimestamp == nil {
+		t.Fatal("in-place update was not stored")
+	}
+}
+
 // TestReturnedObjectsAreCopies guards the DeepCopy fast path of copyObject:
 // callers own what they get back and mutating it must not reach the store.
 func TestReturnedObjectsAreCopies(t *testing.T) {

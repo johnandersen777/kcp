@@ -24,7 +24,6 @@ limitations under the License.
 package storage
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -35,6 +34,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
@@ -364,29 +364,56 @@ func (s *Store) GuaranteedUpdate(
 	tryUpdate kstorage.UpdateFunc,
 	cachedExistingObject runtime.Object,
 ) error {
+	return s.guaranteedUpdate(ctx, key, destination, ignoreNotFound, preconditions, tryUpdate, nil)
+}
+
+// guaranteedUpdate is GuaranteedUpdate with an optional prepare hook that
+// turns the stored object into the caller's view of it (prefixedStore
+// re-applies codec defaults there). prepare must not modify its argument.
+func (s *Store) guaranteedUpdate(
+	ctx context.Context,
+	key string,
+	destination runtime.Object,
+	ignoreNotFound bool,
+	preconditions *kstorage.Preconditions,
+	tryUpdate kstorage.UpdateFunc,
+	prepare func(stored runtime.Object) (runtime.Object, error),
+) error {
 	if tryUpdate == nil {
 		return fmt.Errorf("tryUpdate is required")
 	}
 
 	s.mu.Lock()
 	existing, exists := s.objects[key]
+	m := s.objectMeta[key]
 
-	var input runtime.Object
+	// orig is the unmodified view a no-op is detected against. tryUpdate gets
+	// a private copy because it may modify its input in place and return it
+	// (the registry's graceful deletion does); comparing against that same
+	// object would turn every such update into a no-op.
+	var orig, input runtime.Object
 	var responseMeta kstorage.ResponseMeta
 	if exists {
-		input = existing.DeepCopyObject()
-		rv, err := s.versioner.ObjectResourceVersion(input)
+		rv, err := s.versioner.ObjectResourceVersion(existing)
 		if err != nil {
 			s.mu.Unlock()
 			return err
 		}
 		responseMeta.ResourceVersion = rv
 		if preconditions != nil {
-			if err := preconditions.Check(key, input); err != nil {
+			if err := preconditions.Check(key, existing); err != nil {
 				s.mu.Unlock()
 				return err
 			}
 		}
+		orig = existing
+		if prepare != nil {
+			if orig, err = prepare(existing); err != nil {
+				s.mu.Unlock()
+				return err
+			}
+		}
+		input = orig.DeepCopyObject()
 	} else {
 		if !ignoreNotFound {
 			rv := s.rv
@@ -406,9 +433,13 @@ func (s *Store) GuaranteedUpdate(
 		output = input
 	}
 
-	if exists && objectsEqual(input, output) {
+	if exists && objectsEqual(orig, output) {
 		s.mu.Unlock()
-		return copyObject(output, destination)
+		if err := copyObject(output, destination); err != nil {
+			return err
+		}
+		annotateObject(destination, m)
+		return nil
 	}
 
 	s.rv++
@@ -766,16 +797,11 @@ func predicateMatches(p kstorage.SelectionPredicate, obj runtime.Object) bool {
 	return true
 }
 
+// objectsEqual decides whether an update is a no-op, which must not bump the
+// resource version. Semantic equality treats nil and empty collections, and
+// equal quantities and times, alike, as their encodings would.
 func objectsEqual(a, b runtime.Object) bool {
-	ab, err := json.Marshal(a)
-	if err != nil {
-		return false
-	}
-	bb, err := json.Marshal(b)
-	if err != nil {
-		return false
-	}
-	return bytes.Equal(ab, bb)
+	return apiequality.Semantic.DeepEqual(a, b)
 }
 
 // copyObject deep-copies src into dst. When both have the same concrete type

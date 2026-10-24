@@ -265,19 +265,10 @@ func (p *prefixedStore) GuaranteedUpdate(
 	}
 	// Re-apply defaults to the object handed to the update function, exactly
 	// as the etcd3 store does when it decodes the stored value.
-	update := kstorage.UpdateFunc(func(existing runtime.Object, res kstorage.ResponseMeta) (runtime.Object, *uint64, error) {
-		decoded, err := p.applyDefaults(existing)
-		if err != nil {
-			return nil, nil, err
-		}
-		if decoded != existing {
-			if err := copyObject(decoded, existing); err != nil {
-				return nil, nil, err
-			}
-		}
-		return tryUpdate(existing, res)
-	})
-	if err := p.store.GuaranteedUpdate(ctx, full, destination, ignoreNotFound, preconditions, update, cachedExistingObject); err != nil {
+	prepare := func(stored runtime.Object) (runtime.Object, error) {
+		return p.applyDefaults(stored.DeepCopyObject())
+	}
+	if err := p.store.guaranteedUpdate(ctx, full, destination, ignoreNotFound, preconditions, tryUpdate, prepare); err != nil {
 		return err
 	}
 	if destination != nil {
