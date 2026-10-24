@@ -30,6 +30,8 @@ import {
 import { buildDiagram, nodeID } from "./diagram.js";
 import { OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
 import { assembleSnapshot, openBestBackend, snapshotRecords } from "./state_store.js";
+import { decodeBase64, encodeBase64, register as registerIngress } from "./ingress_ws.js";
+import * as vmshell from "./vmshell.js";
 
 const config = await (await fetch("/config")).json();
 const apiServer = String(config.apiServer);
@@ -392,6 +394,10 @@ function attachKcp(worker) {
     const data = event.data ?? {};
     if (data.type === "state") {
       applyState(data.state);
+      return;
+    }
+    if (data.type === "socialweb-ingress") {
+      applyIngress(data.ingress ?? []);
       return;
     }
     if (data.type === "response") {
@@ -1811,6 +1817,7 @@ async function createContract() {
 
 function applyState(state) {
   if (!state) return;
+  applyVMShellState(state);
   if (!state.marketRequester) {
     setAppStatus(identityStatusEl, "waiting for the MarketRequester app…", "warn");
     return;
@@ -1885,6 +1892,210 @@ function initSocialwebUI() {
     });
   });
   contractCreateEl.addEventListener("click", () => void createContract());
+  initVMShellUI();
+}
+
+// --- VM shell ----------------------------------------------------------------
+// "Request VM shell": write the wootty token bundle into the browser vault,
+// then apply a ComputeContract with secretsRef and a plan 0032 shell tunnel.
+// The link is the "shell" tagged address from status.contract.networks plus
+// #token=. The token stays in localStorage, keyed by contract name, so the
+// link survives a reload.
+
+const vmshellBiddersEl = document.getElementById("vmshell-bidders");
+const vmshellRequestEl = document.getElementById("vmshell-request");
+const vmshellReleaseEl = document.getElementById("vmshell-release");
+const vmshellStatusEl = document.getElementById("vmshell-status");
+const vmshellLinkEl = document.getElementById("vmshell-link");
+const vmshellIngressEl = document.getElementById("vmshell-ingress");
+const vmshellPrefs = {
+  bidders: "socialweb.vmshell.bidders",
+  current: "socialweb.vmshell.current",
+  token: (name) => `socialweb.vmshell.token.${name}`,
+};
+let vmshellName = localStorage.getItem(vmshellPrefs.current) ?? "";
+let vmshellBusy = false;
+let vmshellLastLink = "";
+
+// socialwebCall invokes a page-only Go export through kcp_worker.js.
+function socialwebCall(fn, payload, timeoutMs = 30_000) {
+  const worker = kcpWorker;
+  if (!worker) return Promise.reject(new Error("kcp worker is not running"));
+  const id = nextPageRequestID--;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (pendingPageRequests.delete(id)) reject(new Error(`${fn} timed out`));
+    }, timeoutMs);
+    pendingPageRequests.set(id, { resolve, reject, timer });
+    worker.postMessage({ type: "socialweb-call", id, fn, payload: JSON.stringify(payload) });
+  }).then((res) => {
+    if (res?.error) throw new Error(String(res.error));
+    return res;
+  });
+}
+
+async function requestVMShell() {
+  try {
+    vmshellBusy = true;
+    vmshellRequestEl.disabled = true;
+    localStorage.setItem(vmshellPrefs.bidders, vmshellBiddersEl.value.trim());
+    const bidders = vmshell.parseBidders(vmshellBiddersEl.value);
+    const name = vmshell.contractName();
+    const token = vmshell.randomToken();
+    localStorage.setItem(vmshellPrefs.token(name), token);
+    // The requester reads the bundle once and fails the contract when it is
+    // missing, so it must exist before the contract does.
+    await socialwebCall("socialwebVaultPut", {
+      workspace: "root",
+      mount: vmshell.SECRETS_MOUNT,
+      path: vmshell.secretsPath(name),
+      bundle: vmshell.secretsBundle(token),
+    });
+    const identity = await kubectlJSON(["get", "marketidentity", "requester"]).catch(() => null);
+    const manifest = vmshell.contractManifest({ name, bidders, ownerDid: identity?.status?.did ?? "" });
+    const result = await runKubectl(withServer(["apply", "-f", "-"]), JSON.stringify(manifest));
+    if (result.code !== 0) {
+      throw new Error(String(result.stderr || result.stdout || "apply failed").trim());
+    }
+    vmshellName = name;
+    vmshellLastLink = "";
+    vmshellLinkEl.textContent = "";
+    localStorage.setItem(vmshellPrefs.current, name);
+    setAppStatus(vmshellStatusEl, `${name}: Pending`, "warn");
+    addLog("ok", `VM shell ${name} requested from ${bidders.join(", ")}`);
+  } catch (err) {
+    setAppStatus(vmshellStatusEl, String(err.message ?? err), "err");
+  } finally {
+    vmshellBusy = false;
+  }
+}
+
+async function releaseVMShell() {
+  const name = vmshellName;
+  if (!name) return;
+  vmshellReleaseEl.disabled = true;
+  const result = await runKubectl(withServer([
+    "patch", "computecontract", name, "--type=merge", "-p", JSON.stringify({ spec: { release: true } }),
+  ]));
+  if (result.code !== 0) {
+    setAppStatus(vmshellStatusEl, String(result.stderr ?? "release failed").trim(), "err");
+    vmshellReleaseEl.disabled = false;
+    return;
+  }
+  addLog("info", `VM shell ${name} released`);
+}
+
+function applyVMShellState(state) {
+  vmshellRequestEl.disabled = vmshellBusy || state.marketIdentity?.phase !== "Ready";
+  if (!vmshellName) return;
+  const contract = (state.contracts ?? []).find((c) => c.name === vmshellName);
+  if (!contract) {
+    vmshellReleaseEl.disabled = true;
+    setAppStatus(vmshellStatusEl, `${vmshellName}: not served yet`, "warn");
+    return;
+  }
+  const phase = contract.phase ?? "Pending";
+  vmshellReleaseEl.disabled = Boolean(contract.release);
+  setAppStatus(vmshellStatusEl,
+    [vmshellName, phase, contract.chosenDid ? `bidder ${contract.chosenDid}` : "",
+      contract.secretsFetchedAt ? `secrets fetched ${contract.secretsFetchedAt}` : "",
+      contract.release ? "released" : "", contract.message ?? ""].filter(Boolean).join(" · "),
+    phase === "Failed" ? "err" : phase === "Held" ? "ok" : "warn");
+  const link = vmshell.shellLink(contract, localStorage.getItem(vmshellPrefs.token(vmshellName)) ?? "");
+  if (link === vmshellLastLink && link) return;
+  vmshellLastLink = link;
+  vmshellLinkEl.textContent = "";
+  if (link) {
+    const a = document.createElement("a");
+    a.href = link;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = "Open shell";
+    vmshellLinkEl.append(a);
+  } else if (phase === "Held" || contract.secretsFetchedAt) {
+    vmshellLinkEl.textContent = "waiting for shell address";
+  }
+}
+
+function initVMShellUI() {
+  vmshellBiddersEl.value = localStorage.getItem(vmshellPrefs.bidders) ?? vmshell.DEFAULT_BIDDERS.join(", ");
+  vmshellRequestEl.addEventListener("click", () => void requestVMShell());
+  vmshellReleaseEl.addEventListener("click", () => void releaseVMShell());
+}
+
+// --- ingress relay -------------------------------------------------------------
+// Ingress-mode Exposures (the requester's svc-requester-requester-ingress,
+// which serves getSecrets to the guest) are reachable at
+// https://<did label>.<relay>. Go owns the per-Exposure did:key; the page owns
+// the com.fedproxy.temp.xrpc.subscribe WebSocket and forwards each request
+// frame to socialwebIngressRequest, which serves only that host's routes.
+
+const ingressSubs = new Map();
+const ingressRegistered = new Set();
+let ingressList = [];
+
+function applyIngress(list) {
+  ingressList = list;
+  const hosts = new Set(list.map((entry) => entry.host));
+  for (const [host, sub] of ingressSubs) {
+    if (!hosts.has(host)) {
+      sub.close();
+      ingressSubs.delete(host);
+      ingressRegistered.delete(host);
+    }
+  }
+  for (const entry of list) {
+    if (!ingressSubs.has(entry.host)) startIngress(entry);
+  }
+  renderIngress();
+}
+
+function renderIngress() {
+  vmshellIngressEl.textContent = ingressList.map((entry) =>
+    `${entry.name}: ${entry.url} (${ingressRegistered.has(entry.host) ? "registered" : "connecting"})`
+  ).join("\n");
+}
+
+function startIngress(entry) {
+  const pending = { closed: false, close() { this.closed = true; } };
+  ingressSubs.set(entry.host, pending);
+  const host = entry.host;
+  registerIngress({
+    proxyHost: entry.proxyHost,
+    did: entry.did,
+    getServiceAuthToken: async (nsid) =>
+      (await socialwebCall("socialwebIngressToken", { host, nsid })).token,
+    signer: async (nonce) =>
+      decodeBase64((await socialwebCall("socialwebIngressSign", { host, nonce: encodeBase64(nonce) })).signature),
+    handler: async (req) => {
+      const res = await socialwebCall("socialwebIngressRequest", {
+        host, method: req.method, path: req.path, params: req.params,
+        headers: req.headers, body: req.body, rawBody: req.rawBody,
+      }, 60_000);
+      return { status: res.status, body: res.body, contentType: res.contentType || "application/json", headers: res.headers };
+    },
+    onRegistered: () => {
+      ingressRegistered.add(host);
+      addLog("ok", `ingress ${entry.name} registered at ${entry.url}`);
+      renderIngress();
+    },
+    onClose: () => {
+      ingressRegistered.delete(host);
+      renderIngress();
+    },
+    onError: (err) => addLog("warn", `ingress ${entry.name}: ${err instanceof Error ? err.message : err}`),
+  }).then((sub) => {
+    if (pending.closed) sub.close();
+    else ingressSubs.set(host, sub);
+  }).catch((err) => {
+    addLog("error", `ingress ${entry.name}: ${err instanceof Error ? err.message : err}`);
+    ingressSubs.delete(host);
+    // The first registration does not reconnect by itself; retry while listed.
+    setTimeout(() => {
+      const current = ingressList.find((e) => e.host === host);
+      if (current && !ingressSubs.has(host)) startIngress(current);
+    }, 10_000);
+  });
 }
 
 // --- startup ---------------------------------------------------------------

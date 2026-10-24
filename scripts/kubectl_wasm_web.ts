@@ -81,6 +81,8 @@ const assets = new Map<string, string>([
   ["/oauth.js", "oauth.js"],
   ["/state_store.js", "state_store.js"],
   ["/wasm_fetch.js", "wasm_fetch.js"],
+  ["/ingress_ws.js", "ingress_ws.js"],
+  ["/vmshell.js", "vmshell.js"],
 ]);
 
 const wasmModules = new Map<string, string>([

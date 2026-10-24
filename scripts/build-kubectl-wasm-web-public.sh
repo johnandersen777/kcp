@@ -61,6 +61,8 @@ assets=(
   oauth.js
   state_store.js
   wasm_fetch.js
+  ingress_ws.js
+  vmshell.js
 )
 wasm_modules=(
   kcp.wasm

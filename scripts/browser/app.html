@@ -359,6 +359,17 @@
         <button id="contract-create" type="button" disabled>Create contract</button>
         <div id="contract-status" class="app-status">no contract yet</div>
       </div>
+      <div class="app-block">
+        <h2>VM shell</h2>
+        <label><span>Bidders</span>
+          <input id="vmshell-bidders" placeholder="did:plc:… (comma separated)" />
+        </label>
+        <button id="vmshell-request" type="button" disabled>Request VM shell</button>
+        <button id="vmshell-release" type="button" disabled>Release</button>
+        <div id="vmshell-status" class="app-status">no VM shell yet</div>
+        <div id="vmshell-link" class="app-status"></div>
+        <div id="vmshell-ingress" class="app-status"></div>
+      </div>
     </div>
     <h2>Live API surface <span id="diagram-updated">closed</span>
       <span class="hint">click a node to describe it</span>
