@@ -99,7 +99,19 @@ let debugLog = localStorage.getItem("kcp.debuglog") !== "0";
 // (sticky) turns it off.
 const debugGoParam = new URLSearchParams(location.search).get("debuggo");
 if (debugGoParam !== null) localStorage.setItem("kcp.debugGo", debugGoParam === "0" ? "0" : "1");
-const debugSession = Math.random().toString(36).slice(2, 8);
+// One id per tab, kept across reloads, so remote debug commands keep
+// reaching the same tab.
+const debugSession = (() => {
+  try {
+    const kept = sessionStorage.getItem("kcp.debugSession");
+    if (kept) return kept;
+    const fresh = Math.random().toString(36).slice(2, 8);
+    sessionStorage.setItem("kcp.debugSession", fresh);
+    return fresh;
+  } catch {
+    return Math.random().toString(36).slice(2, 8);
+  }
+})();
 let debugQueue = [];
 function debugSend(level, message) {
   if (!debugLog) return;
@@ -3070,6 +3082,33 @@ const debugHandle = {
     return out.join("\n");
   },
   log: (message) => addLog("info", `debug: ${message}`),
+  reload: (query) => {
+    debugSend("info", "debug: reloading");
+    debugFlush();
+    setTimeout(() => {
+      if (query === undefined) location.reload();
+      else location.search = query;
+    }, 300);
+    return "reloading";
+  },
+  // Wipe this origin's saved state (what "clear website data" would do for
+  // the page) and reload: localStorage except the debug switches, and every
+  // IndexedDB database and the OPFS snapshots.
+  reset: async () => {
+    const keep = ["kcp.debuglog", "kcp.debugGo", "kcp.lowmem"].map((k) => [k, localStorage.getItem(k)]);
+    localStorage.clear();
+    for (const [k, v] of keep) if (v !== null) localStorage.setItem(k, v);
+    const dbs = typeof indexedDB.databases === "function" ? await indexedDB.databases() : [];
+    for (const db of dbs) if (db.name) indexedDB.deleteDatabase(db.name);
+    try {
+      const root = await navigator.storage.getDirectory();
+      for await (const name of root.keys()) await root.removeEntry(name, { recursive: true });
+    } catch {
+      // no OPFS
+    }
+    debugSend("info", `debug: reset; deleted ${dbs.map((db) => db.name).join(", ") || "no"} IndexedDB databases`);
+    return debugHandle.reload();
+  },
 };
 
 function startDebugControl() {
