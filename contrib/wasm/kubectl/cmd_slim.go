@@ -26,6 +26,7 @@ import (
 
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
+	"k8s.io/client-go/rest"
 	"k8s.io/kubectl/pkg/cmd/apiresources"
 	"k8s.io/kubectl/pkg/cmd/apply"
 	"k8s.io/kubectl/pkg/cmd/create"
@@ -44,6 +45,8 @@ import (
 // go-template, see _overlay/slim) turns off the linker's method dead-code
 // elimination and costs ~40 MiB.
 func newKubectlCommand(streams genericiooptions.IOStreams, _ []string) *cobra.Command {
+	warningHandler := rest.NewWarningWriter(streams.ErrOut, rest.WarningWriterOptions{Deduplicate: true})
+	warningsAsErrors := false
 	cmds := &cobra.Command{
 		Use:   "kubectl",
 		Short: "kubectl (mobile build: a subset of the upstream commands)",
@@ -62,11 +65,23 @@ func newKubectlCommand(streams genericiooptions.IOStreams, _ []string) *cobra.Co
 			return fmt.Errorf("kubectl %s is not available in the mobile kubectl (low-memory mode; localStorage kcp.lowmem=0 loads the full one). Available: %s",
 				args[0], strings.Join(names, ", "))
 		},
-		Run:          func(cmd *cobra.Command, _ []string) { _ = cmd.Help() },
-		SilenceUsage: true,
+		Run: func(cmd *cobra.Command, _ []string) { _ = cmd.Help() },
+		PersistentPreRun: func(*cobra.Command, []string) {
+			rest.SetDefaultWarningHandler(warningHandler)
+		},
+		PersistentPostRunE: func(*cobra.Command, []string) error {
+			if n := warningHandler.WarningCount(); warningsAsErrors && n > 0 {
+				return fmt.Errorf("%d warning(s) received", n)
+			}
+			return nil
+		},
+		SilenceUsage:      true,
+		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 	}
 
 	flags := cmds.PersistentFlags()
+	// version reads it unconditionally.
+	flags.BoolVar(&warningsAsErrors, "warnings-as-errors", false, "Treat warnings received from the server as errors and exit with a non-zero exit code")
 	kubeConfigFlags := genericclioptions.NewConfigFlags(true).
 		WithDeprecatedPasswordFlag().
 		WithDiscoveryBurst(300).

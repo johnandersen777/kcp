@@ -128,7 +128,7 @@ try {
   instance = await instantiate(wasmUrl);
 } catch (err) {
   if (!init.fallbackUrl) throw err;
-  log("warn", `${wasmUrl}: ${err instanceof Error ? err.message : err}; loading ${init.fallbackUrl}`);
+  log("warn", `${err instanceof Error ? err.message : err}; loading ${init.fallbackUrl}`);
   wasmUrl = init.fallbackUrl;
   instance = await instantiate(wasmUrl);
 }
@@ -144,8 +144,7 @@ if (typeof globalThis.kubectlRun !== "function") {
 }
 
 globalThis.__kubectlResolve = (id, payload) => {
-  self.postMessage({ type: "result", id, result: JSON.parse(payload) });
-};
+  self.postMessage({ type: "result", id, result: JSON.parse(payload) });};
 
 self.onmessage = (event) => {
   const { type, id, request } = event.data ?? {};
