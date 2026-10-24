@@ -11,13 +11,38 @@ export const OAUTH_CALLBACK_MESSAGE = "socialweb-oauth-callback";
 export const OAUTH_CHANNEL = "socialweb-oauth";
 export const OAUTH_POPUP_TIMEOUT_MS = 5 * 60 * 1000;
 
-/** Validate a BroadcastChannel callback payload (same-origin by construction). */
+/** Validate a BroadcastChannel callback payload (same-origin by construction): a code or an error. */
 export function isOAuthCallbackMessage(data) {
-  return Boolean(data && data.type === OAUTH_CALLBACK_MESSAGE && typeof data.code === "string");
+  return Boolean(
+    data && data.type === OAUTH_CALLBACK_MESSAGE &&
+      (typeof data.code === "string" || typeof data.error === "string"),
+  );
 }
 
 /** @type {Window | null} */
 let currentPopup = null;
+
+/**
+ * Open the popup window, blank unless a URL is given. Browsers (iOS Safari
+ * above all) block window.open outside a click handler, so the page reserves
+ * the popup on the click and points it at the authorization URL once the PDS
+ * has produced one.
+ *
+ * @param {string} [url]
+ * @param {{ width?: number, height?: number }} [options]
+ * @returns {Window | null}
+ */
+export function reserveOAuthPopup(url = "", options = {}) {
+  const width = options.width ?? 520;
+  const height = options.height ?? 720;
+  const left = Math.round(window.screenX + (window.outerWidth - width) / 2);
+  const top = Math.round(window.screenY + (window.outerHeight - height) / 2);
+  return window.open(
+    url,
+    "socialweb-oauth",
+    `popup=yes,width=${width},height=${height},left=${left},top=${top}`,
+  );
+}
 
 /**
  * Validate a postMessage event as the callback from the OAuth popup. The
@@ -48,16 +73,13 @@ export function isValidOAuthCallback(event, popup, origin) {
  * @returns {Promise<Record<string, unknown>>}
  */
 export function openOAuthPopup(url, options = {}) {
-  const width = options.width ?? 520;
-  const height = options.height ?? 720;
   const timeoutMs = options.timeoutMs ?? OAUTH_POPUP_TIMEOUT_MS;
-  const left = Math.round(window.screenX + (window.outerWidth - width) / 2);
-  const top = Math.round(window.screenY + (window.outerHeight - height) / 2);
-  const popup = window.open(
-    url,
-    "socialweb-oauth",
-    `popup=yes,width=${width},height=${height},left=${left},top=${top}`,
-  );
+  let popup = options.popup && !options.popup.closed ? options.popup : null;
+  if (popup) {
+    popup.location.href = url;
+  } else {
+    popup = reserveOAuthPopup(url, options);
+  }
   if (!popup) {
     return Promise.reject(new Error("OAuth popup was blocked"));
   }

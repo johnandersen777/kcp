@@ -9,6 +9,7 @@ import {
 } from "../serve-public.ts";
 import {
   OAUTH_CALLBACK_MESSAGE,
+  isOAuthCallbackMessage,
   isValidOAuthCallback,
 } from "./oauth.js";
 
@@ -127,4 +128,10 @@ Deno.test("isValidOAuthCallback checks message type, origin and source", () => {
   );
   assert(!isValidOAuthCallback(null, popup, origin), "missing event rejected");
   assert(!isValidOAuthCallback(event, null, origin), "missing popup rejected");
+});
+
+Deno.test("BroadcastChannel callbacks carry a code or an error", () => {
+  assertEquals(isOAuthCallbackMessage({ type: OAUTH_CALLBACK_MESSAGE, code: "c" }), true);
+  assertEquals(isOAuthCallbackMessage({ type: OAUTH_CALLBACK_MESSAGE, error: "access_denied" }), true);
+  assertEquals(isOAuthCallbackMessage({ type: OAUTH_CALLBACK_MESSAGE, code: null, error: null }), false);
 });

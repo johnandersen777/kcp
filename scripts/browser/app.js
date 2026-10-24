@@ -28,7 +28,7 @@ import {
   getCommandNames,
 } from "https://esm.sh/just-bash@3.6.0/browser";
 import { buildDiagram, nodeID } from "./diagram.js";
-import { OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
+import { OAUTH_CALLBACK_MESSAGE, openOAuthPopup, reserveOAuthPopup } from "./oauth.js";
 import { assembleSnapshot, openBestBackend, snapshotRecords } from "./state_store.js";
 import { decodeBase64, encodeBase64, register as registerIngress } from "./ingress_ws.js";
 import * as vmshell from "./vmshell.js";
@@ -1896,6 +1896,11 @@ async function completeOAuth(message) {
     const value = message?.[key];
     if (value) query.set(key, String(value));
   }
+  // socialweb only says "names no code"; show what the authorization server said.
+  if (!message?.code) {
+    const reason = [message?.error, message?.error_description].filter(Boolean).join(": ");
+    throw new Error(`the authorization server returned no code${reason ? ` (${reason})` : " and no error"}`);
+  }
   setAppStatus(identityStatusEl, "completing sign-in…", "warn");
   const response = await kcpPageRequest({
     method: "GET",
@@ -1909,9 +1914,13 @@ async function completeOAuth(message) {
   setAppStatus(identityStatusEl, "signed in; waiting for MarketIdentity", "ok");
 }
 
+// The popup opened on the Sign in click, waiting for the authorization URL.
+let reservedPopup = null;
+
 async function beginSignIn() {
   try {
     identitySignInEl.disabled = true;
+    reservedPopup = reserveOAuthPopup();
     await patchRequesterIdentity();
     if (pendingSignInURL) {
       await openSignInPopup();
@@ -1920,11 +1929,21 @@ async function beginSignIn() {
       setAppStatus(identityStatusEl, "starting OAuth… waiting for the PDS", "warn");
     }
   } catch (err) {
-    signInWaiting = false;
-    addLog("error", `sign-in failed: ${err instanceof Error ? err.message : err}`);
-    setAppStatus(identityStatusEl, String(err.message ?? err), "err");
-    identitySignInEl.disabled = false;
+    signInFailed(err);
   }
+}
+
+function signInFailed(err) {
+  signInWaiting = false;
+  try {
+    reservedPopup?.close();
+  } catch {
+    // Already closed.
+  }
+  reservedPopup = null;
+  addLog("error", `sign-in failed: ${err instanceof Error ? err.message : err}`);
+  setAppStatus(identityStatusEl, String(err.message ?? err), "err");
+  identitySignInEl.disabled = false;
 }
 
 async function openSignInPopup() {
@@ -1932,7 +1951,9 @@ async function openSignInPopup() {
   if (!url) throw new Error("the identity has no pending sign-in URL yet");
   signInWaiting = false;
   setAppStatus(identityStatusEl, "waiting for the AT Protocol popup…", "warn");
-  const message = await openOAuthPopup(url);
+  const popup = reservedPopup;
+  reservedPopup = null;
+  const message = await openOAuthPopup(url, { popup });
   if (message.type !== OAUTH_CALLBACK_MESSAGE) return;
   await completeOAuth(message);
 }
@@ -1961,9 +1982,7 @@ function applyState(state) {
     ? String(action.url ?? "")
     : "";
   if (pendingSignInURL && signInWaiting) {
-    void openSignInPopup().catch((err) => {
-      setAppStatus(identityStatusEl, String(err.message ?? err), "err");
-    });
+    void openSignInPopup().catch(signInFailed);
   }
   if (phase === "Ready") {
     const label = identity?.handle || identity?.did || "ready";
