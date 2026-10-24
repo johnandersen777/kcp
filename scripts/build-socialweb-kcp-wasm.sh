@@ -46,6 +46,10 @@ echo "building combined kcp + socialweb wasm..."
     ./cmd/kcp-wasm
 )
 
+# Export Go's mutable globals so the browser worker can hibernate the
+# instance into a per-user memory snapshot (scripts/browser/wasm_snapshot.js).
+deno run --allow-read --allow-write "${repo_root}/scripts/wasm_globals.js" "${out}"
+
 cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$(dirname "${out}")/wasm_exec.js"
 # The page server and the browser workers prefer this sibling; gzip -9 takes
 # ~269 MB to ~41 MB (browsers can only inflate gzip, not brotli/zstd).

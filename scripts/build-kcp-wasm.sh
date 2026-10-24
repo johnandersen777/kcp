@@ -30,6 +30,10 @@ echo "Building kcp for js/wasm (the kcp command's wasm build mode)..."
   GOOS=js GOARCH=wasm go build -o "${out_dir}/kcp.wasm" ./cmd/kcp
 )
 
+# Export Go's mutable globals so the browser worker can hibernate the
+# instance into a per-user memory snapshot (scripts/browser/wasm_snapshot.js).
+deno run --allow-read --allow-write "${repo_root}/scripts/wasm_globals.js" "${out_dir}/kcp.wasm"
+
 goroot="$(go env GOROOT)"
 cp "${goroot}/lib/wasm/wasm_exec.js" "${out_dir}/wasm_exec.js"
 
