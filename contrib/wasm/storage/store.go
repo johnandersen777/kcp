@@ -108,9 +108,14 @@ type Store struct {
 	keysFunc  kstorage.KeysFunc
 }
 
-// maxWatchHistory bounds the replayed event history. When a watch starts
-// older than the history, it receives the current state as ADDED events.
-const maxWatchHistory = 4096
+// maxWatchHistory bounds the replayed event history per store. A watch that
+// starts older than the history gets 410 Expired and relists. Each retained
+// event pins a superseded object version.
+var maxWatchHistory = 4096
+
+// SetWatchHistory bounds the replayed event history of every store. Call it
+// before the stores take writes.
+func SetWatchHistory(events int) { maxWatchHistory = events }
 
 // mutationSeq counts writes across all stores. Coalescing snapshotters (see
 // OnSnapshot) poll it instead of receiving a serialized snapshot after every

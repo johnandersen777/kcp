@@ -152,8 +152,11 @@ func Boot(parent context.Context, cfg Config) (*Server, error) {
 	// decoded copy of every object plus event buffers per resource. The
 	// memory:// store serves lists and watches (with history and initial
 	// events) itself, so skip the cache.
+	// A shorter event history pins fewer superseded object versions; watches
+	// older than it relist.
 	if os.Getenv("KCP_LOW_MEMORY") == "1" {
 		opts.GenericControlPlane.Etcd.EnableWatchCache = false
+		storage.SetWatchHistory(1024)
 	}
 	opts.GenericControlPlane.SecureServing.Listener = listener
 	opts.GenericControlPlane.SecureServing.BindAddress = net.ParseIP("127.0.0.1")
