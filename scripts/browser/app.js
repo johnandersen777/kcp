@@ -756,8 +756,21 @@ async function restartKubectl(reason) {
   }
 }
 
+// Low-memory mode starts kubectl (a 120 MiB module) only when something first
+// needs it: a shell command, the Compute panel or the diagram.
+let kubectlLoading = null;
+function ensureKubectl() {
+  if (kubectlWorker) return Promise.resolve();
+  kubectlLoading ??= spawnKubectl().catch((err) => {
+    kubectlLoading = null;
+    throw err;
+  });
+  return kubectlLoading;
+}
+
 function runKubectl(args, stdin = "") {
   return runKubectlQueued(async () => {
+    if (!kubectlWorker && !kubectlRestarting) await ensureKubectl();
     await kubectlGate;
     const worker = kubectlWorker;
     if (!worker) throw new Error("kubectl worker is not running");
@@ -2232,14 +2245,13 @@ function startIngress(entry) {
 
 async function start() {
   term.writeln(cyan("kcp-wasm") + dim(" loading real kcp.wasm…"));
-  term.writeln(cyan("kubectl-wasm") + dim(" loading kubectl.wasm…"));
+  term.writeln(cyan("kubectl-wasm") + dim(lowMemory ? " loads on first use (low-memory mode)" : " loading kubectl.wasm…"));
   setStatus("loading kcp + kubectl…", "running");
   // kcp boots for tens of seconds; download and compile kubectl meanwhile.
   // goat/yq follow kubectl at low priority, or load on first use.
   if (lowMemory) {
-    addLog("info", "low-memory mode: kubectl after kcp, goat/yq on first use, no snapshot");
+    addLog("info", "low-memory mode: kubectl, goat and yq on first use, no boot commands, no snapshot");
     await spawnKcp();
-    await spawnKubectl();
   } else {
     const kubectlLoaded = spawnKubectl();
     kubectlLoaded.then(ensureCli).catch(() => {});

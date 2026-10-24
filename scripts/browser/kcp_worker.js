@@ -136,10 +136,10 @@ globalThis.__kcpResolve = (callbackID, payload) => {
 const { fetchWasm, mib } = await import("./wasm_fetch.js");
 const hibernate = await import("./kcp_hibernate.js");
 const go = hibernate.instrument(new globalThis.Go());
-// Low-memory mode (iOS): collect more often to keep the heap smaller. No
+// Low-memory mode (iOS): collect four times as often to keep the heap small. No
 // GOMEMLIMIT: kcp's live heap is near 400 MiB, and a soft limit below it makes
 // the single-threaded runtime collect continuously and never yield to JS.
-if (init.lowMemory) go.env = { ...go.env, GOGC: "50" };
+if (init.lowMemory) go.env = { ...go.env, GOGC: "25" };
 const fetchStarted = performance.now();
 // The module hash only keys the snapshot; skip it (and its buffered copy)
 // when hibernation is off.
