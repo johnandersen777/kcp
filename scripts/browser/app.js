@@ -1916,6 +1916,7 @@ async function completeOAuth(message) {
 
 // The popup opened on the Sign in click, waiting for the authorization URL.
 let reservedPopup = null;
+let lastIdentityAction = null;
 
 async function beginSignIn() {
   try {
@@ -1950,6 +1951,13 @@ async function openSignInPopup() {
   const url = pendingSignInURL;
   if (!url) throw new Error("the identity has no pending sign-in URL yet");
   signInWaiting = false;
+  try {
+    const parsed = new URL(url);
+    const expires = lastIdentityAction?.expiresAt || "unset";
+    addLog("info", `authorize at ${parsed.origin} client_id=${parsed.searchParams.get("client_id")} expires=${expires}`);
+  } catch {
+    addLog("warn", "the sign-in URL does not parse");
+  }
   setAppStatus(identityStatusEl, "waiting for the AT Protocol popup…", "warn");
   const popup = reservedPopup;
   reservedPopup = null;
@@ -1978,9 +1986,14 @@ function applyState(state) {
   const identity = state.marketIdentity;
   const phase = identity?.phase ?? "Pending";
   const action = identity?.pendingAction;
+  lastIdentityAction = action ?? null;
   pendingSignInURL = action && (action.kind === "visitUrl" || action.kind === "signInAgain")
     ? String(action.url ?? "")
     : "";
+  // A URL restored from an earlier session can outlive its PAR request.
+  if (pendingSignInURL && action.expiresAt && Date.parse(action.expiresAt) <= Date.now()) {
+    pendingSignInURL = "";
+  }
   if (pendingSignInURL && signInWaiting) {
     void openSignInPopup().catch(signInFailed);
   }
