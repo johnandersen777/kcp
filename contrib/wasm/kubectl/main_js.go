@@ -33,7 +33,6 @@ import (
 	"syscall/js"
 
 	"k8s.io/cli-runtime/pkg/genericiooptions"
-	kubectlcmd "k8s.io/kubectl/pkg/cmd"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 )
 
@@ -128,10 +127,7 @@ func run(requestJSON string) (resultJSON string) {
 		panic(fatalExit{message: message, code: code})
 	})
 
-	command := kubectlcmd.NewDefaultKubectlCommandWithArgs(kubectlcmd.KubectlOptions{
-		Arguments: append([]string{"kubectl"}, req.Args...),
-		IOStreams: streams,
-	})
+	command := newKubectlCommand(streams, req.Args)
 	command.SetArgs(req.Args)
 	command.SetIn(streams.In)
 	command.SetOut(&out)

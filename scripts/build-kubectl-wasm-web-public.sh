@@ -69,6 +69,7 @@ assets=(
 wasm_modules=(
   kcp.wasm
   kubectl.wasm
+  kubectl-slim.wasm
   goat.wasm
   yq.wasm
 )
