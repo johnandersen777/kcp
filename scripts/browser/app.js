@@ -32,6 +32,7 @@ import { OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
 import { assembleSnapshot, openBestBackend, snapshotRecords } from "./state_store.js";
 import { decodeBase64, encodeBase64, register as registerIngress } from "./ingress_ws.js";
 import * as vmshell from "./vmshell.js";
+import { discardSnapshot } from "./kcp_hibernate.js";
 
 const config = await (await fetch("/config")).json();
 const apiServer = String(config.apiServer);
@@ -325,7 +326,7 @@ function waitReady(worker) {
     const onMessage = (event) => {
       if (event.data?.type === "ready") {
         cleanup();
-        resolve();
+        resolve(event.data);
       }
     };
     const onError = (event) => {
@@ -410,15 +411,16 @@ function attachKcp(worker) {
         return;
       }
       pendingBridges.delete(data.id);
+      noteKcpAnswer();
       kubectlWorker?.postMessage({
         type: "fetchResult",
         id: data.id,
         request: { response: data.response, error: data.error },
       });
     } else if (data.type === "persist") {
-      persistKcp(data.snapshot);
+      persistKcp(data.snapshot, data.seq);
     } else if (data.type === "socialweb-persist") {
-      schedulePersist(data.snapshot, socialwebStateKey);
+      schedulePersist(data.snapshot, socialwebStateKey, data.seq);
     } else if (data.type === "log") {
       addLog(data.level ?? "info", `kcp: ${data.message}`);
       const message = String(data.message);
@@ -473,7 +475,7 @@ async function loadKcpState() {
 // kcp posts a full snapshot after boot and deltas afterwards, so every
 // message is applied, in order; none may be coalesced away.
 let kcpPersistQueue = Promise.resolve();
-function persistKcp(snapshot) {
+function persistKcp(snapshot, seq) {
   kcpPersistQueue = kcpPersistQueue.then(async () => {
     const message = JSON.parse(snapshot);
     const backend = await stateBackend();
@@ -485,6 +487,8 @@ function persistKcp(snapshot) {
     }
     const ops = snapshotRecords(kcpRecordPrefix, message);
     if (!message.delta) ops.deletes.push(stateKey);
+    // Same transaction as the data: the hibernation snapshot compares it.
+    if (seq) ops.puts.push([kcpSeqKey, seq]);
     await backend.apply(ops);
   }).catch((err) => {
     addLog("warn", `kcp state save failed: ${err instanceof Error ? err.message : err}`);
@@ -493,18 +497,19 @@ function persistKcp(snapshot) {
 
 const persistTimers = new Map();
 const persistInFlight = new Set();
-function schedulePersist(snapshot, key = stateKey) {
+function schedulePersist(snapshot, key = stateKey, seq = 0) {
   if (persistTimers.has(key)) clearTimeout(persistTimers.get(key));
   persistTimers.set(key, setTimeout(async () => {
     persistTimers.delete(key);
     if (persistInFlight.has(key)) {
-      schedulePersist(snapshot, key);
+      schedulePersist(snapshot, key, seq);
       return;
     }
     persistInFlight.add(key);
     try {
       const backend = await stateBackend();
-      await backend.save(key, snapshot);
+      if (seq) await backend.apply({ puts: [[key, snapshot], [`${key}-seq`, seq]] });
+      else await backend.save(key, snapshot);
     } catch (err) {
       addLog("warn", `state save failed (${key}): ${err instanceof Error ? err.message : err}`);
     } finally {
@@ -513,10 +518,12 @@ function schedulePersist(snapshot, key = stateKey) {
   }, 250));
 }
 
-async function spawnKcp() {
-  const [initialState, socialwebSnapshot] = await Promise.all([
+async function spawnKcp(useSnapshot = true) {
+  const spawnStarted = performance.now();
+  const [initialState, socialwebSnapshot, hibernate] = await Promise.all([
     loadKcpState(),
     loadInitialState(socialwebStateKey),
+    hibernateInit(useSnapshot),
   ]);
   const worker = new Worker("/kcp_worker.js", { type: "module" });
   attachKcp(worker);
@@ -526,6 +533,7 @@ async function spawnKcp() {
     wasmUrl: "/kcp.wasm",
     execUrl: "/wasm_exec.js",
     initialState,
+    hibernate,
     socialweb: {
       origin: location.origin,
       identityMode: localStorage.getItem("socialweb.identity") === "localRepo"
@@ -541,9 +549,78 @@ async function spawnKcp() {
       restore: socialwebSnapshot,
     },
   });
-  await readyPromise;
+  const ready = await readyPromise;
+  if (ready?.restart) {
+    worker.terminate();
+    return spawnKcp(false);
+  }
+  logBootKind(ready, spawnStarted);
   kcpWorker = worker;
   worker.postMessage({ type: "state-subscribe" });
+}
+
+// --- kcp hibernation (kcp_hibernate.js) --------------------------------------
+
+const kcpSeqKey = `${kcpRecordPrefix}q`;
+const socialwebSeqKey = `${socialwebStateKey}-seq`;
+let firstKcpAnswerLogged = false;
+let kcpSpawnStarted = 0;
+
+// Snapshots are per user and local; localStorage "kcp.snapshot" = "0" turns
+// them off, "kcp.snapshot.gzip" = "0" stores them raw, "kcp.snapshot.store" =
+// "indexeddb" forces the fallback store.
+async function hibernateInit(useSnapshot) {
+  const enabled = localStorage.getItem("kcp.snapshot") !== "0";
+  if (enabled) {
+    navigator.storage?.persist?.().then((granted) => {
+      if (!granted) addLog("debug", "persistent storage not granted; the browser may evict the kcp snapshot");
+    }).catch(() => {});
+  }
+  const backend = await stateBackend();
+  const [kcp, socialweb] = await Promise.all([
+    backend.load(kcpSeqKey).catch(() => null),
+    backend.load(socialwebSeqKey).catch(() => null),
+  ]);
+  return {
+    enabled,
+    restore: useSnapshot,
+    persistSeq: { kcp: Number(kcp ?? 0), socialweb: Number(socialweb ?? 0) },
+    gzip: localStorage.getItem("kcp.snapshot.gzip") !== "0",
+    store: localStorage.getItem("kcp.snapshot.store") ?? undefined,
+  };
+}
+
+function logBootKind(ready, spawnStarted) {
+  kcpSpawnStarted = spawnStarted;
+  const seconds = ((performance.now() - spawnStarted) / 1000).toFixed(1);
+  if (ready?.restored) {
+    addLog("ok", `kcp restored from snapshot (${seconds}s)`);
+    addLog("debug", `kcp snapshot restore: ${JSON.stringify(ready.restored)}`);
+  } else {
+    addLog("ok", `kcp cold boot (${seconds}s)`);
+  }
+}
+
+// Logged once: time from spawn to the first kcp answer kubectl got.
+function noteKcpAnswer() {
+  if (firstKcpAnswerLogged || !kcpSpawnStarted) return;
+  firstKcpAnswerLogged = true;
+  addLog("debug", `first kubectl answer ${((performance.now() - kcpSpawnStarted) / 1000).toFixed(1)}s after kcp start`);
+}
+
+// Capture when the tab is hidden: the next visit restores from it.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") kcpWorker?.postMessage({ type: "hibernate" });
+});
+
+// Deletes the stored snapshot; the next load cold boots. The running worker
+// stops capturing until reload.
+async function discardKcpSnapshot() {
+  if (kcpWorker) {
+    kcpWorker.postMessage({ type: "snapshot-discard" });
+    return;
+  }
+  await discardSnapshot();
 }
 
 // --- kubectl worker --------------------------------------------------------
@@ -861,7 +938,7 @@ function shellHelp() {
     "  export GOAT_USERNAME=... GOAT_PASSWORD=...",
     "  ls /tmp; cat demo.yaml",
     "",
-    "builtins: help · clear · reset (wipe kcp state and reload)",
+    "builtins: help · clear · reset (wipe kcp state and reload) · snapshot-discard (cold boot next load)",
     "keys: Ctrl-C cancel · Ctrl-D finish stdin · Tab complete · ↑/↓ history",
     "",
   ].join("\n");
@@ -954,12 +1031,22 @@ function makeCommands() {
     return { stdout: "", stderr: "", exitCode: 0 };
   });
 
+  const snapshotDiscard = defineCommand("snapshot-discard", async () => {
+    await discardKcpSnapshot();
+    return { stdout: "kcp snapshot discarded; the next load cold boots\n", stderr: "", exitCode: 0 };
+  });
+
   const reset = defineCommand("reset", async () => {
+    // A worker may hold the snapshot's OPFS file open; stop it first.
+    kcpWorker?.terminate();
+    kcpWorker = null;
+    await discardSnapshot().catch(() => {});
     try {
       const backend = await stateBackend();
       await backend.remove(stateKey);
       await backend.apply({ clearPrefix: kcpRecordPrefix });
       await backend.remove(socialwebStateKey);
+      await backend.remove(socialwebSeqKey);
     } catch {
       // A missing or read-only store is already a reset.
     }
@@ -970,7 +1057,7 @@ function makeCommands() {
     return { stdout: "cleared shell and kcp state; reloading…\n", stderr: "", exitCode: 0 };
   });
 
-  return [kubectl, goat, yq, help, clear, reset];
+  return [kubectl, goat, yq, help, clear, reset, snapshotDiscard];
 }
 
 async function restoreShell() {
@@ -1391,7 +1478,7 @@ function commonPrefix(values) {
 function shellCommandNames() {
   const builtins = [
     "cd", "export", "unset", "alias", "source", ".", "history",
-    "kubectl", "goat", "yq", "help", "clear", "reset",
+    "kubectl", "goat", "yq", "help", "clear", "reset", "snapshot-discard",
   ];
   return [...new Set([...getCommandNames(), ...builtins])].sort();
 }
