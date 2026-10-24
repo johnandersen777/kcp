@@ -83,6 +83,33 @@ export function clearMemoryFs() {
   nextFD = 10;
 }
 
+/** JSON-safe copy of the whole shim (files, dirs, open fds) for wasm snapshots. */
+export function exportFsState() {
+  const fds = [];
+  for (const [fd, f] of files) {
+    const shared = memFiles.get(f.path) === f.data;
+    fds.push([fd, { ...f, data: shared || !f.data ? null : Array.from(f.data) }]);
+  }
+  return {
+    files: Array.from(memFiles, ([path, data]) => [path, Array.from(data)]),
+    dirs: Array.from(memDirs),
+    fds,
+    nextFD,
+    cwd,
+  };
+}
+
+export function importFsState(state) {
+  clearMemoryFs();
+  for (const [path, data] of state.files) memFiles.set(path, Uint8Array.from(data));
+  for (const dir of state.dirs) memDirs.add(dir);
+  for (const [fd, f] of state.fds) {
+    files.set(fd, { ...f, data: f.data ? Uint8Array.from(f.data) : memFiles.get(f.path) });
+  }
+  nextFD = state.nextFD;
+  cwd = state.cwd;
+}
+
 export function writeMemoryFile(path, content) {
   const resolved = normalizePath(path);
   ensureParents(resolved);
