@@ -7,7 +7,7 @@
 // into the browser vault before it applies the contract, because the
 // requester fails a contract whose secretsRef is missing.
 
-export const SHELL_TAG = "shell";
+export const SHELL_TAG = "wootty";
 export const SHELL_PORT = 7681;
 export const WOOTTY_ENV = "/etc/wootty/wootty.env";
 export const SECRETS_MOUNT = "requester";
@@ -61,7 +61,7 @@ export function contractManifest({ name, bidders, ownerDid }) {
 }
 
 /**
- * The wootty link for a status-feed contract: the "shell" tagged address from
+ * The wootty link for a status-feed contract: the "wootty" tagged address from
  * status.contract.networks with the token in the fragment, or "" while the
  * address has not been reported.
  */

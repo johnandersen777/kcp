@@ -63,7 +63,7 @@ type Contract struct {
 }
 
 // Network is one tagged guest address from status.contract.networks (plan
-// 0032), e.g. the opentunnel URL of the "shell" tunnel.
+// 0032), e.g. the opentunnel URL of the "wootty" tunnel.
 type Network struct {
 	Tag     string `json:"tag"`
 	Address string `json:"address"`

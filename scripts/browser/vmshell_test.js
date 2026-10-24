@@ -29,7 +29,7 @@ Deno.test("manifest carries secretsRef and the shell tunnel", () => {
   assert(m.spec.secretsRef.mount === "requester", "mount");
   assert(m.spec.secretsRef.path === "contracts/vmshell-abc123/secrets", "path");
   assert(m.spec.bidderDids[0] === "did:plc:4vcig7s43z3nyqrnepmcfzqt", "default bidder");
-  assert(JSON.stringify(m.spec.tunnels) === '[{"tag":"shell","port":7681,"shell":{"envFile":"/etc/wootty/wootty.env"}}]', "tunnels");
+  assert(JSON.stringify(m.spec.tunnels) === '[{"tag":"wootty","port":7681,"shell":{"envFile":"/etc/wootty/wootty.env"}}]', "tunnels");
   assert(m.spec.ownerDid === "did:plc:me" && m.spec.userData === undefined, "owner, no userData");
   assert(parseBidders("did:plc:a, did:plc:b junk").join() === "did:plc:a,did:plc:b", "bidders");
 });
@@ -40,15 +40,15 @@ Deno.test("bundle delivers the wootty env file", () => {
   assert(entries[0].value === "WOOTTY_AUTH_TOKEN=tok\n", "value");
 });
 
-Deno.test("shell link uses the shell network and the token fragment", () => {
+Deno.test("shell link uses the wootty network and the token fragment", () => {
   const contract = {
     networks: [
       { tag: "other", address: "https://x.example" },
-      { tag: "shell", address: "https://abcd.ef12.opentunnel.xyz" },
+      { tag: "wootty", address: "https://0123456789abcdef.abcdefghijkl.opentunnel.xyz" },
     ],
   };
-  assert(shellLink(contract, "a+b/c") === "https://abcd.ef12.opentunnel.xyz/#token=a%2Bb%2Fc", shellLink(contract, "a+b/c"));
+  assert(shellLink(contract, "a+b/c") === "https://0123456789abcdef.abcdefghijkl.opentunnel.xyz/#token=a%2Bb%2Fc", shellLink(contract, "a+b/c"));
   assert(shellLink({ networks: [] }, "t") === "", "no address yet");
-  assert(shellLink({ networks: [{ tag: "shell", address: "javascript:alert(1)" }] }, "t") === "", "non-https rejected");
+  assert(shellLink({ networks: [{ tag: "wootty", address: "javascript:alert(1)" }] }, "t") === "", "non-https rejected");
   assert(shellLink(contract, "") === "", "no token");
 });

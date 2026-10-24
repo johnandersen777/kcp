@@ -1898,7 +1898,7 @@ function initSocialwebUI() {
 // --- VM shell ----------------------------------------------------------------
 // "Request VM shell": write the wootty token bundle into the browser vault,
 // then apply a ComputeContract with secretsRef and a plan 0032 shell tunnel.
-// The link is the "shell" tagged address from status.contract.networks plus
+// The link is the "wootty" tagged address from status.contract.networks plus
 // #token=. The token stays in localStorage, keyed by contract name, so the
 // link survives a reload.
 
@@ -2013,7 +2013,9 @@ function applyVMShellState(state) {
     a.textContent = "Open shell";
     vmshellLinkEl.append(a);
   } else if (phase === "Held" || contract.secretsFetchedAt) {
-    vmshellLinkEl.textContent = "waiting for shell address";
+    // The tunnel URL lands in status.contract.networks about two minutes
+    // after Held, once its TLS certificate is issued.
+    vmshellLinkEl.textContent = "Held; waiting for shell tunnel…";
   }
 }
 
