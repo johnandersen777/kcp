@@ -17,6 +17,8 @@ import (
 	ctlruntime "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/runtime"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/kit/binding"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/kit/strs"
+
+	bvault "github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserinfra/vault"
 )
 
 const (
@@ -50,6 +52,19 @@ type Options struct {
 	// manager's workspace filter.
 	Scope func(workspace string) bool
 
+	// IngressProxyHost turns on ingress mode: Exposures with mode ingress are
+	// served through this xrpc-subscription relay (e.g. xrpc.fedproxy.com)
+	// instead of the page origin. Empty keeps every Exposure on the origin.
+	IngressProxyHost string
+
+	// Keys returns the vault store holding a workspace's per-Exposure ingress
+	// keys. Required with IngressProxyHost.
+	Keys func(workspace string) *bvault.Store
+
+	// OnIngress receives the ingress Exposures after every change, so the page
+	// can open or close relay subscriptions.
+	OnIngress func([]Ingress)
+
 	Log *slog.Logger
 }
 
@@ -63,6 +78,8 @@ type Controller struct {
 	registry *Registry
 
 	refs *binding.Table[struct{}]
+
+	ingress *ingressState
 
 	log *slog.Logger
 }
@@ -78,8 +95,12 @@ func New(opts Options) (*Controller, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Controller{origin: origin, handlers: opts.Handlers, registry: NewRegistry(), refs: binding.New[struct{}](),
-		log: log.With("component", "exposure-controller")}, nil
+	ctl := &Controller{origin: origin, handlers: opts.Handlers, registry: NewRegistry(), refs: binding.New[struct{}](),
+		log: log.With("component", "exposure-controller")}
+	if host := strings.TrimSpace(opts.IngressProxyHost); host != "" {
+		ctl.ingress = &ingressState{proxyHost: host, keys: opts.Keys, notify: opts.OnIngress, entries: map[string]ingressEntry{}}
+	}
+	return ctl, nil
 }
 
 // Register adds the Exposure controller to m. It watches Service objects so an
@@ -136,7 +157,7 @@ func (c *Controller) users(ref string) []ctlruntime.Request {
 }
 
 func (c *Controller) gone(_ context.Context, req ctlruntime.Request) {
-	c.registry.Remove(ownerOf(req))
+	c.remove(ownerOf(req))
 	c.refs.Set(binding.Target{Cluster: req.Cluster, Workspace: req.Workspace, Name: req.Name}, nil)
 }
 
@@ -145,7 +166,7 @@ func (c *Controller) gone(_ context.Context, req ctlruntime.Request) {
 func (c *Controller) Reconcile(ctx context.Context, req ctlruntime.Request, object *exposurev1alpha1.Exposure) (ctlruntime.Result, error) {
 	self := binding.Target{Cluster: req.Cluster, Workspace: req.Workspace, Name: req.Name}
 	if !object.DeletionTimestamp.IsZero() {
-		c.registry.Remove(ownerOf(req))
+		c.remove(ownerOf(req))
 		c.refs.Set(self, nil)
 		return ctlruntime.Result{}, nil
 	}
@@ -186,6 +207,16 @@ func (c *Controller) Reconcile(ctx context.Context, req ctlruntime.Request, obje
 		return c.withdraw(ctx, req, object, exposurev1alpha1.ExposureFailed, "InvalidTarget", err.Error(), false)
 	}
 	owner := ownerOf(req)
+	host, base := c.origin.Host, c.origin.URL
+	if spec.Mode == exposurev1alpha1.ExposureModeIngress && c.ingress != nil {
+		in, err := c.ingress.register(ctx, owner, req.Workspace, req.Name, spec)
+		if err != nil {
+			return c.withdraw(ctx, req, object, exposurev1alpha1.ExposureFailed, "IngressIdentity", err.Error(), true)
+		}
+		host, base = in.Host, in.URL
+	} else if c.ingress != nil {
+		c.ingress.drop(owner)
+	}
 	if c.handlers != nil && isHTTP(svc.Spec.Protocol) {
 		handler, ok := c.handlers.Handler(target, svc.Spec.Handler)
 		if !ok {
@@ -193,22 +224,22 @@ func (c *Controller) Reconcile(ctx context.Context, req ctlruntime.Request, obje
 				target.Kind, target.Name, target.Workspace)
 			return c.withdraw(ctx, req, object, exposurev1alpha1.ExposurePending, "HandlerMissing", message, true)
 		}
-		if err := c.registry.Register(owner, c.origin.Host, spec.Path, withCaller(handler, target)); err != nil {
+		if err := c.registry.Register(owner, host, spec.Path, withCaller(handler, target)); err != nil {
 			return ctlruntime.Result{}, err
 		}
-		c.log.Debug("the in-browser Exposure route is registered", "host", c.origin.Host, "path", spec.Path,
+		c.log.Debug("the in-browser Exposure route is registered", "host", host, "path", spec.Path,
 			"target", target.Kind+"/"+target.Name)
 	} else {
 		c.registry.Remove(owner)
 	}
 	next := object.DeepCopy()
-	next.Status = Status(object.Generation, c.origin.URL, spec.Path)
+	next.Status = Status(object.Generation, base, spec.Path)
 	return ctlruntime.Result{}, req.ApplyStatus(ctx, next)
 }
 
 func (c *Controller) withdraw(ctx context.Context, req ctlruntime.Request, object *exposurev1alpha1.Exposure,
 	phase exposurev1alpha1.ExposurePhase, reason, message string, retry bool) (ctlruntime.Result, error) {
-	c.registry.Remove(ownerOf(req))
+	c.remove(ownerOf(req))
 	next := object.DeepCopy()
 	next.Status = NotReady(object.Generation, phase, reason, message)
 	res := ctlruntime.Result{}
@@ -216,6 +247,13 @@ func (c *Controller) withdraw(ctx context.Context, req ctlruntime.Request, objec
 		res.RequeueAfter = RequeuePending
 	}
 	return res, req.ApplyStatus(ctx, next)
+}
+
+func (c *Controller) remove(owner string) {
+	c.registry.Remove(owner)
+	if c.ingress != nil {
+		c.ingress.drop(owner)
+	}
 }
 
 func ownerOf(req ctlruntime.Request) string { return req.Workspace + "/" + req.Name }
