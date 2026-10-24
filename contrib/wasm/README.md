@@ -170,6 +170,63 @@ discovery, CRUD, status subresource, patches, server-side `Table` conversion,
 and a kubeconfig-usable HTTP endpoint provided by the Deno host. The missing
 pieces are called out in [Limitations](#limitations).
 
+## Upstream kubectl on WASM (in a separate worker)
+
+`contrib/wasm/kubectl` compiles upstream kubectl — the
+[`kubernetes/kubectl`](https://github.com/kubernetes/kubectl) command tree
+(`k8s.io/kubectl/pkg/cmd`) — to `GOOS=js GOARCH=wasm`. It runs in its own
+Deno Web Worker, separate from the worker that hosts the kcp WASM shard, and
+talks to the shard over ordinary HTTP. Go's js/wasm `net/http` transport
+performs every request with that worker's `fetch()`.
+
+```
+kubectl-wasm worker (scripts/kubectl_wasm_worker.ts)
+  kubectlRun(args)                    kcp host process
+    client-go discovery/CRUD                |
+      net/http (js/wasm transport)          |
+        fetch() ─────HTTP──────> Deno.serve ─┴─> kcp worker (kcp.wasm)
+```
+
+```console
+$ ./scripts/build-kubectl-wasm.sh            # bin/wasm/kubectl.wasm
+$ ./scripts/build-kcp-wasm.sh                # bin/wasm/kcp.wasm
+$ ./scripts/verify-kubectl-wasm.sh           # both, end to end
+```
+
+Run it by hand against a running kcp-wasm host:
+
+```console
+$ deno run --allow-read --allow-net scripts/kubectl_wasm.ts \
+    --wasm=bin/wasm/kubectl.wasm \
+    --wasm-exec=bin/wasm/wasm_exec.js \
+    -- get fetches --server=http://127.0.0.1:18080
+
+$ deno run --allow-read --allow-net scripts/kubectl_wasm.ts \
+    --wasm=bin/wasm/kubectl.wasm \
+    --wasm-exec=bin/wasm/wasm_exec.js \
+    --stdin-file=manifest.yaml \
+    -- create -f - --server=http://127.0.0.1:18080
+```
+
+`scripts/kubectl_wasm_worker.ts` exposes one RPC:
+`kubectlRun(requestJSON, callbackID)` → `__kubectlResolve(callbackID,
+resultJSON)`. The request holds the argument list and stdin; the result holds
+stdout, stderr and the exit code.
+
+The WASM runtime has no real filesystem, so `scripts/kubectl_wasm_fs.ts`
+installs a synchronous `globalThis.fs` for Go's js/wasm `syscall` package
+before the Go runtime starts:
+
+* reads (`kubeconfig`, `-f <file>`) are served by Deno's synchronous fs APIs
+  (the worker needs `--allow-read`),
+* fd 0 (`kubectl create -f -`) returns the stdin sent with the run,
+* writes (kubectl's discovery cache) stay in memory.
+
+`scripts/prepare-kubectl-wasm-modules.sh` swaps out the unix-only pieces of
+the upstream sources for js/wasm: `k8s.io/kubectl`'s `syscall.SIGHUP`
+interrupt handler, `unix.Umask`, the `SIGWINCH` resize watcher, the
+`syscall.Exec` plugin path, and `moby/term`'s TTY ioctls.
+
 ## The `Fetch` CRD (written in Go)
 
 * `apis/fetch/v1alpha1/types.go` — typed `Fetch`, `FetchList`, spec/status and
@@ -326,6 +383,21 @@ real-server entrypoint does not yet.
   writes `.go.memory.mod` with the required `replace` directives.
 * `scripts/build-kcp-real-wasm.sh` — builds the real `cmd/kcp` server path for
   `js/wasm` with the patched modules (`kcp-real.wasm`).
+* `scripts/build-kubectl-wasm.sh` — builds upstream kubectl
+  (`contrib/wasm/kubectl`, js/wasm) and stages `wasm_exec.js`.
+* `scripts/prepare-kubectl-wasm-modules.sh` — copies `k8s.io/kubectl` and
+  `moby/term` to a writable directory, installs the js/wasm replacements, and
+  writes the `-modfile` used by the kubectl build.
+* `scripts/kubectl_wasm.ts` — Deno host: runs `kubectl.wasm` in a Web Worker
+  and prints its stdout/stderr/exit code. Everything after `--` is passed to
+  kubectl; `--stdin-file` feeds `-f -`.
+* `scripts/kubectl_wasm_worker.ts` — worker that instantiates `kubectl.wasm`
+  and implements the `kubectlRun` → `__kubectlResolve` RPC.
+* `scripts/kubectl_wasm_fs.ts` — synchronous `globalThis.fs` shim: Deno-backed
+  reads of kubeconfig/`-f` files, run-scoped stdin, in-memory writes.
+* `scripts/verify-kubectl-wasm.sh` — end-to-end check: builds both modules,
+  runs them in separate Deno workers, and exercises discovery, create from
+  stdin, the Fetch controller, `-o yaml` and Table output.
 * `scripts/verify-kcp-memory.sh` — runs the real native kcp control plane on
   `memory://main`, applies the Fetch CRD, and exercises CR create/get/list/
   delete against the in-memory backend.
@@ -335,7 +407,9 @@ real-server entrypoint does not yet.
 ```console
 $ go test -race ./contrib/wasm/...
 $ deno check scripts/kcp_wasm.ts scripts/kcp_wasm_worker.ts
+$ deno check scripts/kubectl_wasm.ts scripts/kubectl_wasm_worker.ts scripts/kubectl_wasm_fs.ts
 $ ./scripts/verify-kcp-wasm.sh
+$ ./scripts/verify-kubectl-wasm.sh # upstream kubectl wasm -> kcp wasm, no native kubectl
 $ ./scripts/verify-kcp-memory.sh   # real kcp control plane on memory://main
 $ ./scripts/build-kcp-real-wasm.sh # compile the real server for js/wasm
 ```

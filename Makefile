@@ -126,6 +126,14 @@ build-kcp-wasm: ## Build kcp in its js/wasm build mode (./cmd/kcp) and stage was
 verify-kcp-wasm: ## Run the WASM kcp and verify the Fetch CRD with kubectl
 	./scripts/verify-kcp-wasm.sh
 
+.PHONY: build-kubectl-wasm
+build-kubectl-wasm: ## Build upstream kubectl for js/wasm and stage wasm_exec.js
+	./scripts/build-kubectl-wasm.sh
+
+.PHONY: verify-kubectl-wasm
+verify-kubectl-wasm: ## Run kubectl and kcp as separate WASM Deno workers and verify the Fetch CRD
+	./scripts/verify-kubectl-wasm.sh
+
 .PHONY: verify-kcp-memory
 verify-kcp-memory: ## Run real kcp on the in-memory storage backend and verify CRDs/CRs
 	./scripts/verify-kcp-memory.sh
