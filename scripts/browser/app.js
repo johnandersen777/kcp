@@ -1915,6 +1915,7 @@ async function completeOAuth(message) {
 }
 
 let lastIdentityAction = null;
+let lastIdentitySummary = "";
 const SIGN_IN_LABEL = identitySignInEl.textContent;
 
 // iOS Safari opens a popup only inside the tap, and pauses this tab while the
@@ -2001,6 +2002,13 @@ function applyState(state) {
   const phase = identity?.phase ?? "Pending";
   const action = identity?.pendingAction;
   lastIdentityAction = action ?? null;
+  const summary = `MarketIdentity ${phase}${identity?.handle ? ` ${identity.handle}` : ""}` +
+    `${action ? ` action=${action.kind} expires=${action.expiresAt || "unset"}` : ""}` +
+    `${identity?.message ? `: ${identity.message}` : ""}`;
+  if (summary !== lastIdentitySummary) {
+    lastIdentitySummary = summary;
+    addLog("info", summary);
+  }
   pendingSignInURL = action && (action.kind === "visitUrl" || action.kind === "signInAgain")
     ? String(action.url ?? "")
     : "";
