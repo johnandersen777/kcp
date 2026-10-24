@@ -143,6 +143,91 @@ term.attachCustomKeyEventHandler((event) => {
   return true;
 });
 
+// xterm.js has no native touch scrolling (xtermjs/xterm.js#5377). Translate
+// single-finger vertical drags into scrollLines(), with sub-row remainder and
+// momentum. touch-action:none on the host keeps iOS page rubber-banding out.
+const touchHost = document.getElementById("terminal");
+let touchLastY = null;
+let touchAccum = 0;
+let touchVelocity = 0;
+let touchLastTime = 0;
+let momentumFrame = null;
+
+function stopTouchMomentum() {
+  if (momentumFrame !== null) {
+    cancelAnimationFrame(momentumFrame);
+    momentumFrame = null;
+  }
+}
+
+function scrollPixels(dy) {
+  const rowHeight = Math.max(
+    1,
+    (term.element?.clientHeight ?? 300) / Math.max(1, term.rows),
+  );
+  touchAccum += dy;
+  const lines = Math.trunc(touchAccum / rowHeight);
+  if (lines !== 0) {
+    touchAccum -= lines * rowHeight;
+    // Finger drag down (dy > 0) reveals older output: scroll up.
+    term.scrollLines(-lines);
+  }
+}
+
+touchHost.addEventListener("touchstart", (event) => {
+  if (event.touches.length !== 1) {
+    touchLastY = null;
+    return;
+  }
+  stopTouchMomentum();
+  touchLastY = event.touches[0].clientY;
+  touchAccum = 0;
+  touchVelocity = 0;
+  touchLastTime = performance.now();
+}, { passive: true, capture: true });
+
+touchHost.addEventListener("touchmove", (event) => {
+  if (touchLastY === null || event.touches.length !== 1) return;
+  const y = event.touches[0].clientY;
+  const dy = y - touchLastY;
+  touchLastY = y;
+  if (dy === 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const now = performance.now();
+  const dt = Math.max(1, now - touchLastTime);
+  touchVelocity = 0.8 * (dy / dt) + 0.2 * touchVelocity;
+  touchLastTime = now;
+  scrollPixels(dy);
+}, { passive: false, capture: true });
+
+function finishTouchScroll() {
+  touchLastY = null;
+  const velocity = touchVelocity;
+  touchVelocity = 0;
+  if (Math.abs(velocity) < 0.05) return;
+  let v = velocity;
+  const step = () => {
+    v *= 0.94;
+    if (Math.abs(v) < 0.02) {
+      momentumFrame = null;
+      return;
+    }
+    scrollPixels(v * 16);
+    momentumFrame = requestAnimationFrame(step);
+  };
+  momentumFrame = requestAnimationFrame(step);
+}
+
+touchHost.addEventListener("touchend", finishTouchScroll, {
+  passive: true,
+  capture: true,
+});
+touchHost.addEventListener("touchcancel", () => {
+  touchLastY = null;
+  touchVelocity = 0;
+}, { passive: true, capture: true });
+
 const dim = (text) => `\x1b[90m${text}\x1b[0m`;
 const red = (text) => `\x1b[31m${text}\x1b[0m`;
 const cyan = (text) => `\x1b[36m${text}\x1b[0m`;
@@ -951,7 +1036,6 @@ function needsContinuation(script) {
 async function runScript(script, stdin = "") {
   busy = true;
   const label = script.split("\n")[0].slice(0, 80);
-  setStatus(`running ${label}…`, "running");
   addLog("info", `$ ${label.replace(/\s+/g, " ")}${script.includes("\n") ? " …" : ""}`);
   const started = performance.now();
   ttyTool = detectTtyTool(script);
@@ -1388,7 +1472,6 @@ async function typeBootSteps(steps) {
   bootActive = true;
   booting = true;
   busy = true;
-  setStatus("running boot sequence…", "running");
 
   for (let stepIndex = 0; stepIndex < steps.length; stepIndex++) {
     const lines = steps[stepIndex].split("\n");
