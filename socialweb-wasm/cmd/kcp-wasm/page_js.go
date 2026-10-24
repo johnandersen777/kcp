@@ -74,6 +74,12 @@ func registerPageExports(orc *socialweb.Orchestrator) {
 		}
 		return orc.Exposure.ServeIngress(context.Background(), in)
 	})
+	// A page that resumed this program from a memory snapshot has no relay
+	// subscriptions yet; it asks for the current list instead of waiting for
+	// the next change.
+	pageExport("socialwebIngressList", func(string) any {
+		return map[string]any{"status": http.StatusOK, "ingress": orc.Exposure.Ingresses()}
+	})
 	if fn := js.Global().Get("__socialwebIngress"); fn.Type() == js.TypeFunction {
 		raw, _ := json.Marshal(orc.Exposure.Ingresses())
 		fn.Invoke(string(raw))

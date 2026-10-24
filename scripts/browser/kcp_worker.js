@@ -199,6 +199,15 @@ self.onmessage = (event) => {
 
 let hibernation = null;
 if (restored) await finishRestore();
+// The restored program announced its ingress Exposures to a page that is gone;
+// hand the current list to this page so it reopens the relay subscriptions.
+if (restored && typeof globalThis.socialwebIngressList === "function") {
+  const callbackID = nextCallbackID++;
+  pending.set(callbackID, {
+    resolve: (out) => self.postMessage({ type: "socialweb-ingress", ingress: out?.ingress ?? [] }),
+  });
+  globalThis.socialwebIngressList("{}", callbackID);
+}
 const readyMs = Math.round(performance.now() - started);
 log("ok", `kcp ready in ${readyMs}ms`);
 self.postMessage({ type: "ready", restored: restored?.stats ?? null, compileMs, readyMs });
