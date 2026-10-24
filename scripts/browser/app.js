@@ -31,7 +31,6 @@ import { buildDiagram, nodeID } from "./diagram.js";
 import { cancelOAuthPopup, OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
 import { GRACE_MS, normalizeHandle, signInURL, signInView } from "./identity_ui.js";
 import { assembleSnapshot, openBestBackend, snapshotRecords } from "./state_store.js";
-import { decodeBase64, encodeBase64, register as registerIngress } from "./ingress_ws.js";
 import * as vmshell from "./vmshell.js";
 import * as webrtcGuest from "./webrtc_guest.js";
 import * as sshCmd from "./ssh_cmd.js";
@@ -474,8 +473,8 @@ function attachKcp(worker) {
       applyState(data.state);
       return;
     }
-    if (data.type === "socialweb-ingress") {
-      applyIngress(data.ingress ?? []);
+    if (data.type === "socialweb-ingress-status") {
+      renderIngress(data.entries ?? []);
       return;
     }
     if (data.type === "response") {
@@ -2701,90 +2700,16 @@ if (sshTestPeer) {
 // --- ingress relay -------------------------------------------------------------
 // Ingress-mode Exposures (the requester's svc-requester-requester-ingress,
 // which serves getSecrets to the guest) are reachable at
-// https://<did label>.<relay>. Go owns the per-Exposure did:key; the page owns
-// the com.fedproxy.temp.xrpc.subscribe WebSocket and forwards each request
-// frame to socialwebIngressRequest, which serves only that host's routes.
+// https://<did label>.<relay>. kcp_worker.js holds their relay subscriptions
+// (ingress_manager.js) and posts status; the page only renders it.
 
-const ingressSubs = new Map();
-const ingressRegistered = new Set();
-let ingressList = [];
-
-// The ingress list can drop a host for one state update (an Exposure being
-// re-reconciled). Closing on that cut sockets still CONNECTING, so the relay
-// saw a register/close every few ms; close only after a host stays missing.
-const INGRESS_DROP_AFTER_MS = 15_000;
-const ingressMissingSince = new Map();
-
-function applyIngress(list) {
-  ingressList = list;
-  const hosts = new Set(list.map((entry) => entry.host));
-  const now = Date.now();
-  for (const [host, sub] of ingressSubs) {
-    if (hosts.has(host)) {
-      ingressMissingSince.delete(host);
-      continue;
-    }
-    if (!ingressMissingSince.has(host)) ingressMissingSince.set(host, now);
-    if (now - ingressMissingSince.get(host) < INGRESS_DROP_AFTER_MS) continue;
-    ingressMissingSince.delete(host);
-    addLog("info", `ingress ${host} is gone from the Exposure list; closing it`);
-    sub.close();
-    ingressSubs.delete(host);
-    ingressRegistered.delete(host);
-  }
-  for (const entry of list) {
-    if (!ingressSubs.has(entry.host)) startIngress(entry);
-  }
-  renderIngress();
-}
-
-function renderIngress() {
-  vmshellIngressEl.textContent = ingressList.map((entry) =>
-    `${entry.name}: ${entry.url} (${ingressRegistered.has(entry.host) ? "registered" : "connecting"})`
-  ).join("\n");
-}
-
-function startIngress(entry) {
-  const pending = { closed: false, close() { this.closed = true; } };
-  ingressSubs.set(entry.host, pending);
-  const host = entry.host;
-  registerIngress({
-    proxyHost: entry.proxyHost,
-    did: entry.did,
-    getServiceAuthToken: async (nsid) =>
-      (await socialwebCall("socialwebIngressToken", { host, nsid })).token,
-    signer: async (nonce) =>
-      decodeBase64((await socialwebCall("socialwebIngressSign", { host, nonce: encodeBase64(nonce) })).signature),
-    handler: async (req) => {
-      const res = await socialwebCall("socialwebIngressRequest", {
-        host, method: req.method, path: req.path, params: req.params,
-        headers: req.headers, body: req.body, rawBody: req.rawBody,
-      }, 60_000);
-      return { status: res.status, body: res.body, contentType: res.contentType || "application/json", headers: res.headers };
-    },
-    onRegistered: () => {
-      ingressRegistered.add(host);
-      addLog("ok", `ingress ${entry.name} registered at ${entry.url}`);
-      renderIngress();
-    },
-    onClose: ({ code, reason }) => {
-      ingressRegistered.delete(host);
-      addLog("warn", `ingress ${entry.name} closed: code ${code}${reason ? ` (${reason})` : ""}`);
-      renderIngress();
-    },
-    onError: (err) => addLog("warn", `ingress ${entry.name}: ${err instanceof Error ? err.message : err}`),
-  }).then((sub) => {
-    if (pending.closed) sub.close();
-    else ingressSubs.set(host, sub);
-  }).catch((err) => {
-    addLog("error", `ingress ${entry.name}: ${err instanceof Error ? err.message : err}`);
-    ingressSubs.delete(host);
-    // The first registration does not reconnect by itself; retry while listed.
-    setTimeout(() => {
-      const current = ingressList.find((e) => e.host === host);
-      if (current && !ingressSubs.has(host)) startIngress(current);
-    }, 10_000);
-  });
+function renderIngress(entries) {
+  vmshellIngressEl.textContent = entries.map((entry) => {
+    const detail = [entry.state];
+    if (entry.closeCode) detail.push(`close ${entry.closeCode}`);
+    if (entry.lastError) detail.push(entry.lastError);
+    return `${entry.name}: ${entry.url} (${detail.join(", ")})`;
+  }).join("\n");
 }
 
 // --- startup ---------------------------------------------------------------

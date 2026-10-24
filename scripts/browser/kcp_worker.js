@@ -47,10 +47,6 @@ if (globalThis.__kcpInitialState) {
 }
 // Read by the Go entrypoint before the socialweb orchestrator starts.
 if (init.socialweb) globalThis.__socialwebConfig = JSON.stringify(init.socialweb);
-// Go pushes the ingress Exposures the page must hold relay subscriptions for.
-globalThis.__socialwebIngress = (json) => {
-  self.postMessage({ type: "socialweb-ingress", ingress: JSON.parse(json) });
-};
 
 // Every persisted message is numbered (per channel, from one counter); the
 // page stores the number with the data and a snapshot records the last ones
@@ -104,6 +100,61 @@ if (init.debugGo) {
 // and the persist hooks fire as soon as a hot boot (or a restore) is up.
 const pending = new Map();
 let nextCallbackID = 1;
+
+// callGo calls a (requestJSON, callbackID) Go export and resolves with its
+// __kcpResolve answer; an answer carrying error rejects.
+function callGo(fn, payload, timeoutMs = 30_000) {
+  return new Promise((resolve, reject) => {
+    if (typeof globalThis[fn] !== "function") return reject(new Error(`${fn} is not available`));
+    const callbackID = nextCallbackID++;
+    const timer = setTimeout(() => {
+      if (pending.delete(callbackID)) reject(new Error(`${fn} timed out`));
+    }, timeoutMs);
+    pending.set(callbackID, {
+      resolve(out) {
+        clearTimeout(timer);
+        if (out?.error) reject(new Error(String(out.error)));
+        else resolve(out);
+      },
+    });
+    globalThis[fn](JSON.stringify(payload), callbackID);
+  });
+}
+
+// Relay ingress (ingress_manager.js): this worker holds one
+// com.fedproxy.temp.xrpc.subscribe WebSocket per ingress Exposure host and
+// answers its request frames through socialwebIngressRequest, which serves
+// only that host's routes. Go owns the did:key; the page only shows status.
+const { register: registerIngress, encodeBase64, decodeBase64 } = await import("./ingress_ws.js");
+const { createIngressManager } = await import("./ingress_manager.js");
+const ingress = createIngressManager({
+  log,
+  onStatus: (entries) => self.postMessage({ type: "socialweb-ingress-status", entries }),
+  connect: (entry, hooks) => {
+    const host = entry.host;
+    return registerIngress({
+      proxyHost: entry.proxyHost,
+      did: entry.did,
+      getServiceAuthToken: async (nsid) => (await callGo("socialwebIngressToken", { host, nsid })).token,
+      signer: async (nonce) =>
+        decodeBase64((await callGo("socialwebIngressSign", { host, nonce: encodeBase64(nonce) })).signature),
+      handler: async (req) => {
+        const res = await callGo("socialwebIngressRequest", {
+          host, method: req.method, path: req.path, params: req.params,
+          headers: req.headers, body: req.body, rawBody: req.rawBody,
+        }, 60_000);
+        return { status: res.status, body: res.body, contentType: res.contentType || "application/json", headers: res.headers };
+      },
+      ...hooks,
+    });
+  },
+});
+// Go pushes the ingress Exposures on every change. Applied once Go's call
+// returns: connecting calls back into Go exports.
+globalThis.__socialwebIngress = (json) => {
+  const list = JSON.parse(json);
+  queueMicrotask(() => ingress.apply(list));
+};
 
 // Socialweb vault state (OAuth session, pending PKCE, credentials) is small;
 // the page persists it under the "socialweb" IndexedDB key.
@@ -193,12 +244,11 @@ self.onmessage = (event) => {
     if (latestState) self.postMessage({ type: "state", state: latestState });
     return;
   }
-  // Page-only Go exports (vault writes, sign-out, relay signing and frames).
-  // Answered like "request" through __kcpResolve.
+  // Page-only Go exports (vault writes, sign-out). Answered like "request"
+  // through __kcpResolve. The relay ingress exports stay in this worker.
   if (type === "socialweb-call" && typeof id === "number") {
     const { fn, payload } = event.data;
-    const allowed = ["socialwebVaultPut", "socialwebIngressSign",
-      "socialwebIngressToken", "socialwebIngressRequest", "socialwebSignOut"];
+    const allowed = ["socialwebVaultPut", "socialwebSignOut"];
     if (!allowed.includes(fn) || typeof globalThis[fn] !== "function") {
       self.postMessage({ type: "response", id, error: `${fn} is not available` });
       return;
@@ -231,14 +281,12 @@ self.onmessage = (event) => {
 
 let hibernation = null;
 if (restored) await finishRestore();
-// The restored program announced its ingress Exposures to a page that is gone;
-// hand the current list to this page so it reopens the relay subscriptions.
+// The restored program announced its ingress Exposures to a worker that is
+// gone; ask for the current list to reopen the relay subscriptions.
 if (restored && typeof globalThis.socialwebIngressList === "function") {
-  const callbackID = nextCallbackID++;
-  pending.set(callbackID, {
-    resolve: (out) => self.postMessage({ type: "socialweb-ingress", ingress: out?.ingress ?? [] }),
-  });
-  globalThis.socialwebIngressList("{}", callbackID);
+  callGo("socialwebIngressList", {})
+    .then((out) => ingress.apply(out?.ingress ?? []))
+    .catch((err) => log("warn", `ingress list after restore: ${err?.message ?? err}`));
 }
 const readyMs = Math.round(performance.now() - started);
 log("ok", `kcp ready in ${readyMs}ms`);

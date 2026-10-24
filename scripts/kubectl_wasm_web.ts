@@ -93,6 +93,7 @@ const assets = new Map<string, string>([
   ["/state_store.js", "state_store.js"],
   ["/wasm_fetch.js", "wasm_fetch.js"],
   ["/ingress_ws.js", "ingress_ws.js"],
+  ["/ingress_manager.js", "ingress_manager.js"],
   ["/vmshell.js", "vmshell.js"],
   ["/webrtc_guest.js", "webrtc_guest.js"],
   ["/ssh_worker.js", "ssh_worker.js"],
