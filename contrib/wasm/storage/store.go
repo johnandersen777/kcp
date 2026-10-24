@@ -28,6 +28,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -276,12 +277,12 @@ func (s *Store) metaFor(key string) objectMeta {
 
 // Get implements storage.Interface.
 func (s *Store) Get(ctx context.Context, key string, opts kstorage.GetOptions, objPtr runtime.Object) error {
+	// Stored objects are never mutated in place (writes replace them), so
+	// the single copy below can happen outside the lock.
 	s.mu.RLock()
 	obj, exists := s.objects[key]
+	m := s.objectMeta[key]
 	rv := s.rv
-	if exists {
-		obj = obj.DeepCopyObject()
-	}
 	s.mu.RUnlock()
 
 	if !exists {
@@ -293,9 +294,6 @@ func (s *Store) Get(ctx context.Context, key string, opts kstorage.GetOptions, o
 	if err := copyObject(obj, objPtr); err != nil {
 		return err
 	}
-	s.mu.RLock()
-	m := s.objectMeta[key]
-	s.mu.RUnlock()
 	annotateObject(objPtr, m)
 	return nil
 }
@@ -618,7 +616,7 @@ func (s *Store) recordEventLocked(key string, typ watch.EventType, obj runtime.O
 		rv:   s.rv,
 		typ:  typ,
 		key:  key,
-		obj:  obj.DeepCopyObject(),
+		obj:  obj, // stored objects are immutable
 		meta: s.objectMeta[key],
 	})
 	if len(s.events) > maxWatchHistory {
@@ -780,7 +778,17 @@ func objectsEqual(a, b runtime.Object) bool {
 	return bytes.Equal(ab, bb)
 }
 
+// copyObject deep-copies src into dst. When both have the same concrete type
+// (the common case) the copy is a DeepCopyObject assigned through the
+// destination pointer, as the watch cache does for its `out runtime.Object`
+// arguments. Only mismatched types, such as Unstructured into a typed object,
+// pay for a JSON round-trip.
 func copyObject(src, dst runtime.Object) error {
+	sv, dv := reflect.ValueOf(src), reflect.ValueOf(dst)
+	if sv.Type() == dv.Type() && dv.Kind() == reflect.Pointer && !dv.IsNil() && !sv.IsNil() {
+		dv.Elem().Set(reflect.ValueOf(src.DeepCopyObject()).Elem())
+		return nil
+	}
 	raw, err := json.Marshal(src)
 	if err != nil {
 		return fmt.Errorf("encoding object: %w", err)

@@ -25,6 +25,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -543,5 +544,68 @@ func TestOnSnapshotCoalesces(t *testing.T) {
 	}
 	if len(snap.Items) < 3 {
 		t.Fatalf("snapshot has %d items, want at least 3", len(snap.Items))
+	}
+}
+
+// TestReturnedObjectsAreCopies guards the DeepCopy fast path of copyObject:
+// callers own what they get back and mutating it must not reach the store.
+func TestReturnedObjectsAreCopies(t *testing.T) {
+	ctx := context.Background()
+	s := New()
+	defer s.Close()
+
+	in := newFetch("a")
+	in.Labels = map[string]string{"k": "v"}
+	var created fetchv1alpha1.Fetch
+	if err := s.Create(ctx, key("a"), in, &created, 0); err != nil {
+		t.Fatal(err)
+	}
+	in.Labels["k"] = "mutated-input"
+	created.Labels["k"] = "mutated-create-out"
+
+	var got fetchv1alpha1.Fetch
+	if err := s.Get(ctx, key("a"), kstorage.GetOptions{}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Labels["k"] != "v" {
+		t.Fatalf("label after mutating create input/output = %q, want v", got.Labels["k"])
+	}
+	got.Labels["k"] = "mutated-get"
+
+	var list fetchv1alpha1.FetchList
+	if err := s.GetList(ctx, prefix, kstorage.ListOptions{Recursive: true}, &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.Items[0].Labels["k"] != "v" {
+		t.Fatalf("list label = %q, want v", list.Items[0].Labels["k"])
+	}
+	list.Items[0].Labels["k"] = "mutated-list"
+
+	var updated fetchv1alpha1.Fetch
+	if err := s.GuaranteedUpdate(ctx, key("a"), &updated, false, nil,
+		func(input runtime.Object, _ kstorage.ResponseMeta) (runtime.Object, *uint64, error) {
+			f := input.(*fetchv1alpha1.Fetch).DeepCopy()
+			f.Labels["other"] = "x"
+			return f, nil, nil
+		}, nil); err != nil {
+		t.Fatal(err)
+	}
+	updated.Labels["k"] = "mutated-update-out"
+
+	var again fetchv1alpha1.Fetch
+	if err := s.Get(ctx, key("a"), kstorage.GetOptions{}, &again); err != nil {
+		t.Fatal(err)
+	}
+	if again.Labels["k"] != "v" || again.Labels["other"] != "x" {
+		t.Fatalf("labels after mutating results = %v, want k=v other=x", again.Labels)
+	}
+
+	// A destination of a different type falls back to JSON.
+	var u unstructured.Unstructured
+	if err := s.Get(ctx, key("a"), kstorage.GetOptions{}, &u); err != nil {
+		t.Fatal(err)
+	}
+	if u.GetName() != "a" || u.GetLabels()["k"] != "v" {
+		t.Fatalf("unstructured Get = %v", u.Object)
 	}
 }
