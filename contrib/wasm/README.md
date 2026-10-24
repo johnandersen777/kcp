@@ -275,8 +275,9 @@ a time: it resolves `socialweb.computer` with goat, derives the PDS
 `getRecord` URL for its `app.bsky.actor.profile/self` record, applies that URL
 as a Fetch, waits with `kubectl wait --for=jsonpath=...`, tees the Fetch JSON
 to `/tmp/socialweb-profile.json` while printing it with `yq -P`, then prints
-`.status.body` from that tee'd file through `jq -r ... | yq -P`. The same
-command substitution / pipe chains work interactively.
+`.status.body` from that tee'd file through `jq -r ... | yq -P`. The boot
+commands are added to shell history, so ↑ recalls them. The same command
+substitution / pipe chains work interactively.
 
 Files live in just-bash's in-memory filesystem. Before each goat/yq run the
 shell files are seeded into the CLI worker, and its resulting files are merged

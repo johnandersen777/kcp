@@ -808,10 +808,21 @@ function redraw() {
   if (back > 0) term.write(`\x1b[${back}D`);
 }
 
+function visiblePromptLength() {
+  const cwd = bash?.getCwd() ?? homeDir;
+  return cwd.length + 3; // "<cwd> $ "
+}
+
 function replaceLine(next) {
+  // Erase the whole logical input, including wrapped rows, then redraw.
+  // Assumes the cursor is at the end of the current input (history recall).
+  const columns = term.cols || 80;
+  const rows = Math.max(1, Math.ceil((visiblePromptLength() + line.length) / columns));
+  if (rows > 1) term.write(`\x1b[${rows - 1}A`);
+  term.write("\r\x1b[0J");
   line = next;
   cursor = next.length;
-  redraw();
+  term.write(promptText() + line);
 }
 
 function insertText(text) {
@@ -1360,20 +1371,10 @@ function renderDiagram(mermaid, summary = "") {
 // URL for its profile, apply it as a Fetch, wait for completion, tee the
 // Fetch to a file while printing it with yq, then print the fetched body from
 // that file. Each step is typed and auto-entered in the terminal on load.
+const BOOT_APPLY = `DID=$(goat resolve socialweb.computer | jq -r .id); PDS=$(goat resolve "$DID" | jq -r '.service[] | select(.type=="AtprotoPersonalDataServer") | .serviceEndpoint'); URL="$PDS/xrpc/com.atproto.repo.getRecord?repo=$DID&collection=app.bsky.actor.profile&rkey=self"; printf 'apiVersion: fetch.kcp.io/v1alpha1\\nkind: Fetch\\nmetadata:\\n  name: socialweb-profile\\nspec:\\n  url: "%s"\\n' "$URL" | kubectl apply -f -; kubectl wait --for=jsonpath='{.status.phase}'=Resolved fetch/socialweb-profile --timeout=20s || true`;
+
 const BOOT_STEPS = [
-  [
-    "DID=$(goat resolve socialweb.computer | jq -r .id)",
-    "PDS=$(goat resolve \"$DID\" | jq -r '.service[] | select(.type==\"AtprotoPersonalDataServer\") | .serviceEndpoint')",
-    "kubectl apply -f - <<EOF",
-    "apiVersion: fetch.kcp.io/v1alpha1",
-    "kind: Fetch",
-    "metadata:",
-    "  name: socialweb-profile",
-    "spec:",
-    '  url: "$PDS/xrpc/com.atproto.repo.getRecord?repo=$DID&collection=app.bsky.actor.profile&rkey=self"',
-    "EOF",
-    'kubectl wait --for=jsonpath=\'{.status.phase}\'=Resolved fetch/socialweb-profile --timeout=20s || true',
-  ].join("\n"),
+  BOOT_APPLY,
   "kubectl get fetch socialweb-profile -o json | tee /tmp/socialweb-profile.json | yq -P",
   "jq -r '.status.body' /tmp/socialweb-profile.json | yq -P",
 ];
@@ -1411,6 +1412,13 @@ async function typeBootSteps(steps) {
         await sleep(2);
       }
     }
+
+    const entry = steps[stepIndex].trim();
+    if (entry && history[history.length - 1] !== entry) {
+      history.push(entry);
+      saveHistory();
+    }
+    historyIndex = history.length;
 
     // Visible Enter press before the step runs.
     await sleep(150);

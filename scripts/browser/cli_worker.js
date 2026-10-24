@@ -120,8 +120,9 @@ async function runTool(id, request) {
   setOutputSink(capture);
 
   let exitCode = 0;
+  let go = null;
   try {
-    const go = new globalThis.Go();
+    go = new globalThis.Go();
     go.argv = [tool, ...(request.args ?? [])];
     go.env = request.env ?? {};
     go.exit = (code) => {
@@ -134,6 +135,12 @@ async function runTool(id, request) {
     capture.stderr += `${err instanceof Error ? err.message : String(err)}\n`;
     exitCode = exitCode || 1;
   } finally {
+    if (go) {
+      // Go's wasm_exec timers/callbacks from this instance can fire after the
+      // program exits and throw "Go program has already exited". Neutralize
+      // resume on the dead instance.
+      go._resume = () => {};
+    }
     setOutputSink(null);
   }
 
