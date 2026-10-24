@@ -635,6 +635,12 @@ function attachKubectl(worker) {
   worker.addEventListener("message", (event) => {
     const data = event.data ?? {};
     if (data.type === "fetch") {
+      // kcp restarts (e.g. a discarded snapshot) leave a gap with no worker;
+      // fail the request instead of leaving kubectl waiting for its timeout.
+      if (!kcpWorker) {
+        worker.postMessage({ type: "fetchResult", id: data.id, request: { error: "kcp worker is not running" } });
+        return;
+      }
       pendingBridges.set(data.id, true);
       kcpWorker.postMessage({
         type: "request",
@@ -2205,6 +2211,7 @@ async function connectShell(name) {
 
 function applyComputeState(state) {
   lastFeedState = state;
+  checkWootty();
   for (const watcher of [...feedWatchers]) watcher(state);
   const contracts = state.contracts ?? [];
   const active = contracts.filter(vmshell.isActive);
@@ -2226,10 +2233,39 @@ function applyComputeState(state) {
   computeListEl.replaceChildren(...contracts.map(computeRow));
 }
 
+// socialweb c85b6222 removed spec.tunnels[].shell (plan 0034 W0): wootty
+// works only while the exported ComputeContract schema still has it.
+let woottyCheck = "todo"; // todo | running | done
+function checkWootty() {
+  // After start() (initComputeUI), so the check never races a kcp restart.
+  if (woottyCheck !== "todo" || !ready) return;
+  woottyCheck = "running";
+  woottyServed().then((served) => {
+    woottyCheck = "done";
+    if (served) return;
+    const option = computeShellEl.querySelector('option[value="wootty"]');
+    option.disabled = true;
+    option.textContent = "wootty (not served by this socialweb)";
+    if (computeShellEl.value === "wootty") computeShellEl.value = "webrtc";
+  }, () => {
+    woottyCheck = "todo"; // the provider workspace is not up yet; retry on the next feed update
+  });
+}
+
+async function woottyServed() {
+  const provider = [`--server=${apiServer}/clusters/root:socialweb-provider`];
+  const exported = await kubectlJSON(["get", "apiexport", "computecontracts", ...provider]);
+  const schemaName = (exported.spec?.resources ?? []).find((r) => r.name === "computecontracts")?.schema;
+  if (!schemaName) return false;
+  const schema = await kubectlJSON(["get", "apiresourceschema", schemaName, ...provider]);
+  return (schema.spec?.versions ?? []).some((v) =>
+    v.schema?.properties?.spec?.properties?.tunnels?.items?.properties?.shell !== undefined);
+}
+
 function initComputeUI() {
   computeBiddersEl.value = localStorage.getItem(computePrefs.bidders) ?? vmshell.DEFAULT_BIDDERS.join(", ");
   // "0"/"1" are the old checkbox values.
-  const shell = localStorage.getItem(computePrefs.shell) ?? "wootty";
+  const shell = localStorage.getItem(computePrefs.shell) ?? "webrtc";
   computeShellEl.value = shell === "0" ? "none" : shell === "1" ? "wootty" : shell;
   computeRequestEl.addEventListener("click", () => {
     computeStatusEl.classList.remove("err");

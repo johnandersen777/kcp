@@ -89,10 +89,6 @@ type ContractEvent struct {
 	CreatedAt  string `json:"createdAt,omitempty"`
 }
 
-// contractEventGVR is defined here until the socialweb api module this
-// build pins exports it (plan 0034 W1-API).
-var contractEventGVR = schema.GroupVersionResource{Group: "socialweb.computer", Version: "v1alpha1", Resource: "contractevents"}
-
 // State is a full, idempotent UI snapshot.
 type State struct {
 	Seq             int64           `json:"seq"`
@@ -170,7 +166,7 @@ func Start(ctx context.Context, cfg *rest.Config, publish func([]byte)) error {
 	// ContractEvent is newer than some served manifests: it starts after the
 	// initial sync and is never waited on, so a kcp without the API still
 	// boots; its reflector lists again with backoff until the API appears.
-	if err := watch(contractEventGVR); err != nil {
+	if err := watch(v1alpha1.ContractEventGVR); err != nil {
 		return err
 	}
 	factory.Start(ctx.Done())
@@ -239,7 +235,7 @@ func (f *Feed) build() State {
 		state.Contracts = append(state.Contracts, contract(u))
 	}
 	sort.Slice(state.Contracts, func(i, j int) bool { return state.Contracts[i].Name < state.Contracts[j].Name })
-	for _, u := range f.objects(contractEventGVR) {
+	for _, u := range f.objects(v1alpha1.ContractEventGVR) {
 		state.ContractEvents = append(state.ContractEvents, contractEvent(u))
 	}
 	sort.Slice(state.ContractEvents, func(i, j int) bool { return state.ContractEvents[i].Name < state.ContractEvents[j].Name })
