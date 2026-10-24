@@ -123,18 +123,17 @@ func startSocialweb(srv *real.Server, kcpHandler js.Func) {
 		var in struct {
 			// IngressProxyHost overrides the relay; "" serves every Exposure
 			// on the page origin.
-			IngressProxyHost *string  `json:"ingressProxyHost"`
-			Origin           string   `json:"origin"`
-			Handle           string   `json:"handle"`
-			DID              string   `json:"did"`
-			PDSURL           string   `json:"pdsUrl"`
-			OAuthClientID    string   `json:"oauthClientId"`
-			OAuthRedirectURI string   `json:"oauthRedirectUri"`
-			IdentityMode     string   `json:"identityMode"`
-			BidderDIDs       []string `json:"bidderDids"`
-			ForceApply       bool     `json:"forceApply"`
-			Restore          string   `json:"restore"`
-			StatusFeed       *bool    `json:"statusFeed"`
+			IngressProxyHost *string `json:"ingressProxyHost"`
+			Origin           string  `json:"origin"`
+			Handle           string  `json:"handle"`
+			DID              string  `json:"did"`
+			PDSURL           string  `json:"pdsUrl"`
+			OAuthClientID    string  `json:"oauthClientId"`
+			OAuthRedirectURI string  `json:"oauthRedirectUri"`
+			IdentityMode     string  `json:"identityMode"`
+			ForceApply       bool    `json:"forceApply"`
+			Restore          string  `json:"restore"`
+			StatusFeed       *bool   `json:"statusFeed"`
 		}
 		if err := json.Unmarshal([]byte(raw.String()), &in); err == nil {
 			cfg.Origin = firstNonEmpty(in.Origin, cfg.Origin)
@@ -143,7 +142,6 @@ func startSocialweb(srv *real.Server, kcpHandler js.Func) {
 			cfg.PDSURL = in.PDSURL
 			cfg.OAuthClientID = in.OAuthClientID
 			cfg.OAuthRedirectURI = in.OAuthRedirectURI
-			cfg.BidderDIDs = in.BidderDIDs
 			cfg.ForceApply = in.ForceApply
 			if restore := strings.TrimSpace(in.Restore); restore != "" {
 				cfg.Restore = json.RawMessage(restore)

@@ -14,8 +14,6 @@ export const WOOTTY_PORT = 7681;
 export const WOOTTY_ENV = "/etc/wootty/wootty.env";
 export const SSH_TAG = "ssh";
 export const SECRETS_MOUNT = "requester";
-// hat-9; the local bidder is did:plc:2l2wdry77c7jtucbslstagkj.
-export const DEFAULT_BIDDERS = ["did:plc:4vcig7s43z3nyqrnepmcfzqt"];
 
 export function base64url(bytes) {
   let binary = "";
@@ -54,18 +52,14 @@ export function secretsBundle(token) {
   return JSON.stringify([{ path: WOOTTY_ENV, value: `WOOTTY_AUTH_TOKEN=${token}\n` }]);
 }
 
-export function parseBidders(text) {
-  const dids = String(text ?? "").split(/[\s,]+/).filter((s) => s.startsWith("did:"));
-  return dids.length > 0 ? dids : [...DEFAULT_BIDDERS];
-}
-
 /**
  * A ComputeContract for the page: the webrtc ssh tunnel (sshKeys must hold
  * the page's key) and, with wootty, the opentunnel wootty tunnel and the
  * secretsRef of its token bundle.
  */
-export function contractManifest({ name, bidders, ownerDid, wootty = false, sshKeys = [], ttlSeconds = null }) {
-  const spec = { vmName: name, bidderDids: bidders };
+export function contractManifest({ name, ownerDid, wootty = false, sshKeys = [], ttlSeconds = null }) {
+  // No bidderDids: the requester's discovery picks the bidders.
+  const spec = { vmName: name };
   spec.tunnels = [{ tag: SSH_TAG, port: 22, transport: "webrtc" }];
   if (wootty) {
     spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };

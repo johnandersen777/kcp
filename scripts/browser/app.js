@@ -2186,7 +2186,7 @@ function initSocialwebUI() {
 
 // --- compute -----------------------------------------------------------------
 // One panel for ComputeContracts. "Request VM" applies a contract for the
-// chosen bidders with both shells: ssh over WebRTC (plan 0034; the public
+// discovered bidders with both shells: ssh over WebRTC (plan 0034; the public
 // half of a non-extractable WebCrypto Ed25519 key kept in IndexedDB per
 // contract) and, when the served schema has spec.tunnels[].shell, the wootty
 // web terminal behind opentunnel (plan 0032; a browser-made token written to
@@ -2200,7 +2200,6 @@ function initSocialwebUI() {
 // connects to contrib/wasm/sshclient/testpeer instead of a guest. Nothing
 // here loads kubectl: kcpREST talks to kcp directly.
 
-const computeBiddersEl = document.getElementById("compute-bidders");
 const computeSSHEl = document.getElementById("compute-ssh");
 const computeTTLEl = document.getElementById("compute-ttl");
 const computeRequestEl = document.getElementById("compute-request");
@@ -2210,7 +2209,6 @@ const vmshellIngressEl = document.getElementById("compute-ingress");
 const computeTestPeerEl = document.getElementById("compute-testpeer");
 const toastEl = document.getElementById("toast");
 const computePrefs = {
-  bidders: "socialweb.vmshell.bidders",
   token: (name) => `socialweb.vmshell.token.${name}`,
   transport: (name) => `socialweb.compute.transport.${name}`,
 };
@@ -2243,60 +2241,17 @@ function socialwebCall(fn, payload, timeoutMs = 30_000) {
   });
 }
 
-// Read bids and bidder/guest events from each bidder's own PDS as well as from
-// submitBid/submitEvent over the ingress (comms mode Both), so a bid still
-// lands while the ingress is reconnecting.
-// ponytail: page-side until socialweb derives these from a contract's
-// bidderDids itself; then delete this and the RelayEventSource objects.
-const EVENTS_API = "/apis/events.socialweb.computer/v1alpha1";
-
-async function bidderPDS(did) {
-  const url = did.startsWith("did:web:")
-    ? `https://${did.slice("did:web:".length)}/.well-known/did.json`
-    : `https://plc.directory/${did}`;
-  const doc = await (await fetch(url)).json();
-  const pds = (doc.service ?? []).find((s) => s.id === "#atproto_pds" || s.id === `${did}#atproto_pds`);
-  if (!pds?.serviceEndpoint) throw new Error(`${did} names no #atproto_pds`);
-  return new URL(pds.serviceEndpoint).origin;
-}
-
-async function ensureBidderStreams(bidders) {
-  const refs = [];
-  for (const did of bidders) {
-    const name = `pds-${did.split(":").pop().toLowerCase().replace(/[^a-z0-9]/g, "").slice(-12)}`;
-    const url = await bidderPDS(did);
-    for (const [plural, kind, spec] of [
-      ["relayeventsources", "RelayEventSource", { url }],
-      ["eventsources", "EventSource", { backendRef: { group: "events.socialweb.computer", kind: "RelayEventSource", name } }],
-    ]) {
-      try {
-        await kcpREST("POST", `${EVENTS_API}/${plural}`, {
-          apiVersion: "events.socialweb.computer/v1alpha1", kind, metadata: { name }, spec,
-        });
-      } catch (err) {
-        if (!/: 409 /.test(String(err.message))) throw err;
-      }
-    }
-    refs.push({ group: "events.socialweb.computer", kind: "EventSource", name });
-  }
-  await kcpREST("PATCH", `${SOCIALWEB_API}/marketrequesters/app`,
-    { spec: { comms: { mode: "Both", eventSourceRefs: refs } } }, "application/merge-patch+json");
-  addLog("info", `bids and events also read from ${refs.map((r) => r.name).join(", ")} (comms Both)`);
-}
-
 async function requestVM() {
   try {
     computeBusy = true;
     computeRequestEl.disabled = true;
-    localStorage.setItem(computePrefs.bidders, computeBiddersEl.value.trim());
-    const bidders = vmshell.parseBidders(computeBiddersEl.value);
     const ssh = computeSSHEl.value.trim();
     const sshKeys = ssh ? [ssh] : [];
     const ttlSeconds = parseTTLSeconds(computeTTLEl.value);
     const name = vmshell.contractName();
     const wootty = await woottyServed();
     const shells = wootty ? "ssh over WebRTC and wootty" : "ssh over WebRTC (no wootty in this socialweb)";
-    addLog("info", `requesting ComputeContract ${name} from ${bidders.join(", ")} with ${shells}`);
+    addLog("info", `requesting ComputeContract ${name} from discovered bidders with ${shells}`);
     const key = await webrtcGuest.newSSHKey();
     await webrtcGuest.saveSSHKey(name, key);
     sshKeys.unshift(key.authorized);
@@ -2313,16 +2268,13 @@ async function requestVM() {
         bundle: vmshell.secretsBundle(token),
       });
     }
-    await ensureBidderStreams(bidders).catch((err) => {
-      addLog("warn", `bidder event streams: ${err instanceof Error ? err.message : err}; bids arrive over the ingress only`);
-    });
     const identity = await kcpREST("GET", `${SOCIALWEB_API}/marketidentities/requester`).catch(() => null);
     const manifest = vmshell.contractManifest({
-      name, bidders, ownerDid: identity?.status?.did ?? "", wootty, sshKeys, ttlSeconds,
+      name, ownerDid: identity?.status?.did ?? "", wootty, sshKeys, ttlSeconds,
     });
     await kcpREST("POST", `${SOCIALWEB_API}/computecontracts`, manifest);
-    setAppStatus(computeStatusEl, `${name} requested from ${bidders.join(", ")}`, "ok");
-    addLog("ok", `ComputeContract ${name} requested from ${bidders.join(", ")} with ${shells}`);
+    setAppStatus(computeStatusEl, `${name} requested; waiting for bids`, "ok");
+    addLog("ok", `ComputeContract ${name} requested from discovered bidders with ${shells}`);
   } catch (err) {
     addLog("error", `Request VM failed: ${err instanceof Error ? err.message : err}`);
     setAppStatus(computeStatusEl, String(err.message ?? err), "err");
@@ -2729,7 +2681,7 @@ function applyComputeState(state) {
 }
 
 function initComputeUI() {
-  computeBiddersEl.value = localStorage.getItem(computePrefs.bidders) ?? vmshell.DEFAULT_BIDDERS.join(", ");
+  localStorage.removeItem("socialweb.vmshell.bidders");
   computeRequestEl.addEventListener("click", () => {
     computeStatusEl.classList.remove("err");
     void requestVM();

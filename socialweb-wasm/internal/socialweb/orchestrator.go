@@ -32,8 +32,8 @@ import (
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/bus"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/component"
 	componentlink "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/componentlink"
-	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketidentity"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/contractevent"
+	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketidentity"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketintents"
 	policyenginectl "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/policyengine"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/repos"
@@ -74,8 +74,6 @@ type Config struct {
 	OAuthClientID string
 
 	OAuthRedirectURI string
-
-	BidderDIDs []string
 
 	// ForceApply re-applies every provider manifest set even when the snapshot
 	// already holds ready bindings. Dev loops leave it off; schema changes and
@@ -480,8 +478,7 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 				PdsURL:      cfg.PDSURL,
 				Association: v1alpha1.AssociationSkip,
 			},
-			Network:    &v1alpha1.MarketNetworkValue{PLCDirectoryURL: "https://plc.directory"},
-			BidderDids: append([]string(nil), cfg.BidderDIDs...),
+			Network: &v1alpha1.MarketNetworkValue{PLCDirectoryURL: "https://plc.directory"},
 		},
 	}
 	obj.APIVersion = v1alpha1.GroupVersion.String()
