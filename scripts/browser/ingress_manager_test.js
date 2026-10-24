@@ -189,3 +189,79 @@ Deno.test("retry backoff caps at 30s and a dropped host stops retrying", async (
   await h.advance(60_000);
   assertEquals(h.calls.length, 8);
 });
+
+// End to end against a local fake relay, wired the way kcp_worker.js wires
+// the manager to ingress_ws.js register.
+Deno.test("fake relay: register, keepalive 204, request frames, reconnect with fresh tokens", async () => {
+  const { register, frame, parseFrame, KEEPALIVE_PATH } = await import("./ingress_ws.js");
+  const sockets = [];
+  const authHeaders = [];
+  const subscribeTokens = [];
+  const responses = [];
+  let open = 0;
+  let maxOpen = 0;
+  const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen() {} }, (req) => {
+    const url = new URL(req.url);
+    if (url.pathname.endsWith("getRegistrationNonce")) {
+      authHeaders.push(req.headers.get("authorization"));
+      return Response.json({ nonce: btoa("nonce") });
+    }
+    const { socket, response } = Deno.upgradeWebSocket(req);
+    subscribeTokens.push(url.searchParams.get("service_auth"));
+    socket.onopen = () => {
+      open++;
+      maxOpen = Math.max(maxOpen, open);
+      sockets.push(socket);
+      socket.send(frame("registered", { subdomain: "abc" }));
+      socket.send(frame("request", { requestId: "k", method: "GET", path: KEEPALIVE_PATH }));
+      socket.send(frame("request", { requestId: "b", method: "POST", path: "/xrpc/submitBid", body: { bid: 1 } }));
+    };
+    socket.onmessage = (e) => responses.push(parseFrame(e.data));
+    socket.onclose = () => open--;
+    return response;
+  });
+  const proxyHost = `http://127.0.0.1:${server.addr.port}`;
+  let tokens = 0;
+  const statuses = [];
+  const handled = [];
+  const manager = createIngressManager({
+    onStatus: (entries) => statuses.push(entries.map((e) => e.state).join(",")),
+    connect: (entry, hooks) =>
+      register({
+        proxyHost: entry.proxyHost,
+        did: entry.did,
+        getServiceAuthToken: async (nsid) => `token-${++tokens}-${nsid.split(".").pop()}`,
+        signer: async (nonce) => nonce,
+        handler: async (req) => {
+          handled.push(req.path);
+          return { status: 200, body: JSON.stringify({ ok: true }), contentType: "application/json" };
+        },
+        ...hooks,
+      }),
+  });
+  const waitFor = async (cond) => {
+    for (let i = 0; i < 400 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+    if (!cond()) throw new Error("timed out");
+  };
+  try {
+    const e = { name: "req", host: "h", url: "https://h", did: "did:key:z", proxyHost };
+    manager.apply([e]);
+    manager.apply([e]);
+    await waitFor(() => responses.length >= 2);
+    assertEquals(manager.status()[0].state, "registered");
+    assertEquals(responses.find((r) => r.requestId === "k").status, 204);
+    assertEquals(responses.find((r) => r.requestId === "b").status, 200);
+    assertEquals(handled, ["/xrpc/submitBid"]);
+    sockets[0].close(1011, "relay restart");
+    await waitFor(() => responses.length >= 4);
+    assertEquals(manager.status()[0].state, "registered");
+    assertEquals(subscribeTokens.length, 2);
+    assertEquals(new Set([...authHeaders, ...subscribeTokens]).size, 4);
+    assertEquals(maxOpen, 1);
+    assertEquals(statuses, ["connecting", "registered", "reconnecting", "registered"]);
+  } finally {
+    manager.apply([]);
+    for (const s of sockets) s.close();
+    await server.shutdown();
+  }
+});
