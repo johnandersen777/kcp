@@ -502,6 +502,7 @@ function runCli(tool, args, env, cwd, stdin, files, dirs) {
 
 let bash = null;
 let shellAbort = null;
+let ttyTool = null;
 
 function decodeStdin(value) {
   if (!value) return "";
@@ -582,6 +583,43 @@ function shellHelp() {
   ].join("\n");
 }
 
+function lastPipelineSegment(script) {
+  const source = stripHeredocBodies(script);
+  const segments = [];
+  let current = "";
+  let quote = null;
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === "|" && source[i + 1] !== "|") {
+      segments.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  segments.push(current);
+  return segments[segments.length - 1].trim();
+}
+
+// A native shell gives the last pipeline command a terminal stdout. Use that
+// to set KCP_TTY for CLI tools that colorize on isatty (yq).
+function detectTtyTool(script) {
+  const segment = lastPipelineSegment(script);
+  if (/[<>]/.test(segment)) return null;
+  const first = splitArgs(segment)[0];
+  return ["kubectl", "goat", "yq"].includes(first) ? first : null;
+}
+
 function makeCommands() {
   const kubectl = defineCommand("kubectl", async (args, ctx) => {
     const result = await runKubectl(withServer(args), decodeStdin(ctx.stdin));
@@ -598,6 +636,7 @@ function makeCommands() {
     }
     if (cliRestarting) await cliGate;
     const env = { ...cliBaseEnv, ...Object.fromEntries(ctx.env) };
+    if (tool === ttyTool) env.KCP_TTY = "1";
     const { files, dirs } = await walkBashFs(bash.fs);
     const result = await runCli(
       tool,
@@ -869,6 +908,7 @@ async function runScript(script, stdin = "") {
   setStatus(`running ${label}…`, "running");
   addLog("info", `$ ${label.replace(/\s+/g, " ")}${script.includes("\n") ? " …" : ""}`);
   const started = performance.now();
+  ttyTool = detectTtyTool(script);
   shellAbort = new AbortController();
 
   try {
@@ -898,6 +938,7 @@ async function runScript(script, stdin = "") {
     scheduleShellPersist();
   } finally {
     shellAbort = null;
+    ttyTool = null;
     busy = false;
     if (!kubectlRestarting && !cliRestarting) setStatus("connected", "connected");
     prompt();

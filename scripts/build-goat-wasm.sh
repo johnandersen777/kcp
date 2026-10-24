@@ -107,9 +107,13 @@ src = src.replace(needle, addition, 1)
 open(handle_path, "w").write(src)
 GOATPY
 
+isatty_dir="$("${repo_root}/scripts/prepare-cli-isatty.sh" "${work}/go-isatty" \
+  "$(cd "${work}" && GOTOOLCHAIN="${cli_toolchain}" go list -m -f '{{.Dir}}' github.com/mattn/go-isatty)")"
+
 cp "${work}/go.mod" "${work}/build.mod"
 cp "${work}/go.sum" "${work}/build.sum"
 echo "replace github.com/bluesky-social/indigo => ${indigo_dir}" >> "${work}/build.mod"
+echo "replace github.com/mattn/go-isatty => ${isatty_dir}" >> "${work}/build.mod"
 
 commit="$(git -C "${work}" rev-parse --short HEAD)"
 echo "Building goat ${commit} for js/wasm..."

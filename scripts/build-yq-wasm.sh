@@ -43,11 +43,18 @@ else
 fi
 git -C "${work}" clean -fdx >/dev/null
 
+isatty_dir="$("${repo_root}/scripts/prepare-cli-isatty.sh" "${work}/go-isatty" \
+  "$(cd "${work}" && GOTOOLCHAIN="${cli_toolchain}" go list -m -f '{{.Dir}}' github.com/mattn/go-isatty)")"
+cp "${work}/go.mod" "${work}/build.mod"
+cp "${work}/go.sum" "${work}/build.sum"
+echo "replace github.com/mattn/go-isatty => ${isatty_dir}" >> "${work}/build.mod"
+
 commit="$(git -C "${work}" rev-parse --short HEAD)"
 echo "Building yq ${commit} for js/wasm..."
 (
   cd "${work}"
   GOTOOLCHAIN="${cli_toolchain}" GOOS=js GOARCH=wasm go build \
+    -modfile="${work}/build.mod" \
     -ldflags="-X main.version=yq-${commit}" \
     -o "${outdir}/yq.wasm" .
 )
