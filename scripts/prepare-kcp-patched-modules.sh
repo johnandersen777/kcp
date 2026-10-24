@@ -165,6 +165,20 @@ if [[ "${mode}" == "js" ]]; then
   replace_in "${cert_go}" \
     '\tif err := pem.Encode(&keyBuffer, &pem.Block{Type: keyutil.RSAPrivateKeyBlockType, Bytes: x509.MarshalPKCS1PrivateKey(priv)}); err != nil {' \
     '\tkeyDER, err := x509.MarshalECPrivateKey(priv)\n\tif err != nil {\n\t\treturn nil, nil, err\n\t}\n\tif err := pem.Encode(&keyBuffer, &pem.Block{Type: keyutil.ECPrivateKeyBlockType, Bytes: keyDER}); err != nil {'
+
+  # Informers start before their CRDs exist and their reflectors back off
+  # 800ms doubling to 30s, so a resource that appears a moment later is only
+  # listed tens of seconds after. A single in-process apiserver has no
+  # thundering herd to protect against: retry from 100ms, capped at 1s. Both
+  # client-go's reflector and kcp's cluster-aware fork carry the constants;
+  # the fork lives in-tree, so refresh its copy on every run.
+  rm -rf "${work}/kcp-apimachinery"
+  copy_module github.com/kcp-dev/apimachinery/v2 "${work}/kcp-apimachinery"
+  for reflector in "${work}/client-go/tools/cache/reflector.go" \
+    "${work}/kcp-apimachinery/third_party/reflector/reflector.go"; do
+    replace_in "${reflector}" 'defaultBackoffInit = 800 * time.Millisecond' 'defaultBackoffInit = 100 * time.Millisecond'
+    replace_in "${reflector}" 'defaultBackoffMax  = 30 * time.Second' 'defaultBackoffMax  = 1 * time.Second'
+  done
 fi
 
 echo "prepared ${modfile} (mode=${mode})"
