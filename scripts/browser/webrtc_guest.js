@@ -187,9 +187,20 @@ function gatheringComplete(pc, timeoutMs = 15_000, settleMs = 500) {
  * returns {port, close}. port is a MessagePort carrying the channel's raw TCP
  * bytes both ways (ArrayBuffers); onEof runs when the channel closes.
  * signaling: {guest(), publishKey(recipient), exchange(offerCiphertext, open)
- * -> the opened answer}.
+ * -> the opened answer}. A missing answer or a channel that does not open in
+ * time throws an error with connectivity: true (callers may fall back to
+ * another shell); a fingerprint mismatch does not.
  */
-export async function dialGuest({ signaling, tag = SSH_TAG, status = () => {}, onEof = () => {} }) {
+export async function dialGuest({
+  signaling, tag = SSH_TAG, status = () => {}, onEof = () => {}, answerTimeoutMs = 60_000, openTimeoutMs = 15_000,
+}) {
+  const within = (promise, ms, message) => {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Object.assign(new Error(message), { connectivity: true })), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  };
   status("waiting for the guest's publicKey and fingerprint");
   const guest = await signaling.guest();
   const me = await newAgeIdentity();
@@ -206,19 +217,22 @@ export async function dialGuest({ signaling, tag = SSH_TAG, status = () => {}, o
     // Sealed bodies are JSON {sdp, replyTo}; replyTo (offers only) is the
     // recipient the guest seals its answer to.
     const offer = JSON.stringify({ sdp: pc.localDescription.sdp, replyTo: me.recipient });
-    const opened = await signaling.exchange(await seal(offer, guest.key), (c) => me.open(c));
+    const opened = await within(signaling.exchange(await seal(offer, guest.key), (c) => me.open(c)),
+      answerTimeoutMs, `no answer from the guest agent within ${answerTimeoutMs / 1000} s`);
     const answer = String(JSON.parse(opened)?.sdp ?? "");
     if (!fingerprintMatches(answer, guest.fingerprint)) {
       throw new Error("answer a=fingerprint does not match the guest's onNetwork address");
     }
     await pc.setRemoteDescription({ type: "answer", sdp: answer });
     status("connecting datachannel");
-    await new Promise((resolve, reject) => {
+    await within(new Promise((resolve, reject) => {
       dc.onopen = resolve;
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "failed") reject(new Error("WebRTC connection failed (symmetric NAT?)"));
+        if (pc.connectionState === "failed") {
+          reject(Object.assign(new Error("WebRTC connection failed (symmetric NAT?)"), { connectivity: true }));
+        }
       };
-    });
+    }), openTimeoutMs, `the datachannel did not open within ${openTimeoutMs / 1000} s`);
     status("datachannel open");
     const { port1, port2 } = new MessageChannel();
     dc.onmessage = (e) => port1.postMessage(e.data, [e.data]);

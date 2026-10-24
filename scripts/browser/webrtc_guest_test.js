@@ -6,6 +6,7 @@
 import {
   authorizedKey,
   contractEventManifest,
+  dialGuest,
   fingerprintMatches,
   firstOpened,
   guestFromState,
@@ -69,4 +70,56 @@ Deno.test("firstOpened skips answers sealed to another identity", async () => {
   const mine = await seal('{"sdp":"mine"}', me.recipient);
   assert(await firstOpened([theirs, mine], me.open) === '{"sdp":"mine"}', "mine");
   assert(await firstOpened([theirs], me.open) === undefined, "none");
+});
+
+// A stand-in RTCPeerConnection: gathering is complete at once and the
+// datachannel never opens, so only dialGuest's own timeouts end a dial.
+class FakePeerConnection {
+  iceGatheringState = "complete";
+  localDescription = { sdp: "v=0 offer" };
+  createDataChannel() {
+    return {};
+  }
+  createOffer() {
+    return Promise.resolve({ type: "offer", sdp: "v=0 offer" });
+  }
+  setLocalDescription() {
+    return Promise.resolve();
+  }
+  setRemoteDescription() {
+    return Promise.resolve();
+  }
+  addEventListener() {}
+  removeEventListener() {}
+  close() {}
+}
+
+Deno.test("dialGuest: no answer or no open channel is a connectivity error", async () => {
+  const saved = globalThis.RTCPeerConnection;
+  globalThis.RTCPeerConnection = FakePeerConnection;
+  try {
+    const guest = await newAgeIdentity();
+    const fingerprint = "sha-256 AB:CD";
+    const base = {
+      guest: () => Promise.resolve({ key: guest.recipient, fingerprint, hostKeys: [] }),
+      publishKey: () => Promise.resolve(),
+    };
+    const dial = async (exchange) => {
+      try {
+        await dialGuest({ signaling: { ...base, exchange }, answerTimeoutMs: 50, openTimeoutMs: 50 });
+      } catch (err) {
+        return err;
+      }
+      throw new Error("dial should fail");
+    };
+    const silent = await dial(() => new Promise(() => {}));
+    assert(silent.connectivity && /no answer/.test(silent.message), silent.message);
+    const answer = JSON.stringify({ sdp: `v=0\r\na=fingerprint:${fingerprint}\r\n` });
+    const closed = await dial(() => Promise.resolve(answer));
+    assert(closed.connectivity && /did not open/.test(closed.message), closed.message);
+    const wrong = await dial(() => Promise.resolve(JSON.stringify({ sdp: "a=fingerprint:sha-256 00:11\r\n" })));
+    assert(!wrong.connectivity && /fingerprint/.test(wrong.message), "a fingerprint mismatch is not a fallback case");
+  } finally {
+    globalThis.RTCPeerConnection = saved;
+  }
 });
