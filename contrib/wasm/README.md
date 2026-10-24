@@ -272,9 +272,11 @@ inside the tab, cancelling restarts the kubectl worker (its Go runtime cannot
 be interrupted mid-command; the kcp worker keeps all state). `apply -f -` and
 `create -f -` enter stdin mode: paste or type a manifest, Ctrl-D runs kubectl
 with it, Ctrl-C aborts. Tab completion calls kubectl's own `__complete`
-(commands, flags, resource types and live resource names). The kubectl
-entrypoint overrides `cmdutil.BehaviorOnFatal` so errors that upstream treats
-as `os.Exit` come back as normal results instead of killing the runtime.
+(commands, flags, resource types and live resource names). Dropping a YAML
+file onto the terminal applies it, and Ctrl+Shift+C/V copy and paste the
+terminal selection. The kubectl entrypoint overrides `cmdutil.BehaviorOnFatal`
+so errors that upstream treats as `os.Exit` come back as normal results
+instead of killing the runtime.
 
 Below the terminal, an activity log shows module load times, every bridge
 request and response with status and latency, kubectl exit codes, kcp snapshot

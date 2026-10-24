@@ -109,6 +109,49 @@ new ResizeObserver(() => {
 term.focus();
 document.getElementById("terminal-pane").addEventListener("click", () => term.focus());
 
+// Dropping a manifest runs `apply -f -` with the file contents as stdin.
+const terminalPaneEl = document.getElementById("terminal-pane");
+terminalPaneEl.addEventListener("dragover", (event) => {
+  event.preventDefault();
+});
+terminalPaneEl.addEventListener("drop", async (event) => {
+  event.preventDefault();
+  const file = event.dataTransfer?.files?.[0];
+  if (!file) return;
+  if (busy || stdinMode || !ready) {
+    addLog("warn", "busy; cannot apply the dropped manifest right now");
+    return;
+  }
+  const text = await file.text();
+  term.focus();
+  term.write(
+    `\r\n${promptText()}apply -f - ${dim(`(dropped ${file.name}, ${text.length} bytes)`)}\r\n`,
+  );
+  execute(["apply", "-f", "-"], text);
+});
+
+// Ctrl+Shift+C/V copy and paste terminal selections without stealing Ctrl-C
+// (which cancels) or plain Ctrl-V (browser paste into xterm's textarea).
+term.attachCustomKeyEventHandler((event) => {
+  if (event.type !== "keydown") return true;
+  if (event.ctrlKey && event.shiftKey && event.code === "KeyC") {
+    const selection = term.getSelection();
+    if (selection) {
+      navigator.clipboard?.writeText(selection).catch(() => {});
+    }
+    return false;
+  }
+  if (event.ctrlKey && event.shiftKey && event.code === "KeyV") {
+    navigator.clipboard?.readText()
+      .then((text) => {
+        if (text) term.paste(text);
+      })
+      .catch(() => {});
+    return false;
+  }
+  return true;
+});
+
 const dim = (text) => `\x1b[90m${text}\x1b[0m`;
 const red = (text) => `\x1b[31m${text}\x1b[0m`;
 const cyan = (text) => `\x1b[36m${text}\x1b[0m`;
@@ -148,6 +191,7 @@ let restarting = false;
 let ready = false;
 let busy = false;
 const pendingRuns = new Map();
+const pendingBridges = new Map();
 let nextRunID = 1;
 let runQueue = Promise.resolve();
 
@@ -186,11 +230,23 @@ function waitReady(worker) {
 
 function attachKcp(worker) {
   worker.addEventListener("error", (event) => {
-    addLog("error", `kcp worker crashed: ${event.message ?? "worker error"}`);
+    const message = event.message ?? "worker error";
+    addLog("error", `kcp worker crashed: ${message}`);
+    // Fail in-flight bridge requests instead of leaving kubectl waiting for
+    // the 120s fetch timeout.
+    for (const id of pendingBridges.keys()) {
+      kubectlWorker?.postMessage({
+        type: "fetchResult",
+        id,
+        request: { error: `kcp worker crashed: ${message}` },
+      });
+    }
+    pendingBridges.clear();
   });
   worker.addEventListener("message", (event) => {
     const data = event.data ?? {};
     if (data.type === "response") {
+      pendingBridges.delete(data.id);
       kubectlWorker?.postMessage({
         type: "fetchResult",
         id: data.id,
@@ -208,6 +264,7 @@ function attachKubectl(worker) {
   worker.addEventListener("message", (event) => {
     const data = event.data ?? {};
     if (data.type === "fetch") {
+      pendingBridges.set(data.id, true);
       kcpWorker.postMessage({
         type: "request",
         id: data.id,
@@ -239,6 +296,7 @@ function attachKubectl(worker) {
     addLog("error", `kubectl worker crashed: ${message}`);
     for (const entry of pendingRuns.values()) entry.reject(new Error(message));
     pendingRuns.clear();
+    pendingBridges.clear();
   });
 }
 
@@ -268,6 +326,7 @@ async function restartKubectl(reason) {
   kubectlWorker = null;
   for (const entry of pendingRuns.values()) entry.reject(new CancelledError());
   pendingRuns.clear();
+  pendingBridges.clear();
   old?.terminate();
   try {
     await spawnKubectl();
@@ -652,6 +711,7 @@ function printHelp() {
   term.writeln(dim("keys: Ctrl-C cancel · Ctrl-D run stdin · Ctrl-L clear · ↑/↓ history"));
   term.writeln(dim("      ←/→ cursor · Ctrl-A/E/U/W · Tab completion"));
   term.writeln(dim("no local files in WASM: use URLs with -f, or stdin with -f -"));
+  term.writeln(dim("you can also drag a YAML file onto the terminal to apply it"));
 }
 
 /** True when kubectl would read the manifest from stdin. */
@@ -723,7 +783,8 @@ function handleStdinData(data) {
 
 function execute(args, stdin) {
   busy = true;
-  setStatus("running…", "running");
+  const label = args.slice(0, 2).join(" ");
+  setStatus(`running ${label}…`, "running");
   addLog(
     "info",
     stdin === "" ? `> ${args.join(" ")}` : `> ${args.join(" ")} (stdin ${stdin.length} bytes)`,
