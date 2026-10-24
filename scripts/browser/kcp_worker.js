@@ -72,29 +72,8 @@ try {
 installFsShim();
 for (const dir of ["/kcp", "/tmp", "/home", "/home/user"]) makeMemoryDir(dir);
 
-const { fetchWasm, mib } = await import("./wasm_fetch.js");
-const [wasmResponse, wasmBytes] = await fetchWasm(init.wasmUrl);
-const go = new globalThis.Go();
-const { instance } = await WebAssembly.instantiateStreaming(wasmResponse, go.importObject);
-log("info", `kcp.wasm ${mib(wasmBytes)} MiB downloaded + compiled`);
-
-// run() only settles when the Go program exits; the shard blocks forever.
-go.run(instance).catch((err) => console.error("kcp-wasm exited:", err));
-
-for (let i = 0; i < 7200; i++) {
-  if (typeof globalThis.kcpHandleRequest === "function") break;
-  if (globalThis.__kcpBootError) break;
-  if (i % 200 === 0 && i > 0) log("info", `waiting for real kcp readiness (${i / 40}s)`);
-  await new Promise((resolve) => setTimeout(resolve, 25));
-}
-if (globalThis.__kcpBootError) {
-  throw new Error("kcp-wasm boot failed: " + globalThis.__kcpBootError);
-}
-if (typeof globalThis.kcpHandleRequest !== "function") {
-  throw new Error("kcp-wasm did not register kcpHandleRequest");
-}
-log("ok", "real kcp bridge registered");
-
+// Everything Go calls into is defined before it first runs: the status feed
+// and the persist hooks fire as soon as a hot boot (or a restore) is up.
 const pending = new Map();
 let nextCallbackID = 1;
 
@@ -124,6 +103,30 @@ globalThis.__kcpResolve = (callbackID, payload) => {
   pending.delete(callbackID);
   self.postMessage({ type: "response", id: entry.id, response: JSON.parse(payload) });
 };
+
+const { fetchWasm, mib } = await import("./wasm_fetch.js");
+const [wasmResponse, wasmBytes] = await fetchWasm(init.wasmUrl);
+const go = new globalThis.Go();
+const { instance } = await WebAssembly.instantiateStreaming(wasmResponse, go.importObject);
+log("info", `kcp.wasm ${mib(wasmBytes)} MiB downloaded + compiled`);
+
+// run() only settles when the Go program exits; the shard blocks forever.
+go.run(instance).catch((err) => console.error("kcp-wasm exited:", err));
+
+for (let i = 0; i < 7200; i++) {
+  if (typeof globalThis.kcpHandleRequest === "function") break;
+  if (globalThis.__kcpBootError) break;
+  if (i % 200 === 0 && i > 0) log("info", `waiting for real kcp readiness (${i / 40}s)`);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+if (globalThis.__kcpBootError) {
+  throw new Error("kcp-wasm boot failed: " + globalThis.__kcpBootError);
+}
+if (typeof globalThis.kcpHandleRequest !== "function") {
+  throw new Error("kcp-wasm did not register kcpHandleRequest");
+}
+log("ok", "real kcp bridge registered");
+
 self.onmessage = (event) => {
   const { type, id, request } = event.data ?? {};
   if (type === "state-subscribe") {
