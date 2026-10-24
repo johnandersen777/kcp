@@ -31,6 +31,8 @@ limitations under the License.
 import {
   buildClientMetadata,
   DEFAULT_SCOPE,
+  etagMatches,
+  fileETag,
   METADATA_PATH,
   normalizeOrigin,
 } from "./serve-public.ts";
@@ -81,6 +83,13 @@ const assets = new Map<string, string>([
   ["/wasm_fetch.js", "wasm_fetch.js"],
 ]);
 
+const wasmModules = new Map<string, string>([
+  ["/kcp.wasm", kcpWasmPath],
+  ["/kubectl.wasm", kubectlWasmPath],
+  ["/goat.wasm", goatWasmPath],
+  ["/yq.wasm", yqWasmPath],
+]);
+
 const headers = {
   "cache-control": "no-cache",
   "vary": "accept-encoding",
@@ -113,8 +122,8 @@ async function fileResponse(
   if (typeof path === "string" && acceptsGzip(request)) {
     const gz = await gzipSibling(path);
     if (gz) {
-      const etag = `"${gz.size}-${gz.mtime?.getTime() ?? 0}-gz"`;
-      if (request.headers.get("if-none-match") === etag) {
+      const etag = fileETag(gz).replace(/"$/, '-gz"');
+      if (etagMatches(request.headers.get("if-none-match"), etag)) {
         return new Response(null, { status: 304, headers: { ...headers, etag } });
       }
       const file = await Deno.open(`${path}.gz`, { read: true });
@@ -131,8 +140,8 @@ async function fileResponse(
   }
   const file = await Deno.open(path, { read: true });
   const stat = await file.stat();
-  const etag = `"${stat.size}-${stat.mtime?.getTime() ?? 0}"`;
-  if (request.headers.get("if-none-match") === etag) {
+  const etag = fileETag(stat);
+  if (etagMatches(request.headers.get("if-none-match"), etag)) {
     file.close();
     return new Response(null, { status: 304, headers: { ...headers, etag } });
   }
@@ -210,17 +219,15 @@ Deno.serve({ hostname, port }, async (request) => {
     });
   }
 
-  if (url.pathname === "/kcp.wasm") {
-    return await fileResponse(request, kcpWasmPath, "application/wasm");
+  const wasmPath = wasmModules.get(url.pathname);
+  if (wasmPath) {
+    return await fileResponse(request, wasmPath, "application/wasm");
   }
-  if (url.pathname === "/kubectl.wasm") {
-    return await fileResponse(request, kubectlWasmPath, "application/wasm");
-  }
-  if (url.pathname === "/goat.wasm") {
-    return await fileResponse(request, goatWasmPath, "application/wasm");
-  }
-  if (url.pathname === "/yq.wasm") {
-    return await fileResponse(request, yqWasmPath, "application/wasm");
+  // The workers try `<module>.wasm.gz` first and inflate it themselves, as on
+  // static hosts; a 404 here sends them to the plain module above.
+  const gzSource = wasmModules.get(url.pathname.replace(/\.gz$/, ""));
+  if (gzSource && url.pathname.endsWith(".gz") && await gzipSibling(gzSource)) {
+    return await fileResponse(request, `${gzSource}.gz`, "application/gzip");
   }
   if (url.pathname === "/wasm_exec.js") {
     return await fileResponse(request, wasmExecPath, "text/javascript; charset=utf-8");

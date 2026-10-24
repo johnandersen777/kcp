@@ -60,6 +60,7 @@ const SPA_PATHS = new Set(["/", "/app.html", "/index.html"]);
 
 const CONTENT_TYPES: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
+  ".gz": "application/gzip",
   ".html": "text/html; charset=utf-8",
   ".ico": "image/x-icon",
   ".js": "text/javascript; charset=utf-8",
@@ -144,6 +145,20 @@ function contentTypeFor(filePath: string): string {
   return "application/octet-stream";
 }
 
+/** Strong validator from size and mtime; cheap for the 100+ MB modules. */
+export function fileETag(stat: Deno.FileInfo): string {
+  return `"${stat.size.toString(16)}-${(stat.mtime?.getTime() ?? 0).toString(16)}"`;
+}
+
+/** If-None-Match comparison (weak, so W/ prefixes from proxies still match). */
+export function etagMatches(header: string | null, etag: string): boolean {
+  if (!header) return false;
+  return header.split(",").some((tag) => {
+    const value = tag.trim();
+    return value === "*" || value.replace(/^W\//, "") === etag.replace(/^W\//, "");
+  });
+}
+
 /**
  * Map a URL path below root to a filesystem path. Returns null for paths
  * trying to escape the root directory.
@@ -188,11 +203,17 @@ async function serveFile(
     return null;
   }
 
+  // Nothing in the bundle is content-hashed, so every file revalidates.
+  const etag = fileETag(stat);
   const headers = new Headers({
     "cache-control": "no-cache",
-    "content-length": String(stat.size),
     "content-type": contentTypeFor(filePath),
+    etag,
   });
+  if (etagMatches(request.headers.get("if-none-match"), etag)) {
+    return new Response(null, { status: 304, headers });
+  }
+  headers.set("content-length", String(stat.size));
   if (request.method === "HEAD") {
     return new Response(null, { headers });
   }
