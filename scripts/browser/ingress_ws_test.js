@@ -283,7 +283,7 @@ Deno.test("a handler failure produces an InternalError response", async () => {
   }
 });
 
-Deno.test("keepalive requests are answered without a handler", async () => {
+Deno.test("keepalive requests are answered without the handler", async () => {
   FakeWebSocket.instances = [];
   const subscriber = await register({
     proxyHost: "relay.example.com",
@@ -292,6 +292,7 @@ Deno.test("keepalive requests are answered without a handler", async () => {
     signer: (bytes) => bytes,
     fetchImpl: nonceFetch(new Uint8Array([1])),
     WebSocketImpl: (url) => new FakeWebSocket(url),
+    handler: () => ({ status: 404, body: { error: "NotFound" } }),
   });
   try {
     const ws = FakeWebSocket.instances[0];

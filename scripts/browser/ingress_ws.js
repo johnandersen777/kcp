@@ -309,18 +309,20 @@ var SubscriberConnection = class {
       rawBody: typeof frame2.rawBody === "string" ? frame2.rawBody : void 0,
       headers: stringMap(frame2.headers)
     };
-    const handler = this.options.handler;
-    if (!handler) {
-      if (request.path === KEEPALIVE_PATH) {
-        this.send("response", {
-          requestId: request.requestId,
-          status: 204,
-          body: "",
-          contentType: "text/plain"
-        });
-      }
+    // The relay's keepalive probe is answered here, before the handler: a
+    // handler that has no route for it answers 404, and the Go relay drops a
+    // subscriber whose keepalive fails.
+    if (request.path === KEEPALIVE_PATH) {
+      this.send("response", {
+        requestId: request.requestId,
+        status: 204,
+        body: "",
+        contentType: "text/plain"
+      });
       return;
     }
+    const handler = this.options.handler;
+    if (!handler) return;
     try {
       const response = await handler(request) ?? {};
       const fields = {
