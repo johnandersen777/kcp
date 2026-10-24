@@ -2675,8 +2675,9 @@ function startIngress(entry) {
       addLog("ok", `ingress ${entry.name} registered at ${entry.url}`);
       renderIngress();
     },
-    onClose: () => {
+    onClose: ({ code, reason }) => {
       ingressRegistered.delete(host);
+      addLog("warn", `ingress ${entry.name} closed: code ${code}${reason ? ` (${reason})` : ""}`);
       renderIngress();
     },
     onError: (err) => addLog("warn", `ingress ${entry.name}: ${err instanceof Error ? err.message : err}`),
