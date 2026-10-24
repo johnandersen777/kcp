@@ -56,6 +56,9 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:7795", "signaling HTTP address")
 	stun := flag.String("stun", "stun:stun.cloudflare.com:3478", "STUN server (empty: host candidates only)")
 	flag.Parse()
+	if host, _, err := net.SplitHostPort(*listen); err != nil || !net.ParseIP(host).IsLoopback() {
+		log.Fatalf("-listen must be a loopback address, got %q", *listen)
+	}
 
 	p := &peer{stun: *stun}
 	var err error
@@ -317,11 +320,18 @@ func session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 				log.Printf("window-change %dx%d", binary.BigEndian.Uint32(req.Payload), binary.BigEndian.Uint32(req.Payload[4:]))
 			}
 		case "shell":
-			// No rc files and a clean environment: a login shell's rc can
-			// auto-attach tmux, which would hand the browser a live session.
-			cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-i")
-			cmd.Dir = os.TempDir()
-			cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + os.TempDir(), "TERM=xterm-256color", "PS1=testpeer$ "}
+			// A fixed command, never a user shell: a login shell's rc can
+			// auto-attach tmux and hand the browser a live session. It
+			// prints what the acceptance checks look for, then echoes.
+			dir, err := os.MkdirTemp("", "testpeer-")
+			if err != nil {
+				_ = req.Reply(false, nil)
+				return
+			}
+			defer os.RemoveAll(dir)
+			cmd := exec.Command("/bin/sh", "-c", "id; uname -sm; stty size; exec cat")
+			cmd.Dir = dir
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + dir, "TERM=xterm-256color"}
 			f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 			if err != nil {
 				_ = req.Reply(false, nil)

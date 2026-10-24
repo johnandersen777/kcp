@@ -149,19 +149,34 @@ export function inboundEvents(state, contract, nsid, tag = SSH_TAG, kind) {
     .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || a.name.localeCompare(b.name));
 }
 
-function gatheringComplete(pc, timeoutMs = 15_000) {
+// Non-trickle: one offer with every candidate. Chrome can sit in "gathering"
+// for tens of seconds after its srflx candidate arrives (an interface whose
+// STUN never answers), so a quiet period after a srflx candidate also ends
+// gathering. ponytail: fixed 500 ms settle; make it adaptive if candidates
+// are seen arriving later on real networks.
+function gatheringComplete(pc, timeoutMs = 15_000, settleMs = 500) {
   if (pc.iceGatheringState === "complete") return Promise.resolve();
   return new Promise((resolve) => {
+    let settle;
     const timer = setTimeout(done, timeoutMs);
     function done() {
       clearTimeout(timer);
+      clearTimeout(settle);
       pc.removeEventListener("icegatheringstatechange", check);
+      pc.removeEventListener("icecandidate", candidate);
       resolve();
     }
     function check() {
       if (pc.iceGatheringState === "complete") done();
     }
+    function candidate() {
+      if (!/ typ srflx /.test(pc.localDescription?.sdp ?? "")) return;
+      clearTimeout(settle);
+      settle = setTimeout(done, settleMs);
+    }
     pc.addEventListener("icegatheringstatechange", check);
+    pc.addEventListener("icecandidate", candidate);
+    candidate();
   });
 }
 
