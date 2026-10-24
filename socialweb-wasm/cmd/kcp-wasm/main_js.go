@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall/js"
 	"time"
@@ -45,10 +47,10 @@ func main() {
 
 	rootDir := "/kcp"
 	cfg := real.Config{
-		RootDir:       rootDir,
-		Address:       "127.0.0.1:6443",
-		ShardBaseURL:  "https://kcp.local",
-		ReadyTimeout:  3 * time.Minute,
+		RootDir:      rootDir,
+		Address:      "127.0.0.1:6443",
+		ShardBaseURL: "https://kcp.local",
+		ReadyTimeout: 3 * time.Minute,
 	}
 	if initial := js.Global().Get("__kcpInitialState"); initial.Type() == js.TypeString {
 		if raw := initial.String(); raw != "" {
@@ -88,6 +90,13 @@ func main() {
 	js.Global().Set("__kcpWasmReady", true)
 	fmt.Fprintln(os.Stderr, "kcp-wasm: real kcp ready at", srv.BaseURL)
 
+	// KCP_GOGC_READY (low-memory mode, kcp_worker.js) collects harder once
+	// kcp is up: socialweb's compose grows the heap past what an iOS tab
+	// allows, while boot keeps the faster GOGC from the environment.
+	if gc, err := strconv.Atoi(os.Getenv("KCP_GOGC_READY")); err == nil {
+		debug.SetGCPercent(gc)
+	}
+
 	// The socialweb control plane starts after kcp is ready. It is optional:
 	// the kcp API is usable while the app composes.
 	go startSocialweb(srv, handle)
@@ -114,7 +123,7 @@ func startSocialweb(srv *real.Server, kcpHandler js.Func) {
 		var in struct {
 			// IngressProxyHost overrides the relay; "" serves every Exposure
 			// on the page origin.
-			IngressProxyHost *string `json:"ingressProxyHost"`
+			IngressProxyHost *string  `json:"ingressProxyHost"`
 			Origin           string   `json:"origin"`
 			Handle           string   `json:"handle"`
 			DID              string   `json:"did"`
