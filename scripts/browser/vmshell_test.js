@@ -65,6 +65,14 @@ Deno.test("contractManifest without a shell is a bare VM with optional ssh key a
   if (m.spec.ttlSecondsAfterFinished !== 3600) throw new Error("ttl missing");
 });
 
+Deno.test("contractManifest with a webrtc shell carries the ssh tunnel and no secretsRef", () => {
+  const m = contractManifest({
+    name: "vmshell-rtc001", bidders: ["did:plc:x"], ownerDid: "", shell: "webrtc", sshKeys: ["ssh-ed25519 AAAA page"],
+  });
+  if (JSON.stringify(m.spec.tunnels) !== '[{"tag":"ssh","port":22,"transport":"webrtc"}]') throw new Error("tunnels");
+  if (m.spec.secretsRef || m.spec.sshAuthorizedKeys?.[0] !== "ssh-ed25519 AAAA page") throw new Error("keys/secrets");
+});
+
 Deno.test("isActive and isReleasing follow phase and release", () => {
   const cases = [
     [{ phase: "Held" }, true, false],

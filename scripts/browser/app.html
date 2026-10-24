@@ -226,6 +226,8 @@
   .compute-list .phase-Released { color: var(--muted); }
   .compute-list .detail { color: var(--muted); }
   .compute-list button { margin: 3px 0 0 6px; }
+  #compute-term { height: 320px; margin-top: 6px; background: #0b0e14; }
+  #compute-term[hidden], #compute-term-status[hidden] { display: none; }
   #diagram-pane h2 {
     font-size: 12px;
     text-transform: uppercase;
@@ -366,10 +368,19 @@
         </label>
         <label><span>SSH key</span><input id="compute-ssh" placeholder="ssh-ed25519 AAAA… (optional)" /></label>
         <label><span>TTL</span><input id="compute-ttl" placeholder="1h (optional)" /></label>
-        <label><span>Web shell</span><input id="compute-shell" type="checkbox" checked /></label>
+        <label><span>Shell</span>
+          <select id="compute-shell">
+            <option value="none">none</option>
+            <option value="wootty" selected>wootty (opentunnel link)</option>
+            <option value="webrtc">ssh over WebRTC</option>
+          </select>
+        </label>
         <button id="compute-request" type="button" disabled>Request VM</button>
+        <button id="compute-testpeer" type="button" hidden>Connect test peer</button>
         <div id="compute-status" class="app-status">sign in to request a VM</div>
         <ul id="compute-list" class="compute-list"></ul>
+        <div id="compute-term-status" class="app-status" hidden></div>
+        <div id="compute-term" hidden></div>
         <div id="compute-ingress" class="app-status"></div>
       </div>
     </div>

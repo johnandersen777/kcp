@@ -7,6 +7,7 @@ import {
   authorizedKey,
   contractEventManifest,
   fingerprintMatches,
+  firstOpened,
   guestFromState,
   newAgeIdentity,
   NSID_PUBLIC_KEY,
@@ -59,4 +60,13 @@ Deno.test("seal and open round trip (typage from esm.sh)", async () => {
   const armored = await seal("v=0 offer", me.recipient);
   assert(armored.startsWith("-----BEGIN AGE ENCRYPTED FILE-----") && !armored.includes("v=0"), "armored");
   assert(await me.open(armored) === "v=0 offer", "opened");
+});
+
+Deno.test("firstOpened skips answers sealed to another identity", async () => {
+  const me = await newAgeIdentity();
+  const other = await newAgeIdentity();
+  const theirs = await seal('{"sdp":"theirs"}', other.recipient);
+  const mine = await seal('{"sdp":"mine"}', me.recipient);
+  assert(await firstOpened([theirs, mine], me.open) === '{"sdp":"mine"}', "mine");
+  assert(await firstOpened([theirs], me.open) === undefined, "none");
 });

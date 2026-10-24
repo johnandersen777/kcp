@@ -5,10 +5,10 @@
 //
 //   guest publicKey + onNetwork {kind webrtc, address "sha-256 AB:.."} + hostKeys
 //   page: typage X25519 identity (memory only) -> outbound publicKey
-//   page: RTCPeerConnection (Cloudflare STUN only, non-trickle) -> offer sealed
-//         to the guest key -> outbound signalWebRTC offer
-//   guest: answer sealed to our key -> inbound signalWebRTC answer
-//   page: open, check a=fingerprint against the onNetwork address,
+//   page: RTCPeerConnection (Cloudflare STUN only, non-trickle) -> {sdp,
+//         replyTo: our recipient} sealed to the guest key -> outbound offer
+//   guest: {sdp} sealed to replyTo -> inbound signalWebRTC answer
+//   page: trial-open answers, check a=fingerprint against the onNetwork address,
 //         setRemoteDescription; the datachannel carries raw TCP to sshd :22
 //   ssh_worker.js: x/crypto/ssh (ssh.wasm) over the datachannel, xterm.js
 //
@@ -110,17 +110,6 @@ export const saveSSHKey = (name, key) => keyStore("readwrite", (s) => s.put(key,
 export const loadSSHKey = (name) => keyStore("readonly", (s) => s.get(name));
 export const deleteSSHKey = (name) => keyStore("readwrite", (s) => s.delete(name));
 
-export function contractManifest({ name, bidders, ownerDid, sshAuthorizedKey }) {
-  const spec = {
-    vmName: name,
-    bidderDids: bidders,
-    sshAuthorizedKeys: [sshAuthorizedKey],
-    tunnels: [{ tag: SSH_TAG, port: SSH_PORT, transport: "webrtc" }],
-  };
-  if (ownerDid) spec.ownerDid = ownerDid;
-  return { apiVersion: "socialweb.computer/v1alpha1", kind: "ComputeContract", metadata: { name }, spec };
-}
-
 export function contractEventManifest({ name, contract, nsid, kind, tag = SSH_TAG, key, ciphertext }) {
   const spec = { contractRef: { name: contract }, direction: "outbound", nsid, kind, tag };
   if (key) spec.key = key;
@@ -139,6 +128,21 @@ export function guestFromState(state, contract, tag = SSH_TAG) {
   const key = inboundEvents(state, contract, NSID_PUBLIC_KEY, tag).at(-1)?.key;
   if (!network?.address || !key || !(c?.hostKeys?.length > 0)) return null;
   return { key, fingerprint: network.address, hostKeys: c.hostKeys };
+}
+
+/**
+ * The first of the candidate ciphertexts that opens with our identity, or
+ * undefined. Answers carry no recipient (the guest seals each to the offer's
+ * replyTo), so every answer for the tag is trial-opened; typage throws for
+ * one sealed to someone else.
+ */
+export async function firstOpened(ciphertexts, open) {
+  for (const c of ciphertexts) {
+    try {
+      return await open(c);
+    } catch { /* sealed to another identity */ }
+  }
+  return undefined;
 }
 
 /** Inbound ContractEvents for a contract, oldest first. */
@@ -182,7 +186,7 @@ function gatheringComplete(pc, timeoutMs = 15_000, settleMs = 500) {
 
 /**
  * Runs one SSH session over WebRTC. signaling: {guest(), publishKey(recipient),
- * exchange(offerCiphertext) -> answerCiphertext}. Returns {close()}.
+ * exchange(offerCiphertext, open) -> the opened answer}. Returns {close()}.
  */
 export async function connectShell({ signaling, sshKey, user = SSH_USER, term, status, onClose, tag = SSH_TAG }) {
   status("waiting for the guest's publicKey and fingerprint");
@@ -197,8 +201,11 @@ export async function connectShell({ signaling, sshKey, user = SSH_USER, term, s
   status("gathering ICE candidates");
   await gatheringComplete(pc);
   status("offer sealed; waiting for the answer");
-  const answerSealed = await signaling.exchange(await seal(pc.localDescription.sdp, guest.key));
-  const answer = await me.open(answerSealed);
+  // Sealed bodies are JSON {sdp, replyTo}; replyTo (offers only) is the
+  // recipient the guest seals its answer to.
+  const offer = JSON.stringify({ sdp: pc.localDescription.sdp, replyTo: me.recipient });
+  const opened = await signaling.exchange(await seal(offer, guest.key), (c) => me.open(c));
+  const answer = String(JSON.parse(opened)?.sdp ?? "");
   if (!fingerprintMatches(answer, guest.fingerprint)) {
     pc.close();
     throw new Error("answer a=fingerprint does not match the guest's onNetwork address");
@@ -265,7 +272,7 @@ export function httpSignaling(base, sshAuthorizedKey) {
   return {
     guest: () => call("/guest"),
     publishKey: (key) => call("/publicKey", { key, sshAuthorizedKey }),
-    exchange: async (ciphertext) => (await call("/offer", { ciphertext })).ciphertext,
+    exchange: async (ciphertext, open) => await open((await call("/offer", { ciphertext })).ciphertext),
   };
 }
 
@@ -278,20 +285,24 @@ export function contractEventSignaling({ contract, create, watch, tag = SSH_TAG 
   const suffix = () => Math.random().toString(36).slice(2, 8);
   return {
     guest: () => watch((state) => guestFromState(state, contract, tag)),
+    // The generic handshake; the answer path does not depend on it.
     publishKey: (key) => create(contractEventManifest({
       name: `${contract}-pk-${suffix()}`, contract, nsid: NSID_PUBLIC_KEY, kind: "age-x25519", tag, key,
     })),
-    async exchange(ciphertext) {
-      let seen;
-      await watch((state) => {
-        seen = new Set(inboundEvents(state, contract, NSID_SIGNAL, tag, "answer").map((e) => e.name));
-        return true;
-      });
+    async exchange(ciphertext, open) {
       await create(contractEventManifest({
         name: `${contract}-offer-${suffix()}`, contract, nsid: NSID_SIGNAL, kind: "offer", tag, ciphertext,
       }));
-      return await watch((state) =>
-        inboundEvents(state, contract, NSID_SIGNAL, tag, "answer").find((e) => !seen.has(e.name))?.ciphertext);
+      const tried = new Set();
+      for (;;) {
+        const fresh = await watch((state) => {
+          const list = inboundEvents(state, contract, NSID_SIGNAL, tag, "answer").filter((e) => !tried.has(e.name));
+          return list.length > 0 && list;
+        });
+        for (const e of fresh) tried.add(e.name);
+        const opened = await firstOpened(fresh.map((e) => e.ciphertext).filter(Boolean), open);
+        if (opened !== undefined) return opened;
+      }
     },
   };
 }

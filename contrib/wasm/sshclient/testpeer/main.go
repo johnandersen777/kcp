@@ -11,6 +11,8 @@
 //	POST /publicKey  {key, sshAuthorizedKey}            (requester publicKey, spec.sshAuthorizedKeys)
 //	POST /offer      {ciphertext} -> {ciphertext}       (signalWebRTC offer -> answer)
 //
+// Sealed bodies are JSON: offers {sdp, replyTo}, answers {sdp} sealed to replyTo.
+//
 // It logs only public material: never the identity or a plaintext SDP.
 package main
 
@@ -48,7 +50,6 @@ type peer struct {
 	stun     string
 
 	mu         sync.Mutex
-	requester  age.Recipient
 	authorized ssh.PublicKey
 }
 
@@ -95,8 +96,8 @@ func main() {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		rcpt, err := age.ParseX25519Recipient(in.Key)
-		if err != nil {
+		// The key is the generic handshake; answers go to the offer's replyTo.
+		if _, err := age.ParseX25519Recipient(in.Key); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
@@ -106,7 +107,7 @@ func main() {
 			return
 		}
 		p.mu.Lock()
-		p.requester, p.authorized = rcpt, authorized
+		p.authorized = authorized
 		p.mu.Unlock()
 		log.Printf("requester publicKey %s, ssh key %s", in.Key, ssh.FingerprintSHA256(authorized))
 		writeJSON(w, map[string]any{})
@@ -159,20 +160,23 @@ func (p *peer) fingerprint() string {
 	return fps[0].Algorithm + " " + strings.ToUpper(fps[0].Value)
 }
 
+// answer opens a sealed {sdp, replyTo} offer and seals {sdp} back to replyTo,
+// the plan 0034 signalWebRTC body.
 func (p *peer) answer(ciphertext string) (string, error) {
-	p.mu.Lock()
-	requester := p.requester
-	p.mu.Unlock()
-	if requester == nil {
-		return "", fmt.Errorf("no requester publicKey yet")
-	}
 	r, err := age.Decrypt(armor.NewReader(strings.NewReader(ciphertext)), p.identity)
 	if err != nil {
 		return "", fmt.Errorf("open offer: %w", err)
 	}
-	offer, err := io.ReadAll(r)
+	var offer struct {
+		SDP     string `json:"sdp"`
+		ReplyTo string `json:"replyTo"`
+	}
+	if err := json.NewDecoder(r).Decode(&offer); err != nil {
+		return "", fmt.Errorf("offer body: %w", err)
+	}
+	requester, err := age.ParseX25519Recipient(offer.ReplyTo)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("offer replyTo: %w", err)
 	}
 	cfg := webrtc.Configuration{Certificates: []webrtc.Certificate{p.cert}}
 	if p.stun != "" {
@@ -189,7 +193,7 @@ func (p *peer) answer(ciphertext string) (string, error) {
 		}
 	})
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) { p.bridge(dc) })
-	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: string(offer)}); err != nil {
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer.SDP}); err != nil {
 		return "", err
 	}
 	answer, err := pc.CreateAnswer(nil)
@@ -207,7 +211,7 @@ func (p *peer) answer(ciphertext string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.WriteString(w, pc.LocalDescription().SDP); err != nil {
+	if err := json.NewEncoder(w).Encode(map[string]string{"sdp": pc.LocalDescription().SDP}); err != nil {
 		return "", err
 	}
 	if err := w.Close(); err != nil {

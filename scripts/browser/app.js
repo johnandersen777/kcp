@@ -32,6 +32,7 @@ import { OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
 import { assembleSnapshot, openBestBackend, snapshotRecords } from "./state_store.js";
 import { decodeBase64, encodeBase64, register as registerIngress } from "./ingress_ws.js";
 import * as vmshell from "./vmshell.js";
+import * as webrtcGuest from "./webrtc_guest.js";
 import { discardSnapshot } from "./kcp_hibernate.js";
 
 const config = await (await fetch("/config")).json();
@@ -1925,13 +1926,17 @@ function initSocialwebUI() {
 
 // --- compute -----------------------------------------------------------------
 // One panel for ComputeContracts. "Request VM" applies a contract for the
-// chosen bidders; with "Web shell" it also writes the wootty token bundle into
-// the browser vault first (the requester reads secretsRef once and fails a
-// contract whose bundle is missing) and adds a plan 0032 shell tunnel. Every
-// contract from the status feed is listed with its phase, its shell link (the
-// "wootty" tagged address plus #token=, the token kept in localStorage by
-// contract name) and its own Release button. One VM at a time: Request stays
-// disabled while a contract is active, so repeated clicks cannot rent more.
+// chosen bidders. Shell "wootty" also writes the wootty token bundle into the
+// browser vault first (the requester reads secretsRef once and fails a
+// contract whose bundle is missing) and adds a plan 0032 shell tunnel; shell
+// "ssh over WebRTC" (plan 0034) adds the webrtc ssh tunnel and the public half
+// of a non-extractable WebCrypto Ed25519 key (kept in IndexedDB per contract).
+// Every contract from the status feed is listed with its phase, its shell
+// action ("Open shell" link with #token= for wootty, "Connect" into the xterm
+// pane for WebRTC) and its own Release button. One VM at a time: Request
+// stays disabled while a contract is active, so repeated clicks cannot rent
+// more. ?sshTestPeer=http://127.0.0.1:7795 adds a button that connects the
+// pane to contrib/wasm/sshclient/testpeer instead of a guest.
 
 const computeBiddersEl = document.getElementById("compute-bidders");
 const computeSSHEl = document.getElementById("compute-ssh");
@@ -1941,11 +1946,22 @@ const computeRequestEl = document.getElementById("compute-request");
 const computeStatusEl = document.getElementById("compute-status");
 const computeListEl = document.getElementById("compute-list");
 const vmshellIngressEl = document.getElementById("compute-ingress");
+const computeTestPeerEl = document.getElementById("compute-testpeer");
+const computeTermEl = document.getElementById("compute-term");
+const computeTermStatusEl = document.getElementById("compute-term-status");
 const computePrefs = {
   bidders: "socialweb.vmshell.bidders",
   shell: "socialweb.compute.shell",
   token: (name) => `socialweb.vmshell.token.${name}`,
+  transport: (name) => `socialweb.compute.transport.${name}`,
 };
+const sshTestPeer = new URLSearchParams(location.search).get("sshTestPeer");
+const feedWatchers = new Set();
+let lastFeedState = null;
+// The contract name (or "testpeer") whose WebRTC session owns the pane.
+let shellSessionName = "";
+let shellSession = null;
+let shellTerm = null;
 let computeBusy = false;
 let computeReleasing = false;
 let computeLastRender = "";
@@ -1973,13 +1989,20 @@ async function requestVM() {
     computeBusy = true;
     computeRequestEl.disabled = true;
     localStorage.setItem(computePrefs.bidders, computeBiddersEl.value.trim());
-    localStorage.setItem(computePrefs.shell, computeShellEl.checked ? "1" : "0");
+    localStorage.setItem(computePrefs.shell, computeShellEl.value);
     const bidders = vmshell.parseBidders(computeBiddersEl.value);
-    const shell = computeShellEl.checked;
+    const shell = computeShellEl.value;
     const ssh = computeSSHEl.value.trim();
+    const sshKeys = ssh ? [ssh] : [];
     const ttlSeconds = parseTTLSeconds(computeTTLEl.value);
     const name = vmshell.contractName();
-    if (shell) {
+    if (shell === "webrtc") {
+      const key = await webrtcGuest.newSSHKey();
+      await webrtcGuest.saveSSHKey(name, key);
+      sshKeys.unshift(key.authorized);
+      localStorage.setItem(computePrefs.transport(name), "webrtc");
+    }
+    if (shell === "wootty") {
       const token = vmshell.randomToken();
       localStorage.setItem(computePrefs.token(name), token);
       await socialwebCall("socialwebVaultPut", {
@@ -1991,14 +2014,14 @@ async function requestVM() {
     }
     const identity = await kubectlJSON(["get", "marketidentity", "requester"]).catch(() => null);
     const manifest = vmshell.contractManifest({
-      name, bidders, ownerDid: identity?.status?.did ?? "", shell, sshKeys: ssh ? [ssh] : [], ttlSeconds,
+      name, bidders, ownerDid: identity?.status?.did ?? "", shell, sshKeys, ttlSeconds,
     });
     const result = await runKubectl(withServer(["apply", "-f", "-"]), JSON.stringify(manifest));
     if (result.code !== 0) {
       throw new Error(String(result.stderr || result.stdout || "apply failed").trim());
     }
     setAppStatus(computeStatusEl, `${name} requested from ${bidders.join(", ")}`, "ok");
-    addLog("ok", `ComputeContract ${name} requested from ${bidders.join(", ")}${shell ? " with a web shell" : ""}`);
+    addLog("ok", `ComputeContract ${name} requested from ${bidders.join(", ")}${shell !== "none" ? ` with a ${shell} shell` : ""}`);
   } catch (err) {
     setAppStatus(computeStatusEl, String(err.message ?? err), "err");
     computeBusy = false;
@@ -2018,6 +2041,8 @@ async function releaseContract(name) {
     return;
   }
   addLog("info", `ComputeContract ${name} released`);
+  if (shellSessionName === name) shellSession?.close();
+  void webrtcGuest.deleteSSHKey(name).catch(() => {});
 }
 
 // The release runs in this tab's requester: closing the tab mid-release
@@ -2058,6 +2083,10 @@ function computeRow(contract) {
     contract.message ?? "",
   ].filter(Boolean).join(" · ");
   li.append(head, detail);
+  if (localStorage.getItem(computePrefs.transport(name)) === "webrtc") {
+    if (vmshell.isActive(contract)) li.append(webrtcShellAction(contract));
+    return li;
+  }
   const token = localStorage.getItem(computePrefs.token(name)) ?? "";
   if (token && vmshell.isActive(contract)) {
     const link = vmshell.shellLink(contract, token);
@@ -2080,7 +2109,103 @@ function computeRow(contract) {
   return li;
 }
 
+// "Connect" once the guest's publicKey, webrtc fingerprint and host keys are
+// in the feed; the session runs in the compute-term pane.
+function webrtcShellAction(contract) {
+  const el = document.createElement("div");
+  const ready = contract.phase === "Held" && webrtcGuest.guestFromState(lastFeedState, contract.name) !== null;
+  if (!ready) {
+    el.className = "detail";
+    if (contract.phase === "Held") el.textContent = "Held; waiting for the guest's WebRTC publicKey and host keys…";
+    return el;
+  }
+  const connect = document.createElement("button");
+  connect.type = "button";
+  connect.textContent = shellSessionName === contract.name ? "Connected" : "Connect";
+  connect.disabled = shellSessionName !== "";
+  connect.addEventListener("click", () => void connectShell(contract.name));
+  el.append(connect);
+  return el;
+}
+
+/** Resolves with fn's first truthy result over the current and later feed snapshots. */
+function watchFeed(fn) {
+  return new Promise((resolve, reject) => {
+    const watcher = (state) => {
+      try {
+        const value = fn(state);
+        if (value) {
+          feedWatchers.delete(watcher);
+          resolve(value);
+        }
+      } catch (err) {
+        feedWatchers.delete(watcher);
+        reject(err);
+      }
+    };
+    feedWatchers.add(watcher);
+    if (lastFeedState) watcher(lastFeedState);
+  });
+}
+
+async function kubectlCreate(manifest) {
+  const result = await runKubectl(withServer(["create", "-f", "-"]), JSON.stringify(manifest));
+  if (result.code !== 0) throw new Error(String(result.stderr || result.stdout || "create failed").trim());
+}
+
+function shellTerminal() {
+  computeTermEl.hidden = false;
+  computeTermStatusEl.hidden = false;
+  if (shellTerm) return shellTerm;
+  shellTerm = new Terminal({ cursorBlink: true, fontSize: 12, fontFamily: term.options.fontFamily, theme: term.options.theme });
+  const fit = new FitAddon();
+  shellTerm.loadAddon(fit);
+  shellTerm.open(computeTermEl);
+  fit.fit();
+  new ResizeObserver(() => {
+    try { fit.fit(); } catch { /* hidden */ }
+  }).observe(computeTermEl);
+  return shellTerm;
+}
+
+// connectShell runs one WebRTC SSH session for a contract, or for the local
+// test peer when name is "testpeer".
+async function connectShell(name) {
+  if (shellSessionName) return;
+  shellSessionName = name;
+  computeLastRender = "";
+  computeTestPeerEl.disabled = true;
+  const status = (text) => setAppStatus(computeTermStatusEl, `${name}: ${text}`, /^ssh: |fail|match/.test(text) ? "err" : "ok");
+  const done = () => {
+    shellSession = null;
+    shellSessionName = "";
+    computeLastRender = "";
+    computeTestPeerEl.disabled = false;
+    if (lastFeedState) applyComputeState(lastFeedState);
+  };
+  try {
+    const t = shellTerminal();
+    let sshKey;
+    let signaling;
+    if (name === "testpeer") {
+      sshKey = await webrtcGuest.newSSHKey();
+      signaling = webrtcGuest.httpSignaling(sshTestPeer, sshKey.authorized);
+    } else {
+      sshKey = await webrtcGuest.loadSSHKey(name);
+      if (!sshKey) throw new Error("this browser has no SSH key for the contract");
+      signaling = webrtcGuest.contractEventSignaling({ contract: name, create: kubectlCreate, watch: watchFeed });
+    }
+    shellSession = await webrtcGuest.connectShell({ signaling, sshKey, term: t, status, onClose: done });
+    t.focus();
+  } catch (err) {
+    status(`ssh: ${err.message ?? err}`);
+    done();
+  }
+}
+
 function applyComputeState(state) {
+  lastFeedState = state;
+  for (const watcher of [...feedWatchers]) watcher(state);
   const contracts = state.contracts ?? [];
   const active = contracts.filter(vmshell.isActive);
   if (computeBusy && active.length > 0) computeBusy = false;
@@ -2094,7 +2219,8 @@ function applyComputeState(state) {
         : "ready to request a VM",
       !ready ? "warn" : "ok");
   }
-  const render = JSON.stringify(contracts) + [...computeReleaseAsked].join();
+  const render = JSON.stringify(contracts) + [...computeReleaseAsked].join() + shellSessionName +
+    JSON.stringify((state.contractEvents ?? []).map((e) => [e.name, e.phase]));
   if (render === computeLastRender) return;
   computeLastRender = render;
   computeListEl.replaceChildren(...contracts.map(computeRow));
@@ -2102,11 +2228,19 @@ function applyComputeState(state) {
 
 function initComputeUI() {
   computeBiddersEl.value = localStorage.getItem(computePrefs.bidders) ?? vmshell.DEFAULT_BIDDERS.join(", ");
-  computeShellEl.checked = localStorage.getItem(computePrefs.shell) !== "0";
+  // "0"/"1" are the old checkbox values.
+  const shell = localStorage.getItem(computePrefs.shell) ?? "wootty";
+  computeShellEl.value = shell === "0" ? "none" : shell === "1" ? "wootty" : shell;
   computeRequestEl.addEventListener("click", () => {
     computeStatusEl.classList.remove("err");
     void requestVM();
   });
+}
+
+// The test peer needs no kcp, so it is wired before the page boots.
+if (sshTestPeer) {
+  computeTestPeerEl.hidden = false;
+  computeTestPeerEl.addEventListener("click", () => void connectShell("testpeer"));
 }
 
 // --- ingress relay -------------------------------------------------------------

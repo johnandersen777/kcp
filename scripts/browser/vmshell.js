@@ -57,15 +57,18 @@ export function parseBidders(text) {
 }
 
 /**
- * A ComputeContract for the page. With shell (the default) it carries the
- * wootty tunnel and the secretsRef of its token bundle; without, it is a bare
- * VM reached through sshKeys.
+ * A ComputeContract for the page. shell "wootty" (or true, the default)
+ * carries the wootty tunnel and the secretsRef of its token bundle; "webrtc"
+ * carries the plan 0034 ssh tunnel (sshKeys must hold the page's key); false
+ * or "none" is a bare VM reached through sshKeys.
  */
 export function contractManifest({ name, bidders, ownerDid, shell = true, sshKeys = [], ttlSeconds = null }) {
   const spec = { vmName: name, bidderDids: bidders };
-  if (shell) {
+  if (shell === true || shell === "wootty") {
     spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
     spec.tunnels = [{ tag: SHELL_TAG, port: SHELL_PORT, shell: { envFile: WOOTTY_ENV } }];
+  } else if (shell === "webrtc") {
+    spec.tunnels = [{ tag: "ssh", port: 22, transport: "webrtc" }];
   }
   if (sshKeys.length > 0) spec.sshAuthorizedKeys = sshKeys;
   if (ttlSeconds !== null) spec.ttlSecondsAfterFinished = ttlSeconds;
