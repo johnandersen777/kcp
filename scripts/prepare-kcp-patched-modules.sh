@@ -189,9 +189,10 @@ if [[ "${mode}" == "js" ]]; then
   # The CRD handler builds a fresh scale scheme (autoscaling, extensions and
   # apps conversions) for every served CRD version: ~10 MiB of heap in the
   # browser shard. The scheme is read-only once built; share one.
+  rm -rf "${work}/apiextensions-apiserver"
   copy_module k8s.io/apiextensions-apiserver "${work}/apiextensions-apiserver"
   replace_in "${work}/apiextensions-apiserver/pkg/apiserver/customresource_handler.go" \
-    'scaleConverter := scale.NewScaleConverter()' 'scaleConverter := sharedScaleConverter()'
+    'scaleConverter := scale.NewScaleConverter()' 'scaleConverter := sharedScaleConverter(scale.NewScaleConverter)'
   cat > "${work}/apiextensions-apiserver/pkg/apiserver/scale_shared.go" <<'GO'
 package apiserver
 
@@ -201,7 +202,15 @@ import (
 	"k8s.io/client-go/scale"
 )
 
-var sharedScaleConverter = sync.OnceValue(scale.NewScaleConverter)
+var (
+	scaleConverterOnce sync.Once
+	scaleConverter     *scale.ScaleConverter
+)
+
+func sharedScaleConverter(newConverter func() *scale.ScaleConverter) *scale.ScaleConverter {
+	scaleConverterOnce.Do(func() { scaleConverter = newConverter() })
+	return scaleConverter
+}
 GO
 fi
 
