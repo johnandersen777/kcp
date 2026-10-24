@@ -2086,28 +2086,38 @@ function initSocialwebUI() {
 
 // --- compute -----------------------------------------------------------------
 // One panel for ComputeContracts. "Request VM" applies a contract for the
-// chosen bidders. Shell "ssh over WebRTC" (plan 0034) adds the webrtc ssh
-// tunnel and the public half of a non-extractable WebCrypto Ed25519 key (kept
-// in IndexedDB per contract). Every contract from the status feed is listed
-// with its phase, its "Connect" action and its own Release button. One VM at a time: Request
-// stays disabled while a contract is active, so repeated clicks cannot rent
-// more. ?sshTestPeer=http://127.0.0.1:7795 adds a button that connects the
-// pane to contrib/wasm/sshclient/testpeer instead of a guest.
+// chosen bidders with both shells: ssh over WebRTC (plan 0034; the public
+// half of a non-extractable WebCrypto Ed25519 key kept in IndexedDB per
+// contract) and, when the served schema has spec.tunnels[].shell, the wootty
+// web terminal behind opentunnel (plan 0032; a browser-made token written to
+// the vault bundle the guest fetches through secretsRef, kept in localStorage
+// by contract name). Every contract from the status feed is listed with its
+// phase, a Shell button and its own Release button; a toast says when a
+// shell is ready. Shell tries ssh over WebRTC in the main terminal first and
+// opens the wootty link when WebRTC cannot connect. One VM at a time:
+// Request stays disabled while a contract is active, so repeated clicks
+// cannot rent more. ?sshTestPeer=http://127.0.0.1:7795 adds a button that
+// connects to contrib/wasm/sshclient/testpeer instead of a guest. Nothing
+// here loads kubectl: kcpREST talks to kcp directly.
 
 const computeBiddersEl = document.getElementById("compute-bidders");
 const computeSSHEl = document.getElementById("compute-ssh");
 const computeTTLEl = document.getElementById("compute-ttl");
-const computeShellEl = document.getElementById("compute-shell");
 const computeRequestEl = document.getElementById("compute-request");
 const computeStatusEl = document.getElementById("compute-status");
 const computeListEl = document.getElementById("compute-list");
 const vmshellIngressEl = document.getElementById("compute-ingress");
 const computeTestPeerEl = document.getElementById("compute-testpeer");
+const toastEl = document.getElementById("toast");
 const computePrefs = {
   bidders: "socialweb.vmshell.bidders",
-  shell: "socialweb.compute.shell",
+  token: (name) => `socialweb.vmshell.token.${name}`,
   transport: (name) => `socialweb.compute.transport.${name}`,
 };
+// Contracts whose "ready" toast was shown in this tab.
+const computeToasted = new Set();
+// Contracts whose next ssh dial falls back to wootty when WebRTC cannot connect.
+const shellFallback = new Set();
 const sshTestPeer = new URLSearchParams(location.search).get("sshTestPeer");
 const feedWatchers = new Set();
 let lastFeedState = null;
@@ -2138,27 +2148,37 @@ async function requestVM() {
     computeBusy = true;
     computeRequestEl.disabled = true;
     localStorage.setItem(computePrefs.bidders, computeBiddersEl.value.trim());
-    localStorage.setItem(computePrefs.shell, computeShellEl.value);
     const bidders = vmshell.parseBidders(computeBiddersEl.value);
-    const shell = computeShellEl.value;
     const ssh = computeSSHEl.value.trim();
     const sshKeys = ssh ? [ssh] : [];
     const ttlSeconds = parseTTLSeconds(computeTTLEl.value);
     const name = vmshell.contractName();
-    addLog("info", `requesting ComputeContract ${name} from ${bidders.join(", ")}${shell ? ` with a ${shell} shell` : ""}`);
-    if (shell === "webrtc") {
-      const key = await webrtcGuest.newSSHKey();
-      await webrtcGuest.saveSSHKey(name, key);
-      sshKeys.unshift(key.authorized);
-      localStorage.setItem(computePrefs.transport(name), "webrtc");
+    const wootty = await woottyServed();
+    const shells = wootty ? "ssh over WebRTC and wootty" : "ssh over WebRTC (no wootty in this socialweb)";
+    addLog("info", `requesting ComputeContract ${name} from ${bidders.join(", ")} with ${shells}`);
+    const key = await webrtcGuest.newSSHKey();
+    await webrtcGuest.saveSSHKey(name, key);
+    sshKeys.unshift(key.authorized);
+    localStorage.setItem(computePrefs.transport(name), "webrtc");
+    if (wootty) {
+      const token = vmshell.randomToken();
+      localStorage.setItem(computePrefs.token(name), token);
+      // The requester reads the bundle once and fails a contract whose
+      // secretsRef is missing, so it must exist before the contract does.
+      await socialwebCall("socialwebVaultPut", {
+        workspace: "root",
+        mount: vmshell.SECRETS_MOUNT,
+        path: vmshell.secretsPath(name),
+        bundle: vmshell.secretsBundle(token),
+      });
     }
     const identity = await kcpREST("GET", `${SOCIALWEB_API}/marketidentities/requester`).catch(() => null);
     const manifest = vmshell.contractManifest({
-      name, bidders, ownerDid: identity?.status?.did ?? "", shell, sshKeys, ttlSeconds,
+      name, bidders, ownerDid: identity?.status?.did ?? "", wootty, sshKeys, ttlSeconds,
     });
     await kcpREST("POST", `${SOCIALWEB_API}/computecontracts`, manifest);
     setAppStatus(computeStatusEl, `${name} requested from ${bidders.join(", ")}`, "ok");
-    addLog("ok", `ComputeContract ${name} requested from ${bidders.join(", ")}${shell !== "none" ? ` with a ${shell} shell` : ""}`);
+    addLog("ok", `ComputeContract ${name} requested from ${bidders.join(", ")} with ${shells}`);
   } catch (err) {
     addLog("error", `Request VM failed: ${err instanceof Error ? err.message : err}`);
     setAppStatus(computeStatusEl, String(err.message ?? err), "err");
@@ -2220,28 +2240,138 @@ function computeRow(contract) {
     contract.message ?? "",
   ].filter(Boolean).join(" · ");
   li.append(head, detail);
-  if (localStorage.getItem(computePrefs.transport(name)) === "webrtc" && vmshell.isActive(contract)) {
-    li.append(webrtcShellAction(contract));
-  }
+  if (vmshell.isActive(contract) && shellsOf(contract).mine) li.append(shellAction(contract));
   return li;
 }
 
-// "Connect" once the guest's publicKey, webrtc fingerprint and host keys are
-// in the feed; it runs `ssh <contract>` in the main terminal.
-function webrtcShellAction(contract) {
+// What this browser can open for a contract: ssh over WebRTC once the guest's
+// publicKey, fingerprint and host keys are in the feed, and the wootty link
+// once its address is. mine: the contract was requested from this browser.
+function shellsOf(contract) {
+  const name = contract.name;
+  const webrtc = localStorage.getItem(computePrefs.transport(name)) === "webrtc";
+  const token = localStorage.getItem(computePrefs.token(name)) ?? "";
+  const held = contract.phase === "Held";
+  return {
+    mine: webrtc || Boolean(token),
+    webrtc: webrtc && held && webrtcGuest.guestFromState(lastFeedState, name) !== null,
+    wootty: Boolean(token),
+    link: held ? vmshell.shellLink(contract, token) : "",
+  };
+}
+
+function shellAction(contract) {
   const el = document.createElement("div");
-  const ready = contract.phase === "Held" && webrtcGuest.guestFromState(lastFeedState, contract.name) !== null;
-  if (!ready) {
+  const s = shellsOf(contract);
+  if (!s.webrtc && !s.link) {
     el.className = "detail";
-    if (contract.phase === "Held") el.textContent = "Held; waiting for the guest's WebRTC publicKey and host keys…";
+    if (contract.phase === "Held") el.textContent = "Held; the shells are starting…";
     return el;
   }
-  const connect = document.createElement("button");
-  connect.type = "button";
-  connect.textContent = "Connect";
-  connect.addEventListener("click", () => runInTerminal(`ssh ${contract.name}`));
-  el.append(connect);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Shell";
+  button.addEventListener("click", () => openShell(contract.name));
+  const note = document.createElement("span");
+  note.className = "detail";
+  note.textContent = [s.webrtc ? " ssh ready" : "", s.link ? " web shell ready" : s.wootty ? " web shell starting" : ""]
+    .filter(Boolean).join(" ·");
+  el.append(button, note);
   return el;
+}
+
+let toastTimer = null;
+function showToast(text, onTap = null, ms = 8000) {
+  clearTimeout(toastTimer);
+  toastEl.textContent = text;
+  toastEl.hidden = false;
+  toastEl.onclick = () => {
+    hideToast();
+    onTap?.();
+  };
+  if (ms) toastTimer = setTimeout(hideToast, ms);
+}
+
+function hideToast() {
+  clearTimeout(toastTimer);
+  toastEl.hidden = true;
+}
+
+const contractNamed = (state, name) => (state?.contracts ?? []).find((c) => c.name === name);
+
+// Shell: ssh over WebRTC in the main terminal when it is ready (falling back
+// to wootty if WebRTC cannot connect), else the wootty web shell.
+function openShell(name) {
+  hideToast();
+  const contract = contractNamed(lastFeedState, name);
+  if (contract && shellsOf(contract).webrtc) {
+    shellFallback.add(name);
+    if (!runInTerminal(`ssh ${name}`)) shellFallback.delete(name);
+    return;
+  }
+  if (!openWootty(name)) setAppStatus(computeStatusEl, `${name}: no shell is ready yet`, "warn");
+}
+
+function openLink(link) {
+  const w = globalThis.open(link, "_blank");
+  if (w) {
+    w.opener = null;
+    return;
+  }
+  // Popup blocked (an open that does not follow a tap): let a tap do it.
+  showToast("Tap to open the web shell", () => globalThis.open(link, "_blank"), 30_000);
+}
+
+// Opens the contract's wootty link, or waits for its address (the
+// opentunnel certificate takes 70-165 s). False when it has no wootty shell.
+function openWootty(name, why = "") {
+  const token = localStorage.getItem(computePrefs.token(name));
+  if (!token) return false;
+  const link = vmshell.shellLink(contractNamed(lastFeedState, name), token);
+  if (link) {
+    openLink(link);
+    return true;
+  }
+  showToast(`${why ? `${why}; ` : ""}the web shell is still starting…`, null, 0);
+  void watchFeed((state) => {
+    const c = contractNamed(state, name);
+    if (!c || !vmshell.isActive(c)) return "gone";
+    return vmshell.shellLink(c, token);
+  }).then((ready) => {
+    if (ready === "gone") hideToast();
+    else showToast("The web shell is ready: tap to open it", () => globalThis.open(ready, "_blank"), 60_000);
+  });
+  return true;
+}
+
+// The toast for a contract of this browser's whose first shell is usable.
+function toastReadyShells(contracts) {
+  for (const c of contracts) {
+    if (computeToasted.has(c.name) || !vmshell.isActive(c)) continue;
+    const s = shellsOf(c);
+    if (!s.mine || (!s.webrtc && !s.link)) continue;
+    computeToasted.add(c.name);
+    showToast(`${c.name} is ready: tap to open a shell`, () => openShell(c.name));
+  }
+}
+
+// The served ComputeContract schema decides whether wootty can be asked for
+// (socialweb rc109 dropped spec.tunnels[].shell; the lead's rc110 restores
+// it next to webrtc). Read once through kcpREST, retried after an error.
+let woottyServedPromise = null;
+function woottyServed() {
+  const provider = "/clusters/root:socialweb-provider";
+  woottyServedPromise ??= (async () => {
+    const exported = await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha2/apiexports/computecontracts`);
+    const schema = (exported?.spec?.resources ?? []).find((r) => r.name === "computecontracts")?.schema;
+    if (!schema) return false;
+    return vmshell.schemaHasShell(await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha1/apiresourceschemas/${schema}`));
+  })().catch((err) => {
+    woottyServedPromise = null;
+    addLog("warn", `could not read the ComputeContract schema; requesting without wootty: ${err.message ?? err}`);
+    return false;
+  });
+  return woottyServedPromise;
 }
 
 /** Resolves with fn's first truthy result over the current and later feed snapshots. */
@@ -2264,9 +2394,9 @@ function watchFeed(fn) {
   });
 }
 
-async function kubectlCreate(manifest) {
-  const result = await runKubectl(withServer(["create", "-f", "-"]), JSON.stringify(manifest));
-  if (result.code !== 0) throw new Error(String(result.stderr || result.stdout || "create failed").trim());
+// Creates a ContractEvent through kcpREST, so a shell never loads kubectl.
+async function createContractEvent(manifest) {
+  await kcpREST("POST", `${SOCIALWEB_API}/contractevents`, manifest);
 }
 
 // Runs a command line in the main terminal as if typed (the panel's Connect).
@@ -2274,10 +2404,11 @@ function runInTerminal(command) {
   term.focus();
   if (!ready || busy || stdinMode) {
     setAppStatus(computeStatusEl, `the terminal is busy; run: ${command}`, "warn");
-    return;
+    return false;
   }
   replaceLine(command);
   submit();
+  return true;
 }
 
 // --- ssh -----------------------------------------------------------------------
@@ -2332,8 +2463,17 @@ async function sshDial(host, port, status, onEof) {
   const target = sshCmd.resolveHost(lastFeedState, host, { testPeer: Boolean(sshTestPeer) });
   const signaling = target.kind === "testpeer"
     ? webrtcGuest.httpSignaling(sshTestPeer, testPeerKey.authorized)
-    : webrtcGuest.contractEventSignaling({ contract: host, create: kubectlCreate, watch: watchFeed });
-  return await webrtcGuest.dialGuest({ signaling, tag: "ssh", status, onEof });
+    : webrtcGuest.contractEventSignaling({ contract: host, create: createContractEvent, watch: watchFeed });
+  // Only a Shell tap falls back; a typed ssh just reports the error.
+  const fallback = shellFallback.delete(host);
+  try {
+    return await webrtcGuest.dialGuest({ signaling, tag: "ssh", status, onEof });
+  } catch (err) {
+    if (fallback && err.connectivity && openWootty(host, "WebRTC could not connect")) {
+      throw new Error(`${err.message}; opening the wootty web shell instead`);
+    }
+    throw err;
+  }
 }
 
 async function runSsh(args, ctx) {
@@ -2441,13 +2581,11 @@ function applyComputeState(state) {
   }
   computeLastRender = render;
   computeListEl.replaceChildren(...contracts.map(computeRow));
+  toastReadyShells(contracts);
 }
 
 function initComputeUI() {
   computeBiddersEl.value = localStorage.getItem(computePrefs.bidders) ?? vmshell.DEFAULT_BIDDERS.join(", ");
-  // "0" is the old checkbox off; anything else that is not none is webrtc.
-  const shell = localStorage.getItem(computePrefs.shell);
-  computeShellEl.value = shell === "0" || shell === "none" ? "none" : "webrtc";
   computeRequestEl.addEventListener("click", () => {
     computeStatusEl.classList.remove("err");
     void requestVM();

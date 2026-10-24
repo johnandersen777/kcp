@@ -2,11 +2,31 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Pure helpers for the page's Compute panel: contract names, phases and the
-// ComputeContract manifest (a bare VM, or one with the plan 0034 webrtc ssh
-// tunnel).
+// ComputeContract manifest. A VM gets both shells: ssh over WebRTC (plan
+// 0034; the page's key in sshAuthorizedKeys) and, when the served schema
+// still has spec.tunnels[].shell, the wootty web terminal behind opentunnel
+// (plan 0032; a browser-made token in a vault bundle the guest fetches
+// through secretsRef). The webrtc shell is up ~2 s after Held; the wootty
+// address takes 70-165 s, waiting on its TLS certificate.
 
+export const WOOTTY_TAG = "wootty";
+export const WOOTTY_PORT = 7681;
+export const WOOTTY_ENV = "/etc/wootty/wootty.env";
+export const SSH_TAG = "ssh";
+export const SECRETS_MOUNT = "requester";
 // hat-9; the local bidder is did:plc:2l2wdry77c7jtucbslstagkj.
 export const DEFAULT_BIDDERS = ["did:plc:4vcig7s43z3nyqrnepmcfzqt"];
+
+export function base64url(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** 24 random bytes, base64url without padding: 32 chars, wootty's minimum. */
+export function randomToken() {
+  return base64url(crypto.getRandomValues(new Uint8Array(24)));
+}
 
 export function contractName(bytes = crypto.getRandomValues(new Uint8Array(6))) {
   const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -25,19 +45,32 @@ export function isReleasing(contract) {
   return Boolean(contract?.release) && !FINISHED.has(contract?.phase ?? "Pending");
 }
 
+export function secretsPath(name) {
+  return `contracts/${name}/secrets`;
+}
+
+/** The secrets bundle field: JSON text of [{path, value}]. */
+export function secretsBundle(token) {
+  return JSON.stringify([{ path: WOOTTY_ENV, value: `WOOTTY_AUTH_TOKEN=${token}\n` }]);
+}
+
 export function parseBidders(text) {
   const dids = String(text ?? "").split(/[\s,]+/).filter((s) => s.startsWith("did:"));
   return dids.length > 0 ? dids : [...DEFAULT_BIDDERS];
 }
 
 /**
- * A ComputeContract for the page. shell "webrtc" (the default) carries the
- * plan 0034 ssh tunnel (sshKeys must hold the page's key); false or "none" is
- * a bare VM reached through sshKeys.
+ * A ComputeContract for the page: the webrtc ssh tunnel (sshKeys must hold
+ * the page's key) and, with wootty, the opentunnel wootty tunnel and the
+ * secretsRef of its token bundle.
  */
-export function contractManifest({ name, bidders, ownerDid, shell = "webrtc", sshKeys = [], ttlSeconds = null }) {
+export function contractManifest({ name, bidders, ownerDid, wootty = false, sshKeys = [], ttlSeconds = null }) {
   const spec = { vmName: name, bidderDids: bidders };
-  if (shell === "webrtc") spec.tunnels = [{ tag: "ssh", port: 22, transport: "webrtc" }];
+  spec.tunnels = [{ tag: SSH_TAG, port: 22, transport: "webrtc" }];
+  if (wootty) {
+    spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
+    spec.tunnels.unshift({ tag: WOOTTY_TAG, port: WOOTTY_PORT, transport: "opentunnel", shell: { envFile: WOOTTY_ENV } });
+  }
   if (sshKeys.length > 0) spec.sshAuthorizedKeys = sshKeys;
   if (ttlSeconds !== null) spec.ttlSecondsAfterFinished = ttlSeconds;
   if (ownerDid) spec.ownerDid = ownerDid;
@@ -47,4 +80,29 @@ export function contractManifest({ name, bidders, ownerDid, shell = "webrtc", ss
     metadata: { name },
     spec,
   };
+}
+
+/** True when an APIResourceSchema's ComputeContract tunnels have the wootty shell field. */
+export function schemaHasShell(schema) {
+  return (schema?.spec?.versions ?? []).some((v) =>
+    v.schema?.properties?.spec?.properties?.tunnels?.items?.properties?.shell !== undefined);
+}
+
+/**
+ * The wootty link for a status-feed contract: the "wootty" tagged https
+ * address from status.contract.networks with the token in the fragment (it
+ * never reaches the tunnel or a server log), or "" while it is not reported.
+ */
+export function shellLink(contract, token) {
+  const network = (contract?.networks ?? []).find((n) => n?.tag === WOOTTY_TAG);
+  if (!network?.address || !token) return "";
+  let url;
+  try {
+    url = new URL(network.address);
+  } catch {
+    return "";
+  }
+  if (url.protocol !== "https:") return "";
+  url.hash = `token=${encodeURIComponent(token)}`;
+  return url.toString();
 }

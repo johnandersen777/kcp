@@ -7,42 +7,70 @@ import {
   isActive,
   isReleasing,
   parseBidders,
+  randomToken,
+  schemaHasShell,
+  secretsBundle,
+  shellLink,
 } from "./vmshell.js";
 
 function assert(cond, message) {
   if (!cond) throw new Error(message);
 }
 
+Deno.test("token is 32 base64url chars", () => {
+  assert(/^[A-Za-z0-9_-]{32}$/.test(randomToken()), "token");
+});
+
 Deno.test("contract name is a DNS label", () => {
   assert(contractName(new Uint8Array([0, 1, 35, 36, 255, 10])) === "vmshell-ab9adk", contractName(new Uint8Array([0, 1, 35, 36, 255, 10])));
   assert(/^vmshell-[a-z0-9]{6}$/.test(contractName()), "random name");
 });
 
-Deno.test("manifest defaults to the webrtc ssh tunnel", () => {
-  const m = contractManifest({ name: "vmshell-abc123", bidders: parseBidders(""), ownerDid: "did:plc:me" });
+Deno.test("manifest without wootty carries only the webrtc ssh tunnel", () => {
+  const m = contractManifest({
+    name: "vmshell-abc123", bidders: parseBidders(""), ownerDid: "did:plc:me",
+    sshKeys: ["ssh-ed25519 AAAA page"], ttlSeconds: 3600,
+  });
   assert(m.spec.bidderDids[0] === "did:plc:4vcig7s43z3nyqrnepmcfzqt", "default bidder");
   assert(JSON.stringify(m.spec.tunnels) === '[{"tag":"ssh","port":22,"transport":"webrtc"}]', "tunnels");
   assert(m.spec.secretsRef === undefined, "no secretsRef");
+  assert(m.spec.sshAuthorizedKeys[0] === "ssh-ed25519 AAAA page" && m.spec.ttlSecondsAfterFinished === 3600, "keys, ttl");
   assert(m.spec.ownerDid === "did:plc:me" && m.spec.userData === undefined, "owner, no userData");
   assert(parseBidders("did:plc:a, did:plc:b junk").join() === "did:plc:a,did:plc:b", "bidders");
 });
 
-Deno.test("contractManifest without a shell is a bare VM with optional ssh key and TTL", () => {
-  const m = contractManifest({
-    name: "vmshell-bare01", bidders: ["did:plc:x"], ownerDid: "", shell: false,
-    sshKeys: ["ssh-ed25519 AAAA test"], ttlSeconds: 3600,
-  });
-  if (m.spec.tunnels || m.spec.secretsRef) throw new Error("bare VM must not carry the shell tunnel or secretsRef");
-  if (m.spec.sshAuthorizedKeys?.[0] !== "ssh-ed25519 AAAA test") throw new Error("ssh key missing");
-  if (m.spec.ttlSecondsAfterFinished !== 3600) throw new Error("ttl missing");
+Deno.test("manifest with wootty carries both tunnels and the secretsRef", () => {
+  const m = contractManifest({ name: "vmshell-both01", bidders: ["did:plc:x"], ownerDid: "", wootty: true });
+  const tags = Object.fromEntries(m.spec.tunnels.map((t) => [t.tag, t]));
+  assert(JSON.stringify(tags.ssh) === '{"tag":"ssh","port":22,"transport":"webrtc"}', "ssh");
+  assert(JSON.stringify(tags.wootty) === '{"tag":"wootty","port":7681,"transport":"opentunnel","shell":{"envFile":"/etc/wootty/wootty.env"}}', "wootty");
+  assert(m.spec.secretsRef.mount === "requester" && m.spec.secretsRef.path === "contracts/vmshell-both01/secrets", "secretsRef");
 });
 
-Deno.test("contractManifest with a webrtc shell carries the ssh tunnel and no secretsRef", () => {
-  const m = contractManifest({
-    name: "vmshell-rtc001", bidders: ["did:plc:x"], ownerDid: "", shell: "webrtc", sshKeys: ["ssh-ed25519 AAAA page"],
-  });
-  if (JSON.stringify(m.spec.tunnels) !== '[{"tag":"ssh","port":22,"transport":"webrtc"}]') throw new Error("tunnels");
-  if (m.spec.secretsRef || m.spec.sshAuthorizedKeys?.[0] !== "ssh-ed25519 AAAA page") throw new Error("keys/secrets");
+Deno.test("schemaHasShell reads tunnels.items.properties.shell", () => {
+  const schema = (props) => ({ spec: { versions: [{ schema: { properties: { spec: { properties: { tunnels: { items: { properties: props } } } } } } }] } });
+  assert(schemaHasShell(schema({ tag: {}, shell: {} })), "rc110");
+  assert(!schemaHasShell(schema({ tag: {}, transport: {} })), "rc109");
+  assert(!schemaHasShell(null), "missing");
+});
+
+Deno.test("bundle delivers the wootty env file", () => {
+  const entries = JSON.parse(secretsBundle("tok"));
+  assert(entries.length === 1 && entries[0].path === "/etc/wootty/wootty.env", "path");
+  assert(entries[0].value === "WOOTTY_AUTH_TOKEN=tok\n", "value");
+});
+
+Deno.test("shell link uses the wootty network and the token fragment", () => {
+  const contract = {
+    networks: [
+      { tag: "ssh", kind: "webrtc", address: "sha-256 AB:CD" },
+      { tag: "wootty", kind: "https", address: "https://0123456789abcdef.abcdefghijkl.opentunnel.xyz" },
+    ],
+  };
+  assert(shellLink(contract, "a+b/c") === "https://0123456789abcdef.abcdefghijkl.opentunnel.xyz/#token=a%2Bb%2Fc", shellLink(contract, "a+b/c"));
+  assert(shellLink({ networks: [] }, "t") === "", "no address yet");
+  assert(shellLink({ networks: [{ tag: "wootty", address: "javascript:alert(1)" }] }, "t") === "", "non-https rejected");
+  assert(shellLink(contract, "") === "", "no token");
 });
 
 Deno.test("isActive and isReleasing follow phase and release", () => {
