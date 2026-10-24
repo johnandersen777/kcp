@@ -53,7 +53,7 @@ Deno.test("signInView shows the session's account, not the typed handle", () => 
   assertEquals(unresolved.text, `Signed in as ${ALICE}`, "falls back to the DID");
   const mismatch = at({ typed: "johnandersen777.bsky.social", account: { did: ALICE, handle: "alice.bsky.social" } }, ready);
   assertEquals([mismatch.tone, mismatch.text, mismatch.primary.label],
-    ["warn", "Signed in as alice.bsky.social, not johnandersen777.bsky.social.", "Switch to johnandersen777.bsky.social"]);
+    ["warn", "Signed in as alice.bsky.social, not johnandersen777.bsky.social.", "Switch account"]);
   const stale = at({ account: { did: "did:plc:other", handle: "bob.test" } }, ready);
   assertEquals(stale.text, `Signed in as ${ALICE}`, "a handle resolved for another DID is ignored");
 });

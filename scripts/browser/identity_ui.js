@@ -92,7 +92,7 @@ export function signInView({ requester = true, identity, local = {}, now = Date.
     const handle = local.account?.did === did ? normalizeHandle(local.account.handle) : "";
     const typed = normalizeHandle(local.typed);
     const other = typed && typed !== handle && typed !== did;
-    const primary = { label: other ? `Switch to ${typed}` : "Switch account", action: "switch" };
+    const primary = { label: "Switch account", action: "switch" };
     const signOut = { label: "Sign out", action: "signOut" };
     const detail = handle ? did : "";
     if (other && handle) {
