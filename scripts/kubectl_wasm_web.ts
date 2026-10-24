@@ -63,6 +63,11 @@ const wasmExecCliPath = Deno.realPathSync(
   options.get("wasm-exec-cli") ?? "bin/wasm/wasm_exec_cli.js",
 );
 const hostname = options.get("host") ?? "127.0.0.1";
+// --debug-log=<file> accepts the page's opt-in remote debug log (?debuglog=1)
+// at POST /debug/log and appends it to <file>. Off by default; bodies are
+// capped so the public origin cannot be used to fill the disk.
+const debugLogPath = options.get("debug-log");
+const debugLogMax = 256 * 1024;
 const scope = await loadScope(
   options.get("scope-file") ?? kcpWasmPath.replace(/[^/]*$/, SCOPE_FILE),
   options.has("scope-file"),
@@ -166,6 +171,23 @@ async function fileResponse(
 
 Deno.serve({ hostname, port }, async (request) => {
   const url = new URL(request.url);
+
+  if (url.pathname === "/debug/log" && request.method === "POST") {
+    if (!debugLogPath) return new Response("debug log disabled", { status: 404, headers });
+    const text = await request.text();
+    if (text.length > debugLogMax) return new Response("too large", { status: 413, headers });
+    try {
+      const { session, ua, lines } = JSON.parse(text);
+      const tag = `${String(session).slice(0, 12)} ${String(ua).replace(/^.*?\(([^;)]+).*$/, "$1").slice(0, 40)}`;
+      const out = (Array.isArray(lines) ? lines : []).slice(0, 500).map((l) =>
+        `${l.t} [${tag}] ${String(l.level).slice(0, 8)} ${String(l.message).replace(/\s+/g, " ").slice(0, 2000)}`
+      ).join("\n");
+      if (out) await Deno.writeTextFile(debugLogPath, out + "\n", { append: true });
+    } catch {
+      return new Response("bad request", { status: 400, headers });
+    }
+    return new Response(null, { status: 204, headers });
+  }
 
   if (url.pathname === "/config") {
     return Response.json(

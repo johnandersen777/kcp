@@ -136,8 +136,13 @@ globalThis.__kcpResolve = (callbackID, payload) => {
 const { fetchWasm, mib } = await import("./wasm_fetch.js");
 const hibernate = await import("./kcp_hibernate.js");
 const go = hibernate.instrument(new globalThis.Go());
+// Low-memory mode (iOS): collect more often and aim for a smaller heap; the
+// soft limit only makes the GC work harder, it never fails an allocation.
+if (init.lowMemory) go.env = { ...go.env, GOGC: "50", GOMEMLIMIT: "400MiB" };
 const fetchStarted = performance.now();
-const [wasmResponse, wasmBytes, wasmHash] = await fetchWasm(init.wasmUrl, fetch, { hash: true });
+// The module hash only keys the snapshot; skip it (and its buffered copy)
+// when hibernation is off.
+const [wasmResponse, wasmBytes, wasmHash] = await fetchWasm(init.wasmUrl, fetch, { hash: Boolean(init.hibernate?.enabled) });
 const module = await WebAssembly.compileStreaming(wasmResponse);
 const compileMs = Math.round(performance.now() - fetchStarted);
 log("info", `kcp.wasm ${mib(wasmBytes)} MiB downloaded + compiled in ${compileMs}ms`);
@@ -148,8 +153,16 @@ const snapshotKey = await hibernate.snapshotKey(
   JSON.stringify({ ...init.socialweb, restore: undefined }),
 );
 const restored = await restoreSnapshot();
+if (init.debugMemory) {
+  // Linear memory only grows; its size is the best crash predictor on iOS.
+  setInterval(() => {
+    const mem = globalThis.__kcpMemory?.buffer?.byteLength;
+    if (mem) log("debug", `kcp wasm memory ${mib(mem)} MiB`);
+  }, 2000);
+}
 if (!restored) {
   const instance = await WebAssembly.instantiate(module, go.importObject);
+  globalThis.__kcpMemory = instance.exports.mem;
   // run() only settles when the Go program exits; the shard blocks forever.
   go.run(instance).catch((err) => console.error("kcp-wasm exited:", err));
 }

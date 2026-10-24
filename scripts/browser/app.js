@@ -71,6 +71,47 @@ const identityStatusEl = document.getElementById("identity-status");
 
 serverEl.textContent = apiServer;
 
+// --- low-memory mode ---------------------------------------------------------
+// iOS gives a whole tab (page and workers) roughly 1-1.5 GB before it kills
+// the WebContent process ("A problem repeatedly occurred"). kcp alone grows a
+// Go heap of 800+ MiB, so on iOS (or with localStorage kcp.lowmem=1) the page
+// loads kubectl only after kcp is up, loads goat/yq on first use, skips the
+// snapshot hibernate (a restore briefly holds two copies of the heap) and asks
+// Go to keep its heap small. kcp.lowmem=0 turns it off.
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const lowMemory = localStorage.getItem("kcp.lowmem") === "1" ||
+  (localStorage.getItem("kcp.lowmem") !== "0" && isIOS);
+
+// --- remote debug log ------------------------------------------------------
+// ?debuglog=1 (sticky; ?debuglog=0 turns it off) sends the activity log,
+// uncaught errors and the kcp heap size to the page's server (/debug/log), so
+// a crash on a phone can be read on the server side. Off unless asked for, and
+// the server ignores it unless started with --debug-log.
+const debugLogParam = new URLSearchParams(location.search).get("debuglog");
+if (debugLogParam !== null) localStorage.setItem("kcp.debuglog", debugLogParam === "0" ? "0" : "1");
+const debugLog = localStorage.getItem("kcp.debuglog") === "1";
+const debugSession = Math.random().toString(36).slice(2, 8);
+let debugQueue = [];
+function debugSend(level, message) {
+  if (!debugLog) return;
+  debugQueue.push({ t: new Date().toISOString(), level, message: String(message).slice(0, 2000) });
+}
+function debugFlush() {
+  if (!debugLog || debugQueue.length === 0) return;
+  const body = JSON.stringify({ session: debugSession, ua: navigator.userAgent, lines: debugQueue });
+  debugQueue = [];
+  fetch("/debug/log", { method: "POST", body, keepalive: body.length < 60000 }).catch(() => {});
+}
+if (debugLog) {
+  setInterval(debugFlush, 500);
+  addEventListener("error", (e) => debugSend("error", `uncaught: ${e.message} ${e.filename}:${e.lineno}`));
+  addEventListener("unhandledrejection", (e) => debugSend("error", `unhandled rejection: ${e.reason}`));
+  addEventListener("pagehide", debugFlush);
+  debugSend("info", `debug log on; lowMemory=${lowMemory} isIOS=${isIOS} ` +
+    `hardwareConcurrency=${navigator.hardwareConcurrency} screen=${screen.width}x${screen.height}`);
+}
+
 // --- activity log ----------------------------------------------------------
 
 function addLog(level, message) {
@@ -80,6 +121,7 @@ function addLog(level, message) {
   row.className = `log-${level}`;
   const time = new Date().toLocaleTimeString(undefined, { hour12: false });
   row.textContent = `${time} ${message}`;
+  debugSend(level, message);
   logEl.appendChild(row);
   while (logEl.childElementCount > maxLogEntries) {
     logEl.firstElementChild.remove();
@@ -530,6 +572,8 @@ async function spawnKcp(useSnapshot = true) {
     initialState,
     hibernate,
     debugGo: localStorage.getItem("kcp.debugGo") === "1",
+    lowMemory,
+    debugMemory: debugLog,
     socialweb: {
       origin: location.origin,
       identityMode: localStorage.getItem("socialweb.identity") === "localRepo"
@@ -566,7 +610,7 @@ let kcpSpawnStarted = 0;
 // them off, "kcp.snapshot.gzip" = "0" stores them raw, "kcp.snapshot.store" =
 // "indexeddb" forces the fallback store.
 async function hibernateInit(useSnapshot) {
-  const enabled = localStorage.getItem("kcp.snapshot") !== "0";
+  const enabled = localStorage.getItem("kcp.snapshot") !== "0" && !lowMemory;
   if (enabled) {
     navigator.storage?.persist?.().then((granted) => {
       if (!granted) addLog("debug", "persistent storage not granted; the browser may evict the kcp snapshot");
@@ -2192,9 +2236,15 @@ async function start() {
   setStatus("loading kcp + kubectl…", "running");
   // kcp boots for tens of seconds; download and compile kubectl meanwhile.
   // goat/yq follow kubectl at low priority, or load on first use.
-  const kubectlLoaded = spawnKubectl();
-  kubectlLoaded.then(ensureCli).catch(() => {});
-  await Promise.all([spawnKcp(), kubectlLoaded]);
+  if (lowMemory) {
+    addLog("info", "low-memory mode: kubectl after kcp, goat/yq on first use, no snapshot");
+    await spawnKcp();
+    await spawnKubectl();
+  } else {
+    const kubectlLoaded = spawnKubectl();
+    kubectlLoaded.then(ensureCli).catch(() => {});
+    await Promise.all([spawnKcp(), kubectlLoaded]);
+  }
 
   term.writeln(dim("loading just-bash shell…"));
   await restoreShell();
