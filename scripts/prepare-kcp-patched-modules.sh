@@ -127,6 +127,12 @@ if [[ "${mode}" == "js" ]]; then
   # let the bootstrap retry loops come back once the caches are warm.
   replace_in "${work}/apiserver/pkg/admission/handler.go" \
     'timeToWaitForReady = 10 * time.Second' 'timeToWaitForReady = 1 * time.Second'
+  # DefaultOpenAPIV3Config keeps every generated definition materialized
+  # (~6 MiB). kcp's v3 service cache clears it before each build anyway
+  # (builder3 mutates it), and builder3 calls GetDefinitions when it is nil.
+  replace_in "${work}/apiserver/pkg/server/config.go" \
+    '\tdefaultConfig.Definitions = getDefinitions(func(name string) spec.Ref {\n\t\tdefName, _ := defaultConfig.GetDefinitionName(name)\n\t\treturn spec.MustCreateRef("#/components/schemas/" + openapicommon.EscapeJsonPointer(defName))\n\t})\n' \
+    '\t// js/wasm: Definitions stay nil; builder3 calls GetDefinitions per build.\n'
 fi
 
 if [[ "${mode}" == "js" ]]; then

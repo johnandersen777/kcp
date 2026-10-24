@@ -196,14 +196,17 @@ func (c completedConfig) New(virtualWorkspaceName string, delegationTarget gener
 	return s, nil
 }
 
-// sharedOpenAPIV3Config is built once per process: DefaultOpenAPIV3Config
-// materializes every generated Kubernetes definition (several MiB), and it
-// depends only on the package scheme, so all dynamic virtual workspaces can
-// share it instead of holding a copy each.
+// sharedOpenAPIV3Config is built once per process; it depends only on the
+// package scheme. Definitions is cleared: DefaultOpenAPIV3Config materializes
+// every generated Kubernetes definition (several MiB) per server, and
+// builder3 mutates that map while building, so concurrent builds sharing it
+// race (kcp's openapiv3 ServiceCache clears it for the same reason). With it
+// nil, each build calls GetDefinitions for a private map.
 var sharedOpenAPIV3Config = sync.OnceValue(func() *common.OpenAPIV3Config {
 	getOpenAPIDefinitions := openapi.GetOpenAPIDefinitionsWithoutDisabledFeatures(generatedopenapi.GetOpenAPIDefinitions)
 	namer := openapinamer.NewDefinitionNamer(scheme)
 	config := genericapiserver.DefaultOpenAPIV3Config(getOpenAPIDefinitions, namer)
 	config.Info.Title = "Kubernetes"
+	config.Definitions = nil
 	return config
 })
