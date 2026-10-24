@@ -30,6 +30,18 @@ export function contractName(bytes = crypto.getRandomValues(new Uint8Array(6))) 
   return "vmshell-" + Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
 }
 
+const FINISHED = new Set(["Released", "Failed"]);
+
+/** A contract that still holds (or is getting) a VM and is not being released. */
+export function isActive(contract) {
+  return !contract?.release && !FINISHED.has(contract?.phase ?? "Pending");
+}
+
+/** A contract whose release was asked for but has not finished. */
+export function isReleasing(contract) {
+  return Boolean(contract?.release) && !FINISHED.has(contract?.phase ?? "Pending");
+}
+
 export function secretsPath(name) {
   return `contracts/${name}/secrets`;
 }
@@ -44,13 +56,19 @@ export function parseBidders(text) {
   return dids.length > 0 ? dids : [...DEFAULT_BIDDERS];
 }
 
-export function contractManifest({ name, bidders, ownerDid }) {
-  const spec = {
-    vmName: name,
-    bidderDids: bidders,
-    secretsRef: { mount: SECRETS_MOUNT, path: secretsPath(name) },
-    tunnels: [{ tag: SHELL_TAG, port: SHELL_PORT, shell: { envFile: WOOTTY_ENV } }],
-  };
+/**
+ * A ComputeContract for the page. With shell (the default) it carries the
+ * wootty tunnel and the secretsRef of its token bundle; without, it is a bare
+ * VM reached through sshKeys.
+ */
+export function contractManifest({ name, bidders, ownerDid, shell = true, sshKeys = [], ttlSeconds = null }) {
+  const spec = { vmName: name, bidderDids: bidders };
+  if (shell) {
+    spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
+    spec.tunnels = [{ tag: SHELL_TAG, port: SHELL_PORT, shell: { envFile: WOOTTY_ENV } }];
+  }
+  if (sshKeys.length > 0) spec.sshAuthorizedKeys = sshKeys;
+  if (ttlSeconds !== null) spec.ttlSecondsAfterFinished = ttlSeconds;
   if (ownerDid) spec.ownerDid = ownerDid;
   return {
     apiVersion: "socialweb.computer/v1alpha1",

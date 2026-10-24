@@ -218,6 +218,14 @@
   .app-block .app-status.ok { color: #9ece6a; }
   .app-block .app-status.warn { color: #e0af68; }
   .app-block .app-status.err { color: var(--critical); }
+  .app-block input[type="checkbox"] { flex: 0 0 auto; }
+  .compute-list { list-style: none; margin: 6px 0 0; padding: 0; font-size: 11px; }
+  .compute-list li { border-top: 1px solid var(--border); padding: 5px 0; overflow-wrap: anywhere; }
+  .compute-list .phase-Held { color: #9ece6a; }
+  .compute-list .phase-Failed { color: var(--critical); }
+  .compute-list .phase-Released { color: var(--muted); }
+  .compute-list .detail { color: var(--muted); }
+  .compute-list button { margin: 3px 0 0 6px; }
   #diagram-pane h2 {
     font-size: 12px;
     text-transform: uppercase;
@@ -352,23 +360,17 @@
         <div id="identity-status" class="app-status">waiting for kcp…</div>
       </div>
       <div class="app-block">
-        <h2>Request a compute contract</h2>
-        <label><span>Name</span><input id="contract-name" placeholder="my-vm" /></label>
-        <label><span>SSH key</span><input id="contract-ssh" placeholder="ssh-ed25519 AAAA…" /></label>
-        <label><span>TTL</span><input id="contract-ttl" placeholder="1h" /></label>
-        <button id="contract-create" type="button" disabled>Create contract</button>
-        <div id="contract-status" class="app-status">no contract yet</div>
-      </div>
-      <div class="app-block">
-        <h2>VM shell</h2>
+        <h2>Compute</h2>
         <label><span>Bidders</span>
-          <input id="vmshell-bidders" placeholder="did:plc:… (comma separated)" />
+          <input id="compute-bidders" placeholder="did:plc:… (comma separated)" />
         </label>
-        <button id="vmshell-request" type="button" disabled>Request VM shell</button>
-        <button id="vmshell-release" type="button" disabled>Release</button>
-        <div id="vmshell-status" class="app-status">no VM shell yet</div>
-        <div id="vmshell-link" class="app-status"></div>
-        <div id="vmshell-ingress" class="app-status"></div>
+        <label><span>SSH key</span><input id="compute-ssh" placeholder="ssh-ed25519 AAAA… (optional)" /></label>
+        <label><span>TTL</span><input id="compute-ttl" placeholder="1h (optional)" /></label>
+        <label><span>Web shell</span><input id="compute-shell" type="checkbox" checked /></label>
+        <button id="compute-request" type="button" disabled>Request VM</button>
+        <div id="compute-status" class="app-status">sign in to request a VM</div>
+        <ul id="compute-list" class="compute-list"></ul>
+        <div id="compute-ingress" class="app-status"></div>
       </div>
     </div>
     <h2>Live API surface <span id="diagram-updated">closed</span>

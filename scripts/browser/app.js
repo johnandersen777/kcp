@@ -68,11 +68,6 @@ const identityModeEl = document.getElementById("identity-mode");
 const identityHandleEl = document.getElementById("identity-handle");
 const identitySignInEl = document.getElementById("identity-signin");
 const identityStatusEl = document.getElementById("identity-status");
-const contractNameEl = document.getElementById("contract-name");
-const contractSSHEl = document.getElementById("contract-ssh");
-const contractTTLEl = document.getElementById("contract-ttl");
-const contractCreateEl = document.getElementById("contract-create");
-const contractStatusEl = document.getElementById("contract-status");
 
 serverEl.textContent = apiServer;
 
@@ -1779,7 +1774,6 @@ const identityPrefs = {
 
 let pendingSignInURL = "";
 let signInWaiting = false;
-let lastContractName = "";
 
 function setAppStatus(el, text, className = "") {
   el.textContent = text;
@@ -1864,48 +1858,9 @@ function parseTTLSeconds(value) {
   return Number(match[1]) * units[(match[2] ?? "s").toLowerCase()];
 }
 
-async function createContract() {
-  try {
-    contractCreateEl.disabled = true;
-    const name = contractNameEl.value.trim().toLowerCase();
-    if (!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(name)) {
-      throw new Error("name must be a lowercase DNS label");
-    }
-    const ssh = contractSSHEl.value.trim();
-    const spec = { vmName: name };
-    if (ssh) spec.sshAuthorizedKeys = [ssh];
-    const ttl = parseTTLSeconds(contractTTLEl.value);
-    if (ttl !== null) spec.ttlSecondsAfterFinished = ttl;
-    const identity = await kubectlJSON(["get", "marketidentity", "requester"])
-      .catch(() => null);
-    const did = identity?.status?.did ?? "";
-    if (did) spec.ownerDid = did;
-    const manifest = {
-      apiVersion: "socialweb.computer/v1alpha1",
-      kind: "ComputeContract",
-      metadata: { name },
-      spec,
-    };
-    const result = await runKubectl(
-      withServer(["apply", "-f", "-"]),
-      JSON.stringify(manifest),
-    );
-    if (result.code !== 0) {
-      throw new Error(String(result.stderr || result.stdout || "apply failed").trim());
-    }
-    lastContractName = name;
-    setAppStatus(contractStatusEl, `created ${name}; waiting for bids`, "ok");
-    addLog("ok", `ComputeContract ${name} applied`);
-  } catch (err) {
-    setAppStatus(contractStatusEl, String(err.message ?? err), "err");
-  } finally {
-    contractCreateEl.disabled = false;
-  }
-}
-
 function applyState(state) {
   if (!state) return;
-  applyVMShellState(state);
+  applyComputeState(state);
   if (!state.marketRequester) {
     setAppStatus(identityStatusEl, "waiting for the MarketRequester app…", "warn");
     return;
@@ -1924,7 +1879,6 @@ function applyState(state) {
   }
   if (phase === "Ready") {
     const label = identity?.handle || identity?.did || "ready";
-    contractCreateEl.disabled = false;
     setAppStatus(identityStatusEl, `MarketIdentity ready: ${label}`, "ok");
   } else if (pendingSignInURL) {
     setAppStatus(identityStatusEl, `sign-in required (${action.kind})\nclick Sign in to continue`, "warn");
@@ -1932,19 +1886,6 @@ function applyState(state) {
     setAppStatus(identityStatusEl, `MarketIdentity ${phase}`, "warn");
   }
 
-  if (lastContractName || contractNameEl.value.trim()) {
-    const name = lastContractName || contractNameEl.value.trim().toLowerCase();
-    const contract = (state.contracts ?? []).find((c) => c.name === name);
-    if (contract) {
-      const cphase = contract.phase ?? "Pending";
-      setAppStatus(contractStatusEl,
-        [name, cphase, contract.chosenDid ? `bidder ${contract.chosenDid}` : "",
-          contract.message ? String(contract.message) : ""].filter(Boolean).join(" · "),
-        cphase === "Failed" ? "err" : cphase === "Ready" ? "ok" : "warn");
-    } else {
-      setAppStatus(contractStatusEl, `${name}: not served yet (waiting for the app binding)`, "warn");
-    }
-  }
   if (diagramVisible && Array.isArray(state.crds)) {
     const crds = state.crds.map((name) => ({
       metadata: { name },
@@ -1979,31 +1920,36 @@ function initSocialwebUI() {
       setAppStatus(identityStatusEl, String(err.message ?? err), "err");
     });
   });
-  contractCreateEl.addEventListener("click", () => void createContract());
-  initVMShellUI();
+  initComputeUI();
 }
 
-// --- VM shell ----------------------------------------------------------------
-// "Request VM shell": write the wootty token bundle into the browser vault,
-// then apply a ComputeContract with secretsRef and a plan 0032 shell tunnel.
-// The link is the "wootty" tagged address from status.contract.networks plus
-// #token=. The token stays in localStorage, keyed by contract name, so the
-// link survives a reload.
+// --- compute -----------------------------------------------------------------
+// One panel for ComputeContracts. "Request VM" applies a contract for the
+// chosen bidders; with "Web shell" it also writes the wootty token bundle into
+// the browser vault first (the requester reads secretsRef once and fails a
+// contract whose bundle is missing) and adds a plan 0032 shell tunnel. Every
+// contract from the status feed is listed with its phase, its shell link (the
+// "wootty" tagged address plus #token=, the token kept in localStorage by
+// contract name) and its own Release button. One VM at a time: Request stays
+// disabled while a contract is active, so repeated clicks cannot rent more.
 
-const vmshellBiddersEl = document.getElementById("vmshell-bidders");
-const vmshellRequestEl = document.getElementById("vmshell-request");
-const vmshellReleaseEl = document.getElementById("vmshell-release");
-const vmshellStatusEl = document.getElementById("vmshell-status");
-const vmshellLinkEl = document.getElementById("vmshell-link");
-const vmshellIngressEl = document.getElementById("vmshell-ingress");
-const vmshellPrefs = {
+const computeBiddersEl = document.getElementById("compute-bidders");
+const computeSSHEl = document.getElementById("compute-ssh");
+const computeTTLEl = document.getElementById("compute-ttl");
+const computeShellEl = document.getElementById("compute-shell");
+const computeRequestEl = document.getElementById("compute-request");
+const computeStatusEl = document.getElementById("compute-status");
+const computeListEl = document.getElementById("compute-list");
+const vmshellIngressEl = document.getElementById("compute-ingress");
+const computePrefs = {
   bidders: "socialweb.vmshell.bidders",
-  current: "socialweb.vmshell.current",
+  shell: "socialweb.compute.shell",
   token: (name) => `socialweb.vmshell.token.${name}`,
 };
-let vmshellName = localStorage.getItem(vmshellPrefs.current) ?? "";
-let vmshellBusy = false;
-let vmshellLastLink = "";
+let computeBusy = false;
+let computeReleasing = false;
+let computeLastRender = "";
+const computeReleaseAsked = new Set();
 
 // socialwebCall invokes a page-only Go export through kcp_worker.js.
 function socialwebCall(fn, payload, timeoutMs = 30_000) {
@@ -2022,106 +1968,145 @@ function socialwebCall(fn, payload, timeoutMs = 30_000) {
   });
 }
 
-async function requestVMShell() {
+async function requestVM() {
   try {
-    vmshellBusy = true;
-    vmshellRequestEl.disabled = true;
-    localStorage.setItem(vmshellPrefs.bidders, vmshellBiddersEl.value.trim());
-    const bidders = vmshell.parseBidders(vmshellBiddersEl.value);
+    computeBusy = true;
+    computeRequestEl.disabled = true;
+    localStorage.setItem(computePrefs.bidders, computeBiddersEl.value.trim());
+    localStorage.setItem(computePrefs.shell, computeShellEl.checked ? "1" : "0");
+    const bidders = vmshell.parseBidders(computeBiddersEl.value);
+    const shell = computeShellEl.checked;
+    const ssh = computeSSHEl.value.trim();
+    const ttlSeconds = parseTTLSeconds(computeTTLEl.value);
     const name = vmshell.contractName();
-    const token = vmshell.randomToken();
-    localStorage.setItem(vmshellPrefs.token(name), token);
-    // The requester reads the bundle once and fails the contract when it is
-    // missing, so it must exist before the contract does.
-    await socialwebCall("socialwebVaultPut", {
-      workspace: "root",
-      mount: vmshell.SECRETS_MOUNT,
-      path: vmshell.secretsPath(name),
-      bundle: vmshell.secretsBundle(token),
-    });
+    if (shell) {
+      const token = vmshell.randomToken();
+      localStorage.setItem(computePrefs.token(name), token);
+      await socialwebCall("socialwebVaultPut", {
+        workspace: "root",
+        mount: vmshell.SECRETS_MOUNT,
+        path: vmshell.secretsPath(name),
+        bundle: vmshell.secretsBundle(token),
+      });
+    }
     const identity = await kubectlJSON(["get", "marketidentity", "requester"]).catch(() => null);
-    const manifest = vmshell.contractManifest({ name, bidders, ownerDid: identity?.status?.did ?? "" });
+    const manifest = vmshell.contractManifest({
+      name, bidders, ownerDid: identity?.status?.did ?? "", shell, sshKeys: ssh ? [ssh] : [], ttlSeconds,
+    });
     const result = await runKubectl(withServer(["apply", "-f", "-"]), JSON.stringify(manifest));
     if (result.code !== 0) {
       throw new Error(String(result.stderr || result.stdout || "apply failed").trim());
     }
-    vmshellName = name;
-    vmshellLastLink = "";
-    vmshellLinkEl.textContent = "";
-    localStorage.setItem(vmshellPrefs.current, name);
-    setAppStatus(vmshellStatusEl, `${name}: Pending`, "warn");
-    addLog("ok", `VM shell ${name} requested from ${bidders.join(", ")}`);
+    setAppStatus(computeStatusEl, `${name} requested from ${bidders.join(", ")}`, "ok");
+    addLog("ok", `ComputeContract ${name} requested from ${bidders.join(", ")}${shell ? " with a web shell" : ""}`);
   } catch (err) {
-    setAppStatus(vmshellStatusEl, String(err.message ?? err), "err");
-  } finally {
-    vmshellBusy = false;
+    setAppStatus(computeStatusEl, String(err.message ?? err), "err");
+    computeBusy = false;
   }
+  // computeBusy clears when the status feed shows the new contract.
 }
 
-async function releaseVMShell() {
-  const name = vmshellName;
-  if (!name) return;
-  vmshellReleaseEl.disabled = true;
+async function releaseContract(name) {
+  computeReleaseAsked.add(name);
+  computeLastRender = "";
   const result = await runKubectl(withServer([
     "patch", "computecontract", name, "--type=merge", "-p", JSON.stringify({ spec: { release: true } }),
   ]));
   if (result.code !== 0) {
-    setAppStatus(vmshellStatusEl, String(result.stderr ?? "release failed").trim(), "err");
-    vmshellReleaseEl.disabled = false;
+    computeReleaseAsked.delete(name);
+    setAppStatus(computeStatusEl, String(result.stderr ?? "release failed").trim(), "err");
     return;
   }
-  addLog("info", `VM shell ${name} released`);
+  addLog("info", `ComputeContract ${name} released`);
 }
 
 // The release runs in this tab's requester: closing the tab mid-release
 // leaves the guest running until the bidder's release deadline. A reload
 // resumes it, but warn before the tab goes away.
-let vmshellReleasing = false;
 addEventListener("beforeunload", (event) => {
-  if (!vmshellReleasing) return;
+  if (!computeReleasing) return;
   event.preventDefault();
   event.returnValue = "";
 });
 
-function applyVMShellState(state) {
-  vmshellRequestEl.disabled = vmshellBusy || state.marketIdentity?.phase !== "Ready";
-  if (!vmshellName) return;
-  const contract = (state.contracts ?? []).find((c) => c.name === vmshellName);
-  if (!contract) {
-    vmshellReleaseEl.disabled = true;
-    setAppStatus(vmshellStatusEl, `${vmshellName}: not served yet`, "warn");
-    return;
-  }
+function computeRow(contract) {
+  const name = contract.name;
   const phase = contract.phase ?? "Pending";
-  vmshellReleasing = Boolean(contract.release) && phase !== "Released" && phase !== "Failed";
-  vmshellReleaseEl.disabled = Boolean(contract.release);
-  setAppStatus(vmshellStatusEl,
-    [vmshellName, phase, contract.chosenDid ? `bidder ${contract.chosenDid}` : "",
-      contract.secretsFetchedAt ? `secrets fetched ${contract.secretsFetchedAt}` : "",
-      contract.release ? "released" : "", contract.message ?? ""].filter(Boolean).join(" · "),
-    phase === "Failed" ? "err" : phase === "Held" ? "ok" : "warn");
-  const link = vmshell.shellLink(contract, localStorage.getItem(vmshellPrefs.token(vmshellName)) ?? "");
-  if (link === vmshellLastLink && link) return;
-  vmshellLastLink = link;
-  vmshellLinkEl.textContent = "";
-  if (link) {
-    const a = document.createElement("a");
-    a.href = link;
-    a.target = "_blank";
-    a.rel = "noopener";
-    a.textContent = "Open shell";
-    vmshellLinkEl.append(a);
-  } else if (phase === "Held" || contract.secretsFetchedAt) {
-    // The tunnel URL lands in status.contract.networks about two minutes
-    // after Held, once its TLS certificate is issued.
-    vmshellLinkEl.textContent = "Held; waiting for shell tunnel…";
+  const li = document.createElement("li");
+  const head = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = name;
+  const phaseEl = document.createElement("span");
+  phaseEl.className = `phase-${phase}`;
+  phaseEl.textContent = ` ${phase}${contract.release && phase !== "Released" ? " · releasing" : ""}`;
+  head.append(title, phaseEl);
+  if (vmshell.isActive(contract) && !computeReleaseAsked.has(name)) {
+    const release = document.createElement("button");
+    release.type = "button";
+    release.textContent = "Release";
+    release.addEventListener("click", () => {
+      release.disabled = true;
+      void releaseContract(name);
+    });
+    head.append(release);
   }
+  const detail = document.createElement("div");
+  detail.className = "detail";
+  detail.textContent = [
+    contract.chosenDid ? `bidder ${contract.chosenDid}` : "",
+    contract.secretsFetchedAt ? `secrets fetched ${contract.secretsFetchedAt}` : "",
+    contract.message ?? "",
+  ].filter(Boolean).join(" · ");
+  li.append(head, detail);
+  const token = localStorage.getItem(computePrefs.token(name)) ?? "";
+  if (token && vmshell.isActive(contract)) {
+    const link = vmshell.shellLink(contract, token);
+    const shellEl = document.createElement("div");
+    if (link) {
+      const a = document.createElement("a");
+      a.href = link;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.textContent = "Open shell";
+      shellEl.append(a);
+    } else if (phase === "Held" || contract.secretsFetchedAt) {
+      // The tunnel URL lands in status.contract.networks one to three minutes
+      // after Held, once opentunnel issues its TLS certificate.
+      shellEl.className = "detail";
+      shellEl.textContent = "Held; waiting for shell tunnel…";
+    }
+    li.append(shellEl);
+  }
+  return li;
 }
 
-function initVMShellUI() {
-  vmshellBiddersEl.value = localStorage.getItem(vmshellPrefs.bidders) ?? vmshell.DEFAULT_BIDDERS.join(", ");
-  vmshellRequestEl.addEventListener("click", () => void requestVMShell());
-  vmshellReleaseEl.addEventListener("click", () => void releaseVMShell());
+function applyComputeState(state) {
+  const contracts = state.contracts ?? [];
+  const active = contracts.filter(vmshell.isActive);
+  if (computeBusy && active.length > 0) computeBusy = false;
+  computeReleasing = contracts.some(vmshell.isReleasing);
+  const ready = state.marketIdentity?.phase === "Ready";
+  computeRequestEl.disabled = computeBusy || !ready || active.length > 0;
+  if (!computeBusy && !computeStatusEl.classList.contains("err")) {
+    setAppStatus(computeStatusEl,
+      !ready ? "sign in to request a VM"
+        : active.length > 0 ? `release ${active.map((c) => c.name).join(", ")} to request another VM`
+        : "ready to request a VM",
+      !ready ? "warn" : "ok");
+  }
+  const render = JSON.stringify(contracts) + [...computeReleaseAsked].join();
+  if (render === computeLastRender) return;
+  computeLastRender = render;
+  computeListEl.replaceChildren(...contracts.map(computeRow));
+}
+
+function initComputeUI() {
+  computeBiddersEl.value = localStorage.getItem(computePrefs.bidders) ?? vmshell.DEFAULT_BIDDERS.join(", ");
+  computeShellEl.checked = localStorage.getItem(computePrefs.shell) !== "0";
+  computeRequestEl.addEventListener("click", () => {
+    computeStatusEl.classList.remove("err");
+    void requestVM();
+  });
 }
 
 // --- ingress relay -------------------------------------------------------------
