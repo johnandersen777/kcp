@@ -185,6 +185,24 @@ if [[ "${mode}" == "js" ]]; then
     replace_in "${reflector}" 'defaultBackoffInit = 800 * time.Millisecond' 'defaultBackoffInit = 100 * time.Millisecond'
     replace_in "${reflector}" 'defaultBackoffMax  = 30 * time.Second' 'defaultBackoffMax  = 1 * time.Second'
   done
+
+  # The CRD handler builds a fresh scale scheme (autoscaling, extensions and
+  # apps conversions) for every served CRD version: ~10 MiB of heap in the
+  # browser shard. The scheme is read-only once built; share one.
+  copy_module k8s.io/apiextensions-apiserver "${work}/apiextensions-apiserver"
+  replace_in "${work}/apiextensions-apiserver/pkg/apiserver/customresource_handler.go" \
+    'scaleConverter := scale.NewScaleConverter()' 'scaleConverter := sharedScaleConverter()'
+  cat > "${work}/apiextensions-apiserver/pkg/apiserver/scale_shared.go" <<'GO'
+package apiserver
+
+import (
+	"sync"
+
+	"k8s.io/client-go/scale"
+)
+
+var sharedScaleConverter = sync.OnceValue(scale.NewScaleConverter)
+GO
 fi
 
 echo "prepared ${modfile} (mode=${mode})"
