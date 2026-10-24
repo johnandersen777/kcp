@@ -948,6 +948,7 @@ async function runScript(script, stdin = "") {
     if (result.stdout) term.write(normalizeNewlines(result.stdout));
     if (result.stderr) term.write(red(normalizeNewlines(result.stderr)));
     term.write(dim(`[exit ${result.exitCode} · ${elapsed}ms]`));
+    term.scrollToBottom();
     addLog(
       result.exitCode === 0 ? "ok" : "warn",
       `exit ${result.exitCode} · ${elapsed}ms`,
@@ -969,6 +970,7 @@ async function runScript(script, stdin = "") {
     busy = false;
     if (!kubectlRestarting && !cliRestarting) setStatus("connected", "connected");
     prompt();
+    term.scrollToBottom();
     void poll();
   }
 }
