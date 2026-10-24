@@ -31,6 +31,7 @@ const O_DIRECTORY = 65536;
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
 const S_IFCHR = 0o020000;
+const S_IFIFO = 0o010000;
 
 const files = new Map();
 let nextFD = 10;
@@ -39,6 +40,7 @@ const memFiles = new Map();
 const memDirs = new Set(["/"]);
 
 const stdin = { bytes: new Uint8Array(0), offset: 0 };
+let stdinIsPipe = false;
 
 let cwd = "/";
 let outputSink = null;
@@ -46,6 +48,8 @@ let outputSink = null;
 export function setStdin(text) {
   stdin.bytes = new TextEncoder().encode(text ?? "");
   stdin.offset = 0;
+  // Native CLIs (yq, goat) decide whether stdin is piped by stat'ing fd 0.
+  stdinIsPipe = stdin.bytes.length > 0;
 }
 
 /** Resolves relative paths against the Go process working directory. */
@@ -222,7 +226,16 @@ export function installFsShim() {
   };
 
   fs.fstat = (fd, cb) => {
-    if (fd === 0 || fd === 1 || fd === 2) {
+    if (fd === 0) {
+      cb(
+        null,
+        stdinIsPipe
+          ? plainStat(S_IFIFO | 0o644, stdin.bytes.length)
+          : plainStat(S_IFCHR | 0o666, 0),
+      );
+      return;
+    }
+    if (fd === 1 || fd === 2) {
       cb(null, plainStat(S_IFCHR | 0o666, 0));
       return;
     }
