@@ -148,6 +148,13 @@ func Boot(parent context.Context, cfg Config) (*Server, error) {
 		kcpvalidatingwebhook.PluginName,
 		kcpmutatingadmissionpolicy.PluginName,
 	)
+	// Low-memory mode (iOS tabs): the apiserver watch cache keeps a second
+	// decoded copy of every object plus event buffers per resource. The
+	// memory:// store serves lists and watches (with history and initial
+	// events) itself, so skip the cache.
+	if os.Getenv("KCP_LOW_MEMORY") == "1" {
+		opts.GenericControlPlane.Etcd.EnableWatchCache = false
+	}
 	opts.GenericControlPlane.SecureServing.Listener = listener
 	opts.GenericControlPlane.SecureServing.BindAddress = net.ParseIP("127.0.0.1")
 	opts.GenericControlPlane.SecureServing.BindPort = tcpAddr.Port
