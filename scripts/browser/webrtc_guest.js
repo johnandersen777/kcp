@@ -20,8 +20,6 @@ export const NSID_PUBLIC_KEY = "com.publicdomainrelay.temp.compute.events.guest.
 export const NSID_SIGNAL = "com.publicdomainrelay.temp.compute.events.guest.signalWebRTC";
 export const ICE_SERVERS = [{ urls: "stun:stun.cloudflare.com:3478" }];
 export const SSH_TAG = "ssh";
-export const SSH_PORT = 22;
-export const SSH_USER = "root";
 const AGE_URL = "https://esm.sh/age-encryption@0.3.1";
 
 let agePromise;
@@ -185,77 +183,58 @@ function gatheringComplete(pc, timeoutMs = 15_000, settleMs = 500) {
 }
 
 /**
- * Runs one SSH session over WebRTC. signaling: {guest(), publishKey(recipient),
- * exchange(offerCiphertext, open) -> the opened answer}. Returns {close()}.
+ * The kcp-webrtc proxy: opens one datachannel (label = tag) to the guest and
+ * returns {port, close}. port is a MessagePort carrying the channel's raw TCP
+ * bytes both ways (ArrayBuffers); onEof runs when the channel closes.
+ * signaling: {guest(), publishKey(recipient), exchange(offerCiphertext, open)
+ * -> the opened answer}.
  */
-export async function connectShell({ signaling, sshKey, user = SSH_USER, term, status, onClose, tag = SSH_TAG }) {
+export async function dialGuest({ signaling, tag = SSH_TAG, status = () => {}, onEof = () => {} }) {
   status("waiting for the guest's publicKey and fingerprint");
   const guest = await signaling.guest();
   const me = await newAgeIdentity();
   await signaling.publishKey(me.recipient);
 
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  const dc = pc.createDataChannel(tag);
-  dc.binaryType = "arraybuffer";
-  await pc.setLocalDescription(await pc.createOffer());
-  status("gathering ICE candidates");
-  await gatheringComplete(pc);
-  status("offer sealed; waiting for the answer");
-  // Sealed bodies are JSON {sdp, replyTo}; replyTo (offers only) is the
-  // recipient the guest seals its answer to.
-  const offer = JSON.stringify({ sdp: pc.localDescription.sdp, replyTo: me.recipient });
-  const opened = await signaling.exchange(await seal(offer, guest.key), (c) => me.open(c));
-  const answer = String(JSON.parse(opened)?.sdp ?? "");
-  if (!fingerprintMatches(answer, guest.fingerprint)) {
-    pc.close();
-    throw new Error("answer a=fingerprint does not match the guest's onNetwork address");
-  }
-  await pc.setRemoteDescription({ type: "answer", sdp: answer });
-  status("connecting datachannel");
-  await new Promise((resolve, reject) => {
-    dc.onopen = resolve;
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "failed") reject(new Error("WebRTC connection failed (symmetric NAT?)"));
+  try {
+    const dc = pc.createDataChannel(tag);
+    dc.binaryType = "arraybuffer";
+    await pc.setLocalDescription(await pc.createOffer());
+    status("gathering ICE candidates");
+    await gatheringComplete(pc);
+    status("offer sealed; waiting for the answer");
+    // Sealed bodies are JSON {sdp, replyTo}; replyTo (offers only) is the
+    // recipient the guest seals its answer to.
+    const offer = JSON.stringify({ sdp: pc.localDescription.sdp, replyTo: me.recipient });
+    const opened = await signaling.exchange(await seal(offer, guest.key), (c) => me.open(c));
+    const answer = String(JSON.parse(opened)?.sdp ?? "");
+    if (!fingerprintMatches(answer, guest.fingerprint)) {
+      throw new Error("answer a=fingerprint does not match the guest's onNetwork address");
+    }
+    await pc.setRemoteDescription({ type: "answer", sdp: answer });
+    status("connecting datachannel");
+    await new Promise((resolve, reject) => {
+      dc.onopen = resolve;
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "failed") reject(new Error("WebRTC connection failed (symmetric NAT?)"));
+      };
+    });
+    status("datachannel open");
+    const { port1, port2 } = new MessageChannel();
+    dc.onmessage = (e) => port1.postMessage(e.data, [e.data]);
+    port1.onmessage = (e) => dc.readyState === "open" && dc.send(e.data);
+    dc.onclose = () => onEof();
+    return {
+      port: port2,
+      close() {
+        port1.close();
+        pc.close();
+      },
     };
-  });
-
-  const worker = new Worker(new URL("./ssh_worker.js", import.meta.url), { type: "module" });
-  const { port1, port2 } = new MessageChannel();
-  dc.onmessage = (e) => port1.postMessage(e.data, [e.data]);
-  port1.onmessage = (e) => dc.readyState === "open" && dc.send(e.data);
-  let closed = false;
-  const close = () => {
-    if (closed) return;
-    closed = true;
-    worker.terminate();
-    dc.close();
+  } catch (err) {
     pc.close();
-    for (const d of disposers) d.dispose();
-    onClose?.();
-  };
-  dc.onclose = () => worker.postMessage({ type: "eof" });
-  const disposers = [
-    term.onData((data) => worker.postMessage({ type: "input", data: new TextEncoder().encode(data) })),
-    term.onResize(({ cols, rows }) => worker.postMessage({ type: "resize", cols, rows })),
-  ];
-  worker.onmessage = (e) => {
-    const m = e.data;
-    if (m.type === "output") term.write(m.data);
-    else if (m.type === "status") status(m.text);
-    else if (m.type === "exit") {
-      status(m.error ? `ssh: ${m.error}` : "ssh session ended");
-      close();
-    } else if (m.type === "log") console[m.level === "error" ? "error" : "log"](m.message);
-  };
-  worker.postMessage({
-    type: "start",
-    execUrl: new URL("/wasm_exec.js", location.href).href,
-    wasmUrl: new URL("/ssh.wasm", location.href).href,
-    port: port2,
-    key: sshKey.privateKey,
-    cfg: { user, publicKey: sshKey.raw, hostKeys: guest.hostKeys, cols: term.cols, rows: term.rows },
-  }, [port2]);
-  return { close };
+    throw err;
+  }
 }
 
 /** Test signaling against contrib/wasm/sshclient/testpeer over loopback HTTP. */

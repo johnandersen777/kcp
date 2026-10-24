@@ -65,6 +65,7 @@ assets=(
   vmshell.js
   webrtc_guest.js
   ssh_worker.js
+  ssh_cmd.js
   wasm_snapshot.js
   kcp_hibernate.js
 )

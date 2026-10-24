@@ -90,6 +90,7 @@ const assets = new Map<string, string>([
   ["/vmshell.js", "vmshell.js"],
   ["/webrtc_guest.js", "webrtc_guest.js"],
   ["/ssh_worker.js", "ssh_worker.js"],
+  ["/ssh_cmd.js", "ssh_cmd.js"],
   ["/wasm_snapshot.js", "wasm_snapshot.js"],
   ["/kcp_hibernate.js", "kcp_hibernate.js"],
 ]);

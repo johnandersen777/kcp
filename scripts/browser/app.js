@@ -33,6 +33,7 @@ import { assembleSnapshot, openBestBackend, snapshotRecords } from "./state_stor
 import { decodeBase64, encodeBase64, register as registerIngress } from "./ingress_ws.js";
 import * as vmshell from "./vmshell.js";
 import * as webrtcGuest from "./webrtc_guest.js";
+import * as sshCmd from "./ssh_cmd.js";
 import { discardSnapshot } from "./kcp_hibernate.js";
 
 const config = await (await fetch("/config")).json();
@@ -940,6 +941,8 @@ function shellHelp() {
     "  echo '{\"a\":1}' | jq .a    (jq is built into just-bash)",
     "  export GOAT_USERNAME=... GOAT_PASSWORD=...",
     "  ls /tmp; cat demo.yaml",
+    "  ssh vmshell-abc123            (a Held ComputeContract, over WebRTC; see ~/.ssh/config)",
+    "  ssh vmshell-abc123 uname -a | grep Linux",
     "",
     "builtins: help · clear · reset (wipe kcp state and reload) · snapshot-discard (cold boot next load)",
     "keys: Ctrl-C cancel · Ctrl-D finish stdin · Tab complete · ↑/↓ history",
@@ -981,7 +984,7 @@ function detectTtyTool(script) {
   const segment = lastPipelineSegment(script);
   if (/[<>]/.test(segment)) return null;
   const first = splitArgs(segment)[0];
-  return ["kubectl", "goat", "yq"].includes(first) ? first : null;
+  return ["kubectl", "goat", "yq", "ssh"].includes(first) ? first : null;
 }
 
 function makeCommands() {
@@ -1060,7 +1063,9 @@ function makeCommands() {
     return { stdout: "cleared shell and kcp state; reloading…\n", stderr: "", exitCode: 0 };
   });
 
-  return [kubectl, goat, yq, help, clear, reset, snapshotDiscard];
+  const ssh = defineCommand("ssh", (args, ctx) => runSsh(args, ctx));
+
+  return [kubectl, goat, yq, ssh, help, clear, reset, snapshotDiscard];
 }
 
 async function restoreShell() {
@@ -1073,7 +1078,7 @@ async function restoreShell() {
 
   bash = new Bash({
     cwd: homeDir,
-    env: saved.env ?? {},
+    env: { HOME: homeDir, ...(saved.env ?? {}) },
     customCommands: makeCommands(),
     executionLimits: { maxExecutionTimeMs: 60 * 60 * 1000 },
   });
@@ -1481,7 +1486,7 @@ function commonPrefix(values) {
 function shellCommandNames() {
   const builtins = [
     "cd", "export", "unset", "alias", "source", ".", "history",
-    "kubectl", "goat", "yq", "help", "clear", "reset", "snapshot-discard",
+    "kubectl", "goat", "yq", "ssh", "help", "clear", "reset", "snapshot-discard",
   ];
   return [...new Set([...getCommandNames(), ...builtins])].sort();
 }
@@ -1537,6 +1542,10 @@ async function completeLine() {
     let candidates;
     if (parts[0] === "kubectl") {
       candidates = await kubectlCompletions(parts.slice(1), token);
+    } else if (parts[0] === "ssh" && !token.startsWith("-") && !parts.slice(1).some((p) => !p.startsWith("-"))) {
+      candidates = sshCmd.sshHosts(lastFeedState, { testPeer: Boolean(sshTestPeer) })
+        .filter((name) => name.startsWith(token))
+        .map((name) => ({ value: name, description: "ComputeContract" }));
     } else if (parts.length === 0) {
       candidates = shellCommandNames()
         .filter((name) => name.startsWith(token))
@@ -1949,8 +1958,6 @@ const computeStatusEl = document.getElementById("compute-status");
 const computeListEl = document.getElementById("compute-list");
 const vmshellIngressEl = document.getElementById("compute-ingress");
 const computeTestPeerEl = document.getElementById("compute-testpeer");
-const computeTermEl = document.getElementById("compute-term");
-const computeTermStatusEl = document.getElementById("compute-term-status");
 const computePrefs = {
   bidders: "socialweb.vmshell.bidders",
   shell: "socialweb.compute.shell",
@@ -1959,10 +1966,6 @@ const computePrefs = {
 const sshTestPeer = new URLSearchParams(location.search).get("sshTestPeer");
 const feedWatchers = new Set();
 let lastFeedState = null;
-// The contract name (or "testpeer") whose WebRTC session owns the pane.
-let shellSessionName = "";
-let shellSession = null;
-let shellTerm = null;
 let computeBusy = false;
 let computeReleasing = false;
 let computeLastRender = "";
@@ -2032,7 +2035,6 @@ async function releaseContract(name) {
     return;
   }
   addLog("info", `ComputeContract ${name} released`);
-  if (shellSessionName === name) shellSession?.close();
   void webrtcGuest.deleteSSHKey(name).catch(() => {});
 }
 
@@ -2081,7 +2083,7 @@ function computeRow(contract) {
 }
 
 // "Connect" once the guest's publicKey, webrtc fingerprint and host keys are
-// in the feed; the session runs in the compute-term pane.
+// in the feed; it runs `ssh <contract>` in the main terminal.
 function webrtcShellAction(contract) {
   const el = document.createElement("div");
   const ready = contract.phase === "Held" && webrtcGuest.guestFromState(lastFeedState, contract.name) !== null;
@@ -2092,9 +2094,8 @@ function webrtcShellAction(contract) {
   }
   const connect = document.createElement("button");
   connect.type = "button";
-  connect.textContent = shellSessionName === contract.name ? "Connected" : "Connect";
-  connect.disabled = shellSessionName !== "";
-  connect.addEventListener("click", () => void connectShell(contract.name));
+  connect.textContent = "Connect";
+  connect.addEventListener("click", () => runInTerminal(`ssh ${contract.name}`));
   el.append(connect);
   return el;
 }
@@ -2124,54 +2125,152 @@ async function kubectlCreate(manifest) {
   if (result.code !== 0) throw new Error(String(result.stderr || result.stdout || "create failed").trim());
 }
 
-function shellTerminal() {
-  computeTermEl.hidden = false;
-  computeTermStatusEl.hidden = false;
-  if (shellTerm) return shellTerm;
-  shellTerm = new Terminal({ cursorBlink: true, fontSize: 12, fontFamily: term.options.fontFamily, theme: term.options.theme });
-  const fit = new FitAddon();
-  shellTerm.loadAddon(fit);
-  shellTerm.open(computeTermEl);
-  fit.fit();
-  new ResizeObserver(() => {
-    try { fit.fit(); } catch { /* hidden */ }
-  }).observe(computeTermEl);
-  return shellTerm;
+// Runs a command line in the main terminal as if typed (the panel's Connect).
+function runInTerminal(command) {
+  term.focus();
+  if (!ready || busy || stdinMode) {
+    setAppStatus(computeStatusEl, `the terminal is busy; run: ${command}`, "warn");
+    return;
+  }
+  replaceLine(command);
+  submit();
 }
 
-// connectShell runs one WebRTC SSH session for a contract, or for the local
-// test peer when name is "testpeer".
-async function connectShell(name) {
-  if (shellSessionName) return;
-  shellSessionName = name;
-  computeLastRender = "";
-  computeTestPeerEl.disabled = true;
-  const status = (text) => setAppStatus(computeTermStatusEl, `${name}: ${text}`, /^ssh: |fail|match/.test(text) ? "err" : "ok");
-  const done = () => {
-    shellSession = null;
-    shellSessionName = "";
-    computeLastRender = "";
-    computeTestPeerEl.disabled = false;
-    if (lastFeedState) applyComputeState(lastFeedState);
-  };
-  try {
-    const t = shellTerminal();
-    let sshKey;
-    let signaling;
-    if (name === "testpeer") {
-      sshKey = await webrtcGuest.newSSHKey();
-      signaling = webrtcGuest.httpSignaling(sshTestPeer, sshKey.authorized);
-    } else {
-      sshKey = await webrtcGuest.loadSSHKey(name);
-      if (!sshKey) throw new Error("this browser has no SSH key for the contract");
-      signaling = webrtcGuest.contractEventSignaling({ contract: name, create: kubectlCreate, watch: watchFeed });
-    }
-    shellSession = await webrtcGuest.connectShell({ signaling, sshKey, term: t, status, onClose: done });
-    t.focus();
-  } catch (err) {
-    status(`ssh: ${err.message ?? err}`);
-    done();
+// --- ssh -----------------------------------------------------------------------
+// The shell's `ssh` (ssh.wasm in ssh_worker.js): hosts are ComputeContract
+// names, ~/.ssh/config is seeded with "Host vmshell-* / ProxyCommand
+// kcp-webrtc %h %p", and kcp-webrtc is this page dialing the guest over a
+// WebRTC datachannel. Only public material is written to ~/.ssh (config,
+// known_hosts from status.contract.hostKeys, <contract>.pub); the private
+// key is the contract's non-extractable WebCrypto key in IndexedDB, and the
+// shell filesystem (persisted to localStorage) never sees it.
+
+const sshDir = `${homeDir}/.ssh`;
+// While an interactive ssh runs it owns the main terminal's input.
+let sshSession = null;
+let testPeerKey = null;
+
+function latin1Bytes(value) {
+  if (!value) return null;
+  if (typeof value !== "string") return value.length ? value : null;
+  const bytes = new Uint8Array(value.length);
+  for (let i = 0; i < value.length; i++) bytes[i] = value.charCodeAt(i) & 0xff;
+  return bytes.length ? bytes : null;
+}
+
+async function sshResolve(host) {
+  const target = sshCmd.resolveHost(lastFeedState, host, { testPeer: Boolean(sshTestPeer) });
+  let key;
+  let hostKeys;
+  if (target.kind === "testpeer") {
+    testPeerKey ??= await webrtcGuest.newSSHKey();
+    key = testPeerKey;
+    hostKeys = (await webrtcGuest.httpSignaling(sshTestPeer, key.authorized).guest()).hostKeys;
+  } else {
+    key = await webrtcGuest.loadSSHKey(host);
+    if (!key) throw new Error("this browser holds no SSH key for the contract (it was requested elsewhere)");
+    hostKeys = target.contract.hostKeys ?? [];
+    if (hostKeys.length === 0) throw new Error("the guest has not reported its host keys yet");
   }
+  const khPath = `${sshDir}/known_hosts`;
+  let known = await bash.fs.readFile(khPath).catch(() => "");
+  // The test peer makes a new host key per run; real guests never get
+  // their lines rewritten.
+  if (target.kind === "testpeer") known = sshCmd.dropKnownHost(known, host);
+  const merged = sshCmd.mergeKnownHosts(known, host, hostKeys);
+  await bash.fs.writeFile(khPath, merged);
+  await bash.fs.writeFile(`${sshDir}/${host}.pub`, `${key.authorized}\n`);
+  return { publicKey: key.raw, knownHosts: merged, key: key.privateKey };
+}
+
+async function sshDial(host, port, status, onEof) {
+  if (port !== 22) throw new Error(`no webrtc tunnel for port ${port} (only ssh on 22)`);
+  const target = sshCmd.resolveHost(lastFeedState, host, { testPeer: Boolean(sshTestPeer) });
+  const signaling = target.kind === "testpeer"
+    ? webrtcGuest.httpSignaling(sshTestPeer, testPeerKey.authorized)
+    : webrtcGuest.contractEventSignaling({ contract: host, create: kubectlCreate, watch: watchFeed });
+  return await webrtcGuest.dialGuest({ signaling, tag: "ssh", status, onEof });
+}
+
+async function runSsh(args, ctx) {
+  await bash.fs.mkdir(sshDir, { recursive: true }).catch(() => {});
+  let config = await bash.fs.readFile(`${sshDir}/config`).catch(() => null);
+  if (config === null) {
+    config = sshCmd.DEFAULT_SSH_CONFIG;
+    await bash.fs.writeFile(`${sshDir}/config`, config);
+  }
+  // A terminal stdout (ssh last in its pipeline, not redirected) streams to
+  // the terminal; otherwise output is buffered for the pipeline.
+  const toTerminal = ttyTool === "ssh";
+  const stdin = latin1Bytes(ctx.stdin);
+  const interactive = toTerminal && !stdin;
+  const decoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
+  const buffered = { stdout: "", stderr: "" };
+  const write = (stream, u8) => {
+    if (toTerminal) term.write(u8);
+    else buffered[stream] += decoders[stream].decode(u8, { stream: true });
+  };
+  const verboseErr = (text) => write("stderr", new TextEncoder().encode(`debug1: kcp-webrtc: ${text}\n`));
+  const worker = new Worker(new URL("./ssh_worker.js", import.meta.url), { type: "module" });
+  let dialed = null;
+  return await new Promise((resolve) => {
+    let raw = false;
+    let done = false;
+    const finish = (code) => {
+      if (done) return;
+      done = true;
+      worker.terminate();
+      dialed?.close();
+      sshSession = null;
+      if (toTerminal && raw) term.write("\r\n");
+      resolve({ stdout: buffered.stdout, stderr: buffered.stderr, exitCode: code });
+    };
+    ctx.signal?.addEventListener("abort", () => finish(130));
+    if (interactive) {
+      sshSession = {
+        // With a pty every key goes to the guest (Ctrl-C included); without
+        // one, Ctrl-C ends ssh here and Ctrl-D closes its stdin.
+        key(data) {
+          if (!raw && data === "\u0003") return finish(130);
+          if (!raw && data === "\u0004") return worker.postMessage({ type: "stdinEOF" });
+          worker.postMessage({ type: "input", data: new TextEncoder().encode(data) });
+        },
+        resize: (cols, rows) => worker.postMessage({ type: "resize", cols, rows }),
+      };
+    }
+    const reply = (id, value, transfer = []) => worker.postMessage({ type: "reply", id, ...value }, transfer);
+    worker.onmessage = async (event) => {
+      const m = event.data ?? {};
+      if (m.type === "stdout" || m.type === "stderr") write(m.type, m.data);
+      else if (m.type === "raw") raw = m.on;
+      else if (m.type === "exit") finish(m.code);
+      else if (m.type === "addKnownHost") {
+        const path = `${sshDir}/known_hosts`;
+        const text = await bash.fs.readFile(path).catch(() => "");
+        await bash.fs.writeFile(path, `${text}${text && !text.endsWith("\n") ? "\n" : ""}${m.line}\n`);
+      } else if (m.type === "resolve") {
+        try {
+          reply(m.id, await sshResolve(m.host));
+        } catch (err) {
+          reply(m.id, { error: String(err.message ?? err) });
+        }
+      } else if (m.type === "dial") {
+        try {
+          dialed = await sshDial(m.host, m.port, m.verbose ? verboseErr : () => {},
+            () => worker.postMessage({ type: "eof" }));
+          reply(m.id, { port: dialed.port }, [dialed.port]);
+        } catch (err) {
+          reply(m.id, { error: String(err.message ?? err) });
+        }
+      }
+    };
+    worker.postMessage({
+      type: "run",
+      execUrl: new URL("/wasm_exec.js", location.href).href,
+      wasmUrl: new URL("/ssh.wasm", location.href).href,
+      cfg: { argv: args, config, interactive, stdin, cols: term.cols, rows: term.rows },
+    });
+  });
 }
 
 function applyComputeState(state) {
@@ -2190,7 +2289,7 @@ function applyComputeState(state) {
         : "ready to request a VM",
       !ready ? "warn" : "ok");
   }
-  const render = JSON.stringify(contracts) + [...computeReleaseAsked].join() + shellSessionName +
+  const render = JSON.stringify(contracts) + [...computeReleaseAsked].join() +
     JSON.stringify((state.contractEvents ?? []).map((e) => [e.name, e.phase]));
   if (render === computeLastRender) return;
   computeLastRender = render;
@@ -2211,7 +2310,7 @@ function initComputeUI() {
 // The test peer needs no kcp, so it is wired before the page boots.
 if (sshTestPeer) {
   computeTestPeerEl.hidden = false;
-  computeTestPeerEl.addEventListener("click", () => void connectShell("testpeer"));
+  computeTestPeerEl.addEventListener("click", () => runInTerminal(`ssh ${sshCmd.TEST_PEER_HOST}`));
 }
 
 // --- ingress relay -------------------------------------------------------------
@@ -2341,7 +2440,13 @@ terminalPaneEl.addEventListener("drop", async (event) => {
 
 // --- input -----------------------------------------------------------------
 
+term.onResize(({ cols, rows }) => sshSession?.resize(cols, rows));
+
 term.onData((data) => {
+  if (sshSession) {
+    sshSession.key(data);
+    return;
+  }
   if (stdinMode) {
     if (data === "\u0003") {
       abortStdin();
@@ -2478,6 +2583,11 @@ document.getElementById("mobile-keys").addEventListener("click", (event) => {
   const action = event.target.closest("button")?.dataset.action;
   if (!action) return;
   term.focus();
+  if (sshSession) {
+    const keys = { "ctrl-c": "\u0003", "ctrl-d": "\u0004", enter: "\r", tab: "\t", up: "\u001b[A" };
+    if (keys[action]) sshSession.key(keys[action]);
+    return;
+  }
   if (action === "ctrl-c") {
     if (stdinMode) abortStdin();
     else cancelRunning();

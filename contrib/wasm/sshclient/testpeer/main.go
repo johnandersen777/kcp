@@ -309,6 +309,7 @@ func session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 	defer ch.Close()
 	var tty *os.File
 	var cols, rows uint32 = 80, 24
+	wantPTY := false
 	for req := range reqs {
 		switch req.Type {
 		case "pty-req":
@@ -317,35 +318,56 @@ func session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 				cols = binary.BigEndian.Uint32(req.Payload[4+n:])
 				rows = binary.BigEndian.Uint32(req.Payload[8+n:])
 			}
+			wantPTY = true
 			_ = req.Reply(true, nil)
 		case "window-change":
 			if len(req.Payload) >= 8 && tty != nil {
 				_ = pty.Setsize(tty, &pty.Winsize{Cols: uint16(binary.BigEndian.Uint32(req.Payload)), Rows: uint16(binary.BigEndian.Uint32(req.Payload[4:]))})
 				log.Printf("window-change %dx%d", binary.BigEndian.Uint32(req.Payload), binary.BigEndian.Uint32(req.Payload[4:]))
 			}
-		case "shell":
-			// A fixed command, never a user shell: a login shell's rc can
-			// auto-attach tmux and hand the browser a live session. It
-			// prints what the acceptance checks look for, then echoes.
+		case "shell", "exec":
+			// A fixed command, never a user shell or the requested command:
+			// a login shell's rc can auto-attach tmux and hand the browser a
+			// live session. It prints what the acceptance checks look for
+			// (an exec request's command only as data, via $TESTPEER_CMD),
+			// then echoes stdin.
+			requested := ""
+			if req.Type == "exec" && len(req.Payload) >= 4 {
+				requested = string(req.Payload[4:])
+			}
 			dir, err := os.MkdirTemp("", "testpeer-")
 			if err != nil {
 				_ = req.Reply(false, nil)
 				return
 			}
 			defer os.RemoveAll(dir)
-			cmd := exec.Command("/bin/sh", "-c", "id; uname -sm; stty size; exec cat")
+			script := `id; uname -sm; [ -t 0 ] && stty size; [ -n "$TESTPEER_CMD" ] && printf 'exec: %s\n' "$TESTPEER_CMD"; exec cat`
+			cmd := exec.Command("/bin/sh", "-c", script)
 			cmd.Dir = dir
-			cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + dir, "TERM=xterm-256color"}
-			f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
-			if err != nil {
-				_ = req.Reply(false, nil)
-				return
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + dir, "TERM=xterm-256color", "TESTPEER_CMD=" + requested}
+			var out io.Reader
+			if wantPTY {
+				f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+				if err != nil {
+					_ = req.Reply(false, nil)
+					return
+				}
+				tty = f
+				out = f
+				go func() { _, _ = io.Copy(f, ch) }()
+			} else {
+				cmd.Stdin = ch
+				cmd.Stderr = ch.Stderr()
+				pipe, err := cmd.StdoutPipe()
+				if err != nil || cmd.Start() != nil {
+					_ = req.Reply(false, nil)
+					return
+				}
+				out = pipe
 			}
-			tty = f
 			_ = req.Reply(true, nil)
-			go func() { _, _ = io.Copy(f, ch) }()
 			go func() {
-				_, _ = io.Copy(ch, f)
+				_, _ = io.Copy(ch, out)
 				code := 0
 				if err := cmd.Wait(); err != nil {
 					code = 1

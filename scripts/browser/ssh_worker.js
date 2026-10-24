@@ -1,50 +1,81 @@
 // Copyright 2026 The KCP Authors.
 // SPDX-License-Identifier: Apache-2.0
 
-// ssh_worker.js runs one x/crypto/ssh session (ssh.wasm, contrib/wasm/sshclient)
-// in a Web Worker. The page owns the RTCPeerConnection (workers lack it on
-// some browsers) and hands over a MessagePort that carries the datachannel's
-// raw bytes both ways, plus the non-extractable Ed25519 CryptoKey that signs
-// the SSH user auth.
+// ssh_worker.js runs one `ssh` invocation (ssh.wasm, contrib/wasm/sshclient)
+// in a Web Worker. Go asks for two things through the page: resolve(host)
+// (known_hosts text, the contract's public key, and the non-extractable
+// CryptoKey that signs) and dial(host, port) (a MessagePort carrying the
+// WebRTC datachannel's raw bytes; the page owns the RTCPeerConnection because
+// workers lack it on some browsers).
 //
-//   page -> {type:"start", execUrl, wasmUrl, port, key, cfg} | input | resize | eof
-//   page <- {type:"output", data} | status | exit | log
+//   page -> {type:"run", execUrl, wasmUrl, cfg} | input | stdinEOF | resize | eof | reply
+//   page <- {type:"resolve"|"dial", id, ...} | addKnownHost | stdout | stderr | raw | exit
 
 import { fetchWasm } from "./wasm_fetch.js";
 
+const pending = new Map();
+let nextID = 1;
+let handle = null;
+let key = null;
+let onEof = null;
 const queued = [];
-let session = null;
-self.onmessage = (event) => {
-  if (event.data?.type === "start") void start(event.data);
-  else if (session) handle(event.data);
-  else queued.push(event.data);
-};
 
-function handle(m) {
-  if (m.type === "input") session.input(m.data);
-  else if (m.type === "resize") session.resize(m.cols, m.rows);
-  else if (m.type === "eof") session.eof();
+function ask(message, transfer = []) {
+  const id = nextID++;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    self.postMessage({ ...message, id }, transfer);
+  });
 }
 
-async function start({ execUrl, wasmUrl, port, key, cfg }) {
+self.onmessage = (event) => {
+  const m = event.data ?? {};
+  if (m.type === "run") return void run(m);
+  if (m.type === "reply") {
+    const p = pending.get(m.id);
+    pending.delete(m.id);
+    if (m.error) p?.reject(new Error(m.error));
+    else p?.resolve(m);
+    return;
+  }
+  if (m.type === "eof") return onEof?.();
+  if (!handle) return queued.push(m);
+  if (m.type === "input") handle.input(m.data);
+  else if (m.type === "stdinEOF") handle.stdinEOF();
+  else if (m.type === "resize") handle.resize(m.cols, m.rows);
+};
+
+async function run({ execUrl, wasmUrl, cfg }) {
+  const post = (type) => (u8) => self.postMessage({ type, data: u8 }, [u8.buffer]);
   try {
     await import(execUrl);
     const go = new globalThis.Go();
     const [response] = await fetchWasm(wasmUrl);
     const { instance } = await WebAssembly.instantiateStreaming(response, go.importObject);
     go.run(instance);
-    if (typeof globalThis.sshStart !== "function") throw new Error("ssh.wasm did not register sshStart");
-    session = globalThis.sshStart({
+    handle = globalThis.sshRun({
       ...cfg,
-      send: (u8) => port.postMessage(u8.buffer, [u8.buffer]),
+      resolve: async (host, port) => {
+        const reply = await ask({ type: "resolve", host, port });
+        key = reply.key;
+        return { publicKey: reply.publicKey, knownHosts: reply.knownHosts };
+      },
+      dial: async (host, port, recv, eof, verbose) => {
+        const reply = await ask({ type: "dial", host, port, verbose });
+        reply.port.onmessage = (e) => recv(new Uint8Array(e.data));
+        onEof = eof;
+        return (u8) => reply.port.postMessage(u8.buffer, [u8.buffer]);
+      },
+      addKnownHost: (line) => self.postMessage({ type: "addKnownHost", line }),
       sign: async (data) => new Uint8Array(await crypto.subtle.sign("Ed25519", key, data)),
-      output: (u8) => self.postMessage({ type: "output", data: u8 }, [u8.buffer]),
-      status: (text) => self.postMessage({ type: "status", text }),
-      exit: (error) => self.postMessage({ type: "exit", error }),
+      stdout: post("stdout"),
+      stderr: post("stderr"),
+      raw: (on) => self.postMessage({ type: "raw", on }),
+      exit: (code) => self.postMessage({ type: "exit", code }),
     });
-    port.onmessage = (e) => session.recv(new Uint8Array(e.data));
-    for (const m of queued.splice(0)) handle(m);
+    for (const m of queued.splice(0)) self.onmessage({ data: m });
   } catch (err) {
-    self.postMessage({ type: "exit", error: String(err?.message ?? err) });
+    self.postMessage({ type: "stderr", data: new TextEncoder().encode(`ssh: ${err?.message ?? err}\n`) });
+    self.postMessage({ type: "exit", code: 255 });
   }
 }

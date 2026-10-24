@@ -3,16 +3,18 @@
 
 //go:build js && wasm
 
-// Command sshclient is a golang.org/x/crypto/ssh client for a browser Web
-// Worker (scripts/browser/ssh_worker.js). The transport is a WebRTC
-// datachannel owned by the page: bytes arrive through recv() and leave
-// through the send callback. The user key never enters Go: signing is a JS
-// callback over a non-extractable WebCrypto Ed25519 key. The host key must
-// match one of the pinned authorized_keys lines.
+// Command sshclient is the page's `ssh` command: OpenSSH-style argv and
+// ~/.ssh/config, known_hosts checking and golang.org/x/crypto/ssh, run in a
+// browser Web Worker (scripts/browser/ssh_worker.js). There is no TCP: the
+// only ProxyCommand is the built-in `kcp-webrtc %h %p`, whose bytes ride a
+// WebRTC datachannel the page opens. The user key never enters Go: signing is
+// a JS callback over a non-extractable WebCrypto Ed25519 key.
 //
-//	globalThis.sshStart({user, publicKey (32 raw bytes), hostKeys [lines],
-//	  cols, rows, send(u8), sign(u8) -> Promise<u8>, output(u8), status(text),
-//	  exit(text)}) -> {recv(u8), eof(), input(u8), resize(cols, rows), close()}
+//	globalThis.sshRun({argv, config, interactive, stdin, cols, rows,
+//	  resolve(host, port) -> Promise<{publicKey, knownHosts}>,
+//	  dial(host, port, recv(u8), eof(), verbose) -> Promise<send(u8)>,
+//	  addKnownHost(line), sign(u8) -> Promise<u8>, stdout(u8), stderr(u8),
+//	  raw(bool), exit(code)}) -> {input(u8), stdinEOF(), resize(cols, rows)}
 package main
 
 import (
@@ -22,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"syscall/js"
 	"time"
@@ -29,9 +32,14 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+const (
+	configPath     = "~/.ssh/config"
+	knownHostsPath = "~/.ssh/known_hosts"
+)
+
 func main() {
-	js.Global().Set("sshStart", js.FuncOf(func(_ js.Value, args []js.Value) any {
-		return start(args[0])
+	js.Global().Set("sshRun", js.FuncOf(func(_ js.Value, args []js.Value) any {
+		return run(args[0])
 	}))
 	select {}
 }
@@ -61,7 +69,11 @@ func await(p js.Value) (js.Value, error) {
 		return nil
 	})
 	catch = js.FuncOf(func(_ js.Value, a []js.Value) any {
-		ch <- result{err: errors.New(a[0].Call("toString").String())}
+		msg := a[0].Get("message")
+		if msg.Type() != js.TypeString {
+			msg = a[0].Call("toString")
+		}
+		ch <- result{err: errors.New(msg.String())}
 		return nil
 	})
 	p.Call("then", then).Call("catch", catch)
@@ -71,9 +83,10 @@ func await(p js.Value) (js.Value, error) {
 	return r.v, r.err
 }
 
-// dcConn is a net.Conn over the page's datachannel. recv runs in a JS
-// callback, so it only appends and signals; it never blocks.
-type dcConn struct {
+// pipe is a net.Conn over bytes JS pushes in (the datachannel, or the
+// terminal's stdin). recv runs in a JS callback, so it only appends and
+// signals; it never blocks, and bytes keep their order.
+type pipe struct {
 	send   js.Value
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -81,20 +94,20 @@ type dcConn struct {
 	closed bool
 }
 
-func newConn(send js.Value) *dcConn {
-	c := &dcConn{send: send}
+func newPipe() *pipe {
+	c := &pipe{send: js.Undefined()}
 	c.cond = sync.NewCond(&c.mu)
 	return c
 }
 
-func (c *dcConn) recv(b []byte) {
+func (c *pipe) recv(b []byte) {
 	c.mu.Lock()
 	c.buf = append(c.buf, b...)
 	c.mu.Unlock()
 	c.cond.Broadcast()
 }
 
-func (c *dcConn) Read(p []byte) (int, error) {
+func (c *pipe) Read(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for len(c.buf) == 0 && !c.closed {
@@ -108,7 +121,7 @@ func (c *dcConn) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func (c *dcConn) Write(p []byte) (int, error) {
+func (c *pipe) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	closed := c.closed
 	c.mu.Unlock()
@@ -119,7 +132,7 @@ func (c *dcConn) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (c *dcConn) Close() error {
+func (c *pipe) Close() error {
 	c.mu.Lock()
 	c.closed = true
 	c.mu.Unlock()
@@ -132,11 +145,11 @@ type dcAddr struct{}
 func (dcAddr) Network() string { return "webrtc" }
 func (dcAddr) String() string  { return "datachannel" }
 
-func (c *dcConn) LocalAddr() net.Addr              { return dcAddr{} }
-func (c *dcConn) RemoteAddr() net.Addr             { return dcAddr{} }
-func (c *dcConn) SetDeadline(time.Time) error      { return nil }
-func (c *dcConn) SetReadDeadline(time.Time) error  { return nil }
-func (c *dcConn) SetWriteDeadline(time.Time) error { return nil }
+func (c *pipe) LocalAddr() net.Addr              { return dcAddr{} }
+func (c *pipe) RemoteAddr() net.Addr             { return dcAddr{} }
+func (c *pipe) SetDeadline(time.Time) error      { return nil }
+func (c *pipe) SetReadDeadline(time.Time) error  { return nil }
+func (c *pipe) SetWriteDeadline(time.Time) error { return nil }
 
 // webCryptoSigner signs with the page's non-extractable Ed25519 CryptoKey.
 type webCryptoSigner struct {
@@ -154,36 +167,6 @@ func (s webCryptoSigner) Sign(_ io.Reader, data []byte) (*ssh.Signature, error) 
 	return &ssh.Signature{Format: ssh.KeyAlgoED25519, Blob: bytesOf(js.Global().Get("Uint8Array").New(v))}, nil
 }
 
-// pinned parses authorized_keys lines into a host key callback and the
-// algorithms to negotiate, so the server presents a key we can check.
-func pinned(lines js.Value) (ssh.HostKeyCallback, []string, error) {
-	var keys []ssh.PublicKey
-	var algos []string
-	for i := 0; i < lines.Length(); i++ {
-		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(lines.Index(i).String()))
-		if err != nil {
-			return nil, nil, fmt.Errorf("host key %d: %w", i, err)
-		}
-		keys = append(keys, key)
-		if key.Type() == ssh.KeyAlgoRSA {
-			algos = append(algos, ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256)
-		} else {
-			algos = append(algos, key.Type())
-		}
-	}
-	if len(keys) == 0 {
-		return nil, nil, errors.New("no pinned host keys")
-	}
-	return func(_ string, _ net.Addr, presented ssh.PublicKey) error {
-		for _, key := range keys {
-			if bytes.Equal(key.Marshal(), presented.Marshal()) {
-				return nil
-			}
-		}
-		return fmt.Errorf("host key %s is not pinned", ssh.FingerprintSHA256(presented))
-	}, algos, nil
-}
-
 type jsWriter struct{ fn js.Value }
 
 func (w jsWriter) Write(p []byte) (int, error) {
@@ -191,33 +174,25 @@ func (w jsWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func start(cfg js.Value) any {
-	conn := newConn(cfg.Get("send"))
-	stdin := newConn(js.Undefined())
+var errHostKey = errors.New("host key verification failed")
+
+func run(cfg js.Value) any {
+	stdin := newPipe()
 	var (
 		mu      sync.Mutex
 		session *ssh.Session
-		client  *ssh.Client
 	)
 	go func() {
-		err := run(cfg, conn, stdin, func(c *ssh.Client, s *ssh.Session) {
+		code := sshMain(cfg, stdin, func(s *ssh.Session) {
 			mu.Lock()
-			client, session = c, s
+			session = s
 			mu.Unlock()
 		})
-		msg := ""
-		if err != nil {
-			msg = err.Error()
-		}
-		conn.Close()
-		stdin.Close()
-		cfg.Get("exit").Invoke(msg)
+		cfg.Get("exit").Invoke(code)
 	}()
 	handle := js.Global().Get("Object").New()
-	handle.Set("recv", js.FuncOf(func(_ js.Value, a []js.Value) any { conn.recv(bytesOf(a[0])); return nil }))
-	handle.Set("eof", js.FuncOf(func(js.Value, []js.Value) any { conn.Close(); return nil }))
-	// stdin is a dcConn too: input only appends, so keystrokes keep their order.
 	handle.Set("input", js.FuncOf(func(_ js.Value, a []js.Value) any { stdin.recv(bytesOf(a[0])); return nil }))
+	handle.Set("stdinEOF", js.FuncOf(func(js.Value, []js.Value) any { stdin.Close(); return nil }))
 	handle.Set("resize", js.FuncOf(func(_ js.Value, a []js.Value) any {
 		cols, rows := a[0].Int(), a[1].Int()
 		mu.Lock()
@@ -228,57 +203,153 @@ func start(cfg js.Value) any {
 		}
 		return nil
 	}))
-	handle.Set("close", js.FuncOf(func(js.Value, []js.Value) any {
-		mu.Lock()
-		c := client
-		mu.Unlock()
-		if c != nil {
-			go c.Close()
-		}
-		conn.Close()
-		return nil
-	}))
 	return handle
 }
 
-func run(cfg js.Value, conn, stdin *dcConn, ready func(*ssh.Client, *ssh.Session)) error {
-	status := func(s string) { cfg.Get("status").Invoke(s) }
-	hostKey, algos, err := pinned(cfg.Get("hostKeys"))
-	if err != nil {
-		return err
+func strings2(v js.Value) []string {
+	out := make([]string, v.Length())
+	for i := range out {
+		out[i] = v.Index(i).String()
 	}
-	pub, err := ssh.NewPublicKey(ed25519.PublicKey(bytesOf(cfg.Get("publicKey"))))
-	if err != nil {
-		return err
+	return out
+}
+
+// sshMain is ssh(1): it returns the remote exit status, or 255 for its own
+// errors, as OpenSSH does.
+func sshMain(cfg js.Value, stdin *pipe, ready func(*ssh.Session)) int {
+	stderr := jsWriter{cfg.Get("stderr")}
+	fail := func(format string, a ...any) int {
+		fmt.Fprintf(stderr, "ssh: "+format+"\n", a...)
+		return 255
 	}
-	signer := webCryptoSigner{pub: pub, sign: cfg.Get("sign")}
-	status("ssh handshake")
-	sshConn, chans, reqs, err := ssh.NewClientConn(conn, "guest", &ssh.ClientConfig{
-		User:              cfg.Get("user").String(),
-		Auth:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
+	o, err := ParseArgs(strings2(cfg.Get("argv")))
+	if err != nil {
+		return fail("%v", err)
+	}
+	debug := func(format string, a ...any) {
+		if o.Verbose > 0 {
+			fmt.Fprintf(stderr, "debug1: "+format+"\n", a...)
+		}
+	}
+	debug("Reading configuration data %s", configPath)
+	t, err := Resolve(o, ParseConfig(cfg.Get("config").String()))
+	if err != nil {
+		return fail("%v", err)
+	}
+	host, port, err := ProxyTarget(t)
+	if err != nil {
+		return fail("%v", err)
+	}
+	debug("Executing proxy command: %s", t.ProxyCommand)
+	res, err := await(cfg.Get("resolve").Invoke(host, port))
+	if err != nil {
+		return fail("Could not resolve hostname %s: %v", host, err)
+	}
+	knownHosts := res.Get("knownHosts").String()
+	pub, err := ssh.NewPublicKey(ed25519.PublicKey(bytesOf(res.Get("publicKey"))))
+	if err != nil {
+		return fail("identity: %v", err)
+	}
+
+	conn := newPipe()
+	recv := js.FuncOf(func(_ js.Value, a []js.Value) any { conn.recv(bytesOf(a[0])); return nil })
+	eof := js.FuncOf(func(js.Value, []js.Value) any { conn.Close(); return nil })
+	defer recv.Release()
+	defer eof.Release()
+	send, err := await(cfg.Get("dial").Invoke(host, port, recv, eof, o.Verbose > 0))
+	if err != nil {
+		return fail("kcp-webrtc: connect to host %s port %d: %v", host, port, err)
+	}
+	conn.send = send
+	defer conn.Close()
+
+	hostKey := func(_ string, _ net.Addr, key ssh.PublicKey) error {
+		debug("Server host key: %s %s", key.Type(), ssh.FingerprintSHA256(key))
+		status, line := CheckKnownHosts(knownHosts, t.HostName, t.Port, key)
+		switch {
+		case status == hostKnown:
+			debug("Host '%s' is known and matches the %s host key.", t.HostName, keyLabel(key.Type()))
+			debug("Found key in %s:%d", knownHostsPath, line)
+			return nil
+		case status == hostChanged:
+			io.WriteString(stderr, changedHostKeyMessage(t.Alias, key, knownHostsPath, line))
+			return errHostKey
+		case t.Strict == "yes":
+			io.WriteString(stderr, unknownHostKeyMessage(t.Alias, key))
+			return errHostKey
+		case t.Strict == "accept-new":
+			entry := knownHostsName(t.HostName, t.Port) + " " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
+			cfg.Get("addKnownHost").Invoke(entry)
+			fmt.Fprintf(stderr, "Warning: Permanently added '%s' (%s) to the list of known hosts.\n", t.HostName, keyLabel(key.Type()))
+			return nil
+		default:
+			fmt.Fprintf(stderr, "Warning: %s host key for %s is not verified (StrictHostKeyChecking=no).\n", keyLabel(key.Type()), t.HostName)
+			return nil
+		}
+	}
+	debug("Will attempt key: %s %s (WebCrypto, non-extractable)", keyLabel(pub.Type()), ssh.FingerprintSHA256(pub))
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, knownHostsName(t.HostName, t.Port), &ssh.ClientConfig{
+		User:              t.User,
+		Auth:              []ssh.AuthMethod{ssh.PublicKeys(webCryptoSigner{pub: pub, sign: cfg.Get("sign")})},
 		HostKeyCallback:   hostKey,
-		HostKeyAlgorithms: algos,
+		HostKeyAlgorithms: knownTypes(knownHosts, t.HostName, t.Port),
 		Timeout:           30 * time.Second,
 	})
-	if err != nil {
-		return err
+	switch {
+	case errors.Is(err, errHostKey):
+		return 255
+	case err != nil && strings.Contains(err.Error(), "unable to authenticate"):
+		fmt.Fprintf(stderr, "%s@%s: Permission denied (publickey).\n", t.User, t.Alias)
+		return 255
+	case err != nil:
+		return fail("%v", err)
 	}
+	debug("Authentication succeeded (publickey).")
 	client := ssh.NewClient(sshConn, chans, reqs)
 	defer client.Close()
 	session, err := client.NewSession()
 	if err != nil {
-		return err
+		return fail("%v", err)
 	}
-	out := jsWriter{cfg.Get("output")}
-	session.Stdin, session.Stdout, session.Stderr = stdin, out, out
-	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
-	if err := session.RequestPty("xterm-256color", cfg.Get("rows").Int(), cfg.Get("cols").Int(), modes); err != nil {
-		return err
+	session.Stdout = jsWriter{cfg.Get("stdout")}
+	session.Stderr = stderr
+
+	interactive := cfg.Get("interactive").Truthy()
+	pty := o.TTY == 1 || (o.TTY == 0 && len(o.Command) == 0 && interactive)
+	if len(o.Command) == 0 && !interactive && o.TTY == 0 {
+		io.WriteString(stderr, "Pseudo-terminal will not be allocated because stdin is not a terminal.\n")
 	}
-	if err := session.Shell(); err != nil {
-		return err
+	if interactive {
+		session.Stdin = stdin
+	} else if in := cfg.Get("stdin"); in.Truthy() {
+		session.Stdin = bytes.NewReader(bytesOf(in))
+	} else {
+		session.Stdin = bytes.NewReader(nil)
 	}
-	ready(client, session)
-	status("shell open")
-	return session.Wait()
+	if pty {
+		modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
+		if err := session.RequestPty("xterm-256color", cfg.Get("rows").Int(), cfg.Get("cols").Int(), modes); err != nil {
+			return fail("PTY allocation request failed: %v", err)
+		}
+		cfg.Get("raw").Invoke(true)
+	}
+	ready(session)
+	if len(o.Command) == 0 {
+		err = session.Shell()
+	} else {
+		err = session.Start(strings.Join(o.Command, " "))
+	}
+	if err != nil {
+		return fail("%v", err)
+	}
+	err = session.Wait()
+	var exit *ssh.ExitError
+	switch {
+	case err == nil:
+		return 0
+	case errors.As(err, &exit):
+		return exit.ExitStatus()
+	default:
+		return 255
+	}
 }
