@@ -46,7 +46,7 @@ func Create(c storagebackend.ConfigForResource, newFunc, newListFunc func() runt
 		return nil, nil, fmt.Errorf("%s is no longer a supported storage backend", c.Type)
 	case storagebackend.StorageTypeUnset, storagebackend.StorageTypeETCD3:
 		if name, ok := memoryStoreName(c.Config); ok {
-			store, err := memstore.Prefixed(memstore.Shared(name), c.Prefix, resourcePrefix, newFunc)
+			store, err := memstore.Prefixed(memstore.Shared(name), c.Prefix, resourcePrefix, newFunc, c.Codec)
 			if err != nil {
 				return nil, nil, err
 			}

@@ -367,11 +367,11 @@ across a Deno restart.
   events rather than a replay.
 * etcd-only components (object-count scanner, logical-cluster migration dump
   and controller) are disabled when the backend is `memory://`.
-* Reads are returned as stored; unlike etcd3, the backend does not decode
-  through the CRD codec, so structural-schema defaults that only exist on
-  decode are not re-applied. In practice this means creating a Workspace
-  without the `tenancy.kcp.io/phase` label set can trip kcp's committer
-  (which expects the defaulted phase); setting that label at creation works.
+* Reads round-trip each object through the resource's storage codec, like the
+  etcd3 store does, so structural-schema defaults that only exist on decode
+  (for example a Workspace's default `.status.phase`) are re-applied. This
+  makes creating a Workspace without pre-setting the `tenancy.kcp.io/phase`
+  label work; the round-trip costs one encode/decode per read.
 * The real-kcp integration is verified natively. The js/wasm real-server build
   (`kcp-real.wasm`) compiles the control plane and the memory backend, but its
   entrypoint does not yet install a listener/HTTP bridge; Go's wasm ports have

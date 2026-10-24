@@ -43,8 +43,13 @@ func (r *metaDataReconciler) reconcile(ctx context.Context, workspace *tenancyv1
 	changed := false
 
 	if workspace.Status.Phase == "" {
+		// The storage default for .status.phase is normally applied on read.
+		// If it is missing (a storage backend that does not decode through the
+		// resource codec), initialize it in its own reconcile: the committer
+		// rejects a status and a metadata change in the same pass and panics.
+		// The label is then set on the next iteration.
 		workspace.Status.Phase = corev1alpha1.LogicalClusterPhaseScheduling
-		changed = true
+		return reconcileStatusStopAndRequeue, nil
 	}
 
 	expected := string(workspace.Status.Phase)

@@ -234,3 +234,18 @@ func TestReconcileMetadata(t *testing.T) {
 		})
 	}
 }
+
+// TestReconcileMetadataInitializesPhase verifies the two-phase commit for a
+// Workspace whose .status.phase is missing: the phase is committed on its own
+// before any metadata (the label) changes, so the committer never sees a status
+// and a metadata change in the same reconcile.
+func TestReconcileMetadataInitializesPhase(t *testing.T) {
+	t.Parallel()
+
+	workspace := &tenancyv1alpha1.Workspace{}
+	status, err := (&metaDataReconciler{}).reconcile(context.Background(), workspace)
+	require.NoError(t, err)
+	require.Equal(t, reconcileStatusStopAndRequeue, status)
+	require.Equal(t, corev1alpha1.LogicalClusterPhaseScheduling, workspace.Status.Phase)
+	require.Nil(t, workspace.Labels, "labels must not change in the same reconcile as the status")
+}

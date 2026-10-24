@@ -22,9 +22,11 @@ import (
 	"path"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	kstorage "k8s.io/apiserver/pkg/storage"
+	"k8s.io/klog/v2"
 )
 
 // prefixedStore mirrors the etcd3 store's key layout: the registry passes
@@ -35,6 +37,7 @@ type prefixedStore struct {
 	pathPrefix     string
 	resourcePrefix string
 	newFunc        func() runtime.Object
+	codec          runtime.Codec
 }
 
 var _ kstorage.Interface = (*prefixedStore)(nil)
@@ -44,7 +47,15 @@ var _ kstorage.Interface = (*prefixedStore)(nil)
 // All resources backed by the same Store share resource versions and watches.
 // newFunc is used to build the object carried by the initial-events-end
 // bookmark of watchlist requests.
-func Prefixed(store *Store, prefix, resourcePrefix string, newFunc func() runtime.Object) (kstorage.Interface, error) {
+//
+// codec is the resource's storage codec. The etcd3 store encodes every object
+// with it on write and decodes it again on read, which re-applies
+// structural-schema defaults that the API server deliberately does not persist
+// (for example the default .status.phase of a Workspace whose status
+// subresource strips status on create). The in-memory store keeps
+// runtime.Objects instead of encoded bytes, so it performs the same round-trip
+// on the read paths to remain behaviourally equivalent.
+func Prefixed(store *Store, prefix, resourcePrefix string, newFunc func() runtime.Object, codec runtime.Codec) (kstorage.Interface, error) {
 	pathPrefix := path.Join("/", prefix)
 	if !strings.HasSuffix(pathPrefix, "/") {
 		pathPrefix += "/"
@@ -63,7 +74,27 @@ func Prefixed(store *Store, prefix, resourcePrefix string, newFunc func() runtim
 		pathPrefix:     pathPrefix,
 		resourcePrefix: resourcePrefix,
 		newFunc:        newFunc,
+		codec:          codec,
 	}, nil
+}
+
+// applyDefaults round-trips obj through the resource codec so that the
+// structural-schema defaults the etcd3 store re-applies on decode are also
+// present for the in-memory backend. It returns obj unchanged when no codec is
+// configured (the simplified Fetch-only wasm server).
+func (p *prefixedStore) applyDefaults(obj runtime.Object) (runtime.Object, error) {
+	if p.codec == nil || obj == nil {
+		return obj, nil
+	}
+	data, err := runtime.Encode(p.codec, obj)
+	if err != nil {
+		return nil, fmt.Errorf("encoding %T: %w", obj, err)
+	}
+	decoded, _, err := p.codec.Decode(data, nil, obj)
+	if err != nil {
+		return nil, fmt.Errorf("decoding %T: %w", obj, err)
+	}
+	return decoded, nil
 }
 
 func (p *prefixedStore) key(key string, recursive bool) (string, error) {
@@ -81,7 +112,19 @@ func (p *prefixedStore) Create(ctx context.Context, key string, obj, out runtime
 	if err != nil {
 		return err
 	}
-	return p.store.Create(ctx, full, obj, out, ttl)
+	if err := p.store.Create(ctx, full, obj, out, ttl); err != nil {
+		return err
+	}
+	if out != nil {
+		decoded, err := p.applyDefaults(out)
+		if err != nil {
+			return err
+		}
+		if decoded != out {
+			return copyObject(decoded, out)
+		}
+	}
+	return nil
 }
 
 func (p *prefixedStore) Delete(
@@ -97,7 +140,15 @@ func (p *prefixedStore) Delete(
 	if err != nil {
 		return err
 	}
-	return p.store.Delete(ctx, full, out, preconditions, validateDeletion, cachedExistingObject, opts)
+	if err := p.store.Delete(ctx, full, out, preconditions, validateDeletion, cachedExistingObject, opts); err != nil {
+		return err
+	}
+	if out != nil {
+		if _, err := p.applyDefaults(out); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p *prefixedStore) Watch(ctx context.Context, key string, opts kstorage.ListOptions) (watch.Interface, error) {
@@ -105,7 +156,27 @@ func (p *prefixedStore) Watch(ctx context.Context, key string, opts kstorage.Lis
 	if err != nil {
 		return nil, err
 	}
-	return p.store.watch(ctx, full, opts, p.newFunc)
+	w, err := p.store.watch(ctx, full, opts, p.newFunc)
+	if err != nil {
+		return nil, err
+	}
+	return watch.Filter(w, func(in watch.Event) (watch.Event, bool) {
+		// Bookmarks and errors are not resource objects (bookmarks are built
+		// from newFunc() and have no kind), so there is nothing to default.
+		if in.Type == watch.Bookmark || in.Type == watch.Error || in.Object == nil {
+			return in, true
+		}
+		decoded, err := p.applyDefaults(in.Object)
+		if err != nil {
+			// The object came out of the codec ourselves, so a failure here
+			// means the codec rejects its own encoding; surfacing the event
+			// undecoded is better than silently dropping a watch update.
+			klog.FromContext(ctx).Error(err, "failed to apply defaults to watch event", "type", in.Type)
+			return in, true
+		}
+		in.Object = decoded
+		return in, true
+	}), nil
 }
 
 func (p *prefixedStore) Get(ctx context.Context, key string, opts kstorage.GetOptions, objPtr runtime.Object) error {
@@ -113,7 +184,17 @@ func (p *prefixedStore) Get(ctx context.Context, key string, opts kstorage.GetOp
 	if err != nil {
 		return err
 	}
-	return p.store.Get(ctx, full, opts, objPtr)
+	if err := p.store.Get(ctx, full, opts, objPtr); err != nil {
+		return err
+	}
+	decoded, err := p.applyDefaults(objPtr)
+	if err != nil {
+		return err
+	}
+	if decoded != objPtr {
+		return copyObject(decoded, objPtr)
+	}
+	return nil
 }
 
 func (p *prefixedStore) GetList(ctx context.Context, key string, opts kstorage.ListOptions, listObj runtime.Object) error {
@@ -121,7 +202,21 @@ func (p *prefixedStore) GetList(ctx context.Context, key string, opts kstorage.L
 	if err != nil {
 		return err
 	}
-	return p.store.GetList(ctx, full, opts, listObj)
+	if err := p.store.GetList(ctx, full, opts, listObj); err != nil {
+		return err
+	}
+	items, err := meta.ExtractList(listObj)
+	if err != nil {
+		return err
+	}
+	for i, item := range items {
+		decoded, err := p.applyDefaults(item)
+		if err != nil {
+			return err
+		}
+		items[i] = decoded
+	}
+	return meta.SetList(listObj, items)
 }
 
 func (p *prefixedStore) GuaranteedUpdate(
@@ -137,7 +232,29 @@ func (p *prefixedStore) GuaranteedUpdate(
 	if err != nil {
 		return err
 	}
-	return p.store.GuaranteedUpdate(ctx, full, destination, ignoreNotFound, preconditions, tryUpdate, cachedExistingObject)
+	// Re-apply defaults to the object handed to the update function, exactly
+	// as the etcd3 store does when it decodes the stored value.
+	update := kstorage.UpdateFunc(func(existing runtime.Object, res kstorage.ResponseMeta) (runtime.Object, *uint64, error) {
+		decoded, err := p.applyDefaults(existing)
+		if err != nil {
+			return nil, nil, err
+		}
+		if decoded != existing {
+			if err := copyObject(decoded, existing); err != nil {
+				return nil, nil, err
+			}
+		}
+		return tryUpdate(existing, res)
+	})
+	if err := p.store.GuaranteedUpdate(ctx, full, destination, ignoreNotFound, preconditions, update, cachedExistingObject); err != nil {
+		return err
+	}
+	if destination != nil {
+		if _, err := p.applyDefaults(destination); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p *prefixedStore) Stats(ctx context.Context) (kstorage.Stats, error) {

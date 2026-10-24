@@ -130,5 +130,31 @@ if kubectl get fetch demo >/dev/null 2>&1; then
   fail "Fetch still exists after delete"
 fi
 
+echo "== creating a Workspace without pre-setting tenancy.kcp.io/phase =="
+# The status subresource drops .status.phase on create. The memory backend
+# must re-apply the CRD default when it reads the object back, just like the
+# etcd3 store's codec does; otherwise the workspace controller's committer
+# panics with "spec and status changed in same reconcile iteration".
+kubectl apply -f - <<'EOF'
+apiVersion: tenancy.kcp.io/v1alpha1
+kind: Workspace
+metadata:
+  name: no-phase-label
+spec:
+  type:
+    name: universal
+    path: root
+EOF
+
+workspace_state=""
+for _ in $(seq 1 240); do
+  kill -0 "${server_pid}" 2>/dev/null || fail "kcp exited after creating a Workspace"
+  workspace_state="$(kubectl get workspace no-phase-label -o jsonpath='{.status.phase}|{.metadata.labels.tenancy\.kcp\.io/phase}' 2>/dev/null || true)"
+  [[ "${workspace_state}" == "Ready|Ready" ]] && break
+  sleep 0.5
+done
+[[ "${workspace_state}" == "Ready|Ready" ]] || fail "Workspace phase|label = '${workspace_state}', want 'Ready|Ready'"
+kubectl get workspace no-phase-label -o yaml
+
 echo
-echo "PASS: kcp's generic apiserver bootstrapped and served CRDs/CRs from memory://main (no etcd)."
+echo "PASS: kcp's generic apiserver bootstrapped, served CRDs/CRs from memory://main, and defaulted a Workspace created without tenancy.kcp.io/phase (no etcd)."
