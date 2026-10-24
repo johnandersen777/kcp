@@ -60,25 +60,50 @@ type Contract struct {
 	SecretsFetchedAt string    `json:"secretsFetchedAt,omitempty"`
 	Release          bool      `json:"release,omitempty"`
 	Networks         []Network `json:"networks,omitempty"`
+	// HostKeys are status.contract.hostKeys as authorized_keys lines, the
+	// pins for the page's WebRTC SSH client.
+	HostKeys []string `json:"hostKeys,omitempty"`
 }
 
 // Network is one tagged guest address from status.contract.networks (plan
-// 0032), e.g. the opentunnel URL of the "wootty" tunnel.
+// 0032), e.g. the opentunnel URL of a tunnel; kind webrtc (plan 0034) makes
+// the address the guest agent's DTLS fingerprint.
 type Network struct {
 	Tag     string `json:"tag"`
+	Kind    string `json:"kind,omitempty"`
 	Address string `json:"address"`
 }
 
+// ContractEvent is a plan 0034 guest event: a publicKey or a sealed
+// signalWebRTC. Only public material: keys and age ciphertext.
+type ContractEvent struct {
+	Name       string `json:"name"`
+	Contract   string `json:"contract"`
+	Direction  string `json:"direction,omitempty"`
+	NSID       string `json:"nsid"`
+	Kind       string `json:"kind,omitempty"`
+	Tag        string `json:"tag,omitempty"`
+	Key        string `json:"key,omitempty"`
+	Ciphertext string `json:"ciphertext,omitempty"`
+	Phase      string `json:"phase,omitempty"`
+	CreatedAt  string `json:"createdAt,omitempty"`
+}
+
+// contractEventGVR is defined here until the socialweb api module this
+// build pins exports it (plan 0034 W1-API).
+var contractEventGVR = schema.GroupVersionResource{Group: "socialweb.computer", Version: "v1alpha1", Resource: "contractevents"}
+
 // State is a full, idempotent UI snapshot.
 type State struct {
-	Seq             int64       `json:"seq"`
-	TS              int64       `json:"ts,omitempty"`
-	MarketRequester *Resource   `json:"marketRequester,omitempty"`
-	MarketIdentity  *Resource   `json:"marketIdentity,omitempty"`
-	Requester       *Resource   `json:"requester,omitempty"`
-	Exposures       []Resource  `json:"exposures,omitempty"`
-	Contracts       []Contract  `json:"contracts,omitempty"`
-	CRDs            []string    `json:"crds,omitempty"`
+	Seq             int64           `json:"seq"`
+	TS              int64           `json:"ts,omitempty"`
+	MarketRequester *Resource       `json:"marketRequester,omitempty"`
+	MarketIdentity  *Resource       `json:"marketIdentity,omitempty"`
+	Requester       *Resource       `json:"requester,omitempty"`
+	Exposures       []Resource      `json:"exposures,omitempty"`
+	Contracts       []Contract      `json:"contracts,omitempty"`
+	ContractEvents  []ContractEvent `json:"contractEvents,omitempty"`
+	CRDs            []string        `json:"crds,omitempty"`
 }
 
 // Feed watches all browser-relevant resources and calls Publish with each
@@ -88,12 +113,12 @@ type Feed struct {
 
 	informers map[schema.GroupVersionResource]cache.SharedIndexInformer
 
-	mu       sync.Mutex
-	timer    *time.Timer
-	last     string
-	seq      int64
-	publish  func([]byte)
-	started  bool
+	mu      sync.Mutex
+	timer   *time.Timer
+	last    string
+	seq     int64
+	publish func([]byte)
+	started bool
 }
 
 // Start begins the informers and waits for their initial cache sync. publish is
@@ -113,14 +138,7 @@ func Start(ctx context.Context, cfg *rest.Config, publish func([]byte)) error {
 	}
 	f := &Feed{client: client, publish: publish, informers: map[schema.GroupVersionResource]cache.SharedIndexInformer{}}
 	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(client, 0, metav1.NamespaceAll, nil)
-	for _, gvr := range []schema.GroupVersionResource{
-		v1alpha1.MarketRequesterGVR,
-		v1alpha1.MarketIdentityGVR,
-		v1alpha1.RequesterGVR,
-		v1alpha1.ComputeContractGVR,
-		exposurev1alpha1.ExposureGVR,
-		crdGVR,
-	} {
+	watch := func(gvr schema.GroupVersionResource) error {
 		informer := factory.ForResource(gvr).Informer()
 		_, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc:    func(any) { f.changed() },
@@ -130,10 +148,32 @@ func Start(ctx context.Context, cfg *rest.Config, publish func([]byte)) error {
 		if err != nil {
 			return err
 		}
+		f.mu.Lock()
 		f.informers[gvr] = informer
+		f.mu.Unlock()
+		return nil
+	}
+	for _, gvr := range []schema.GroupVersionResource{
+		v1alpha1.MarketRequesterGVR,
+		v1alpha1.MarketIdentityGVR,
+		v1alpha1.RequesterGVR,
+		v1alpha1.ComputeContractGVR,
+		exposurev1alpha1.ExposureGVR,
+		crdGVR,
+	} {
+		if err := watch(gvr); err != nil {
+			return err
+		}
 	}
 	factory.Start(ctx.Done())
 	factory.WaitForCacheSync(ctx.Done())
+	// ContractEvent is newer than some served manifests: it starts after the
+	// initial sync and is never waited on, so a kcp without the API still
+	// boots; its reflector lists again with backoff until the API appears.
+	if err := watch(contractEventGVR); err != nil {
+		return err
+	}
+	factory.Start(ctx.Done())
 	f.changed()
 	return nil
 }
@@ -170,7 +210,9 @@ func (f *Feed) flush() {
 }
 
 func (f *Feed) objects(gvr schema.GroupVersionResource) []*unstructured.Unstructured {
+	f.mu.Lock()
 	informer, ok := f.informers[gvr]
+	f.mu.Unlock()
 	if !ok || informer.GetStore() == nil {
 		return nil
 	}
@@ -197,6 +239,10 @@ func (f *Feed) build() State {
 		state.Contracts = append(state.Contracts, contract(u))
 	}
 	sort.Slice(state.Contracts, func(i, j int) bool { return state.Contracts[i].Name < state.Contracts[j].Name })
+	for _, u := range f.objects(contractEventGVR) {
+		state.ContractEvents = append(state.ContractEvents, contractEvent(u))
+	}
+	sort.Slice(state.ContractEvents, func(i, j int) bool { return state.ContractEvents[i].Name < state.ContractEvents[j].Name })
 	for _, u := range f.objects(crdGVR) {
 		state.CRDs = append(state.CRDs, u.GetName())
 	}
@@ -244,12 +290,38 @@ func contract(u *unstructured.Unstructured) Contract {
 	for _, raw := range networks {
 		n, _ := raw.(map[string]any)
 		tag, _ := n["tag"].(string)
+		kind, _ := n["kind"].(string)
 		address, _ := n["address"].(string)
 		if tag != "" && address != "" {
-			c.Networks = append(c.Networks, Network{Tag: tag, Address: address})
+			c.Networks = append(c.Networks, Network{Tag: tag, Kind: kind, Address: address})
+		}
+	}
+	keys, _, _ := unstructured.NestedSlice(u.Object, "status", "contract", "hostKeys", "keys")
+	for _, raw := range keys {
+		k, _ := raw.(map[string]any)
+		typ, _ := k["type"].(string)
+		pub, _ := k["publicKey"].(string)
+		if typ != "" && pub != "" {
+			c.HostKeys = append(c.HostKeys, typ+" "+pub)
 		}
 	}
 	return c
+}
+
+func contractEvent(u *unstructured.Unstructured) ContractEvent {
+	e := ContractEvent{Name: u.GetName(), CreatedAt: u.GetCreationTimestamp().UTC().Format(time.RFC3339)}
+	e.Contract, _, _ = unstructured.NestedString(u.Object, "spec", "contractRef", "name")
+	e.Direction, _, _ = unstructured.NestedString(u.Object, "spec", "direction")
+	e.NSID, _, _ = unstructured.NestedString(u.Object, "spec", "nsid")
+	e.Kind, _, _ = unstructured.NestedString(u.Object, "spec", "kind")
+	e.Tag, _, _ = unstructured.NestedString(u.Object, "spec", "tag")
+	e.Key, _, _ = unstructured.NestedString(u.Object, "spec", "key")
+	e.Phase, _, _ = unstructured.NestedString(u.Object, "status", "phase")
+	// Only inbound ciphertext is for the page; outbound ones are its own.
+	if e.Direction == "inbound" {
+		e.Ciphertext, _, _ = unstructured.NestedString(u.Object, "spec", "ciphertext")
+	}
+	return e
 }
 
 // identityResource is requesterResource plus the identity-only status fields.

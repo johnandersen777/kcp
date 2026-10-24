@@ -142,8 +142,12 @@ build-goat-wasm: ## Build bluesky-social/goat for js/wasm (stock sources + indig
 build-yq-wasm: ## Build mikefarah/yq for js/wasm (stock sources)
 	./scripts/build-yq-wasm.sh
 
+.PHONY: build-sshclient-wasm
+build-sshclient-wasm: ## Build the browser SSH client (x/crypto/ssh over WebRTC) for js/wasm
+	./scripts/build-sshclient-wasm.sh
+
 .PHONY: build-kubectl-wasm-web-public
-build-kubectl-wasm-web-public: build-kcp-wasm build-kubectl-wasm build-goat-wasm build-yq-wasm ## Build ./public: static browser demo bundle
+build-kubectl-wasm-web-public: build-kcp-wasm build-kubectl-wasm build-goat-wasm build-yq-wasm build-sshclient-wasm ## Build ./public: static browser demo bundle
 	./scripts/build-kubectl-wasm-web-public.sh
 
 .PHONY: run-kubectl-wasm-web
