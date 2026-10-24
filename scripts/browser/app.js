@@ -2243,6 +2243,47 @@ function socialwebCall(fn, payload, timeoutMs = 30_000) {
   });
 }
 
+// Read bids and bidder/guest events from each bidder's own PDS as well as from
+// submitBid/submitEvent over the ingress (comms mode Both), so a bid still
+// lands while the ingress is reconnecting.
+// ponytail: page-side until socialweb derives these from a contract's
+// bidderDids itself; then delete this and the RelayEventSource objects.
+const EVENTS_API = "/apis/events.socialweb.computer/v1alpha1";
+
+async function bidderPDS(did) {
+  const url = did.startsWith("did:web:")
+    ? `https://${did.slice("did:web:".length)}/.well-known/did.json`
+    : `https://plc.directory/${did}`;
+  const doc = await (await fetch(url)).json();
+  const pds = (doc.service ?? []).find((s) => s.id === "#atproto_pds" || s.id === `${did}#atproto_pds`);
+  if (!pds?.serviceEndpoint) throw new Error(`${did} names no #atproto_pds`);
+  return new URL(pds.serviceEndpoint).origin;
+}
+
+async function ensureBidderStreams(bidders) {
+  const refs = [];
+  for (const did of bidders) {
+    const name = `pds-${did.split(":").pop().toLowerCase().replace(/[^a-z0-9]/g, "").slice(-12)}`;
+    const url = await bidderPDS(did);
+    for (const [plural, kind, spec] of [
+      ["relayeventsources", "RelayEventSource", { url }],
+      ["eventsources", "EventSource", { backendRef: { group: "events.socialweb.computer", kind: "RelayEventSource", name } }],
+    ]) {
+      try {
+        await kcpREST("POST", `${EVENTS_API}/${plural}`, {
+          apiVersion: "events.socialweb.computer/v1alpha1", kind, metadata: { name }, spec,
+        });
+      } catch (err) {
+        if (!/: 409 /.test(String(err.message))) throw err;
+      }
+    }
+    refs.push({ group: "events.socialweb.computer", kind: "EventSource", name });
+  }
+  await kcpREST("PATCH", `${SOCIALWEB_API}/marketrequesters/app`,
+    { spec: { comms: { mode: "Both", eventSourceRefs: refs } } }, "application/merge-patch+json");
+  addLog("info", `bids and events also read from ${refs.map((r) => r.name).join(", ")} (comms Both)`);
+}
+
 async function requestVM() {
   try {
     computeBusy = true;
@@ -2272,6 +2313,9 @@ async function requestVM() {
         bundle: vmshell.secretsBundle(token),
       });
     }
+    await ensureBidderStreams(bidders).catch((err) => {
+      addLog("warn", `bidder event streams: ${err instanceof Error ? err.message : err}; bids arrive over the ingress only`);
+    });
     const identity = await kcpREST("GET", `${SOCIALWEB_API}/marketidentities/requester`).catch(() => null);
     const manifest = vmshell.contractManifest({
       name, bidders, ownerDid: identity?.status?.did ?? "", wootty, sshKeys, ttlSeconds,
