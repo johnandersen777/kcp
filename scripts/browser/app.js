@@ -2038,6 +2038,7 @@ async function requestVMShell() {
       path: vmshell.secretsPath(name),
       bundle: vmshell.secretsBundle(token),
     });
+    await ensureRequesterBidders(bidders);
     const identity = await kubectlJSON(["get", "marketidentity", "requester"]).catch(() => null);
     const manifest = vmshell.contractManifest({ name, bidders, ownerDid: identity?.status?.did ?? "" });
     const result = await runKubectl(withServer(["apply", "-f", "-"]), JSON.stringify(manifest));
@@ -2055,6 +2056,33 @@ async function requestVMShell() {
   } finally {
     vmshellBusy = false;
   }
+}
+
+// The requester discovers bidders only from the MarketRequester root's
+// spec.bidderDids (socialweb rc101 ignores a contract's bidderDids), so add the
+// chosen ones there and wait until the restarted Requester runs with them.
+async function ensureRequesterBidders(bidders) {
+  const root = await kubectlJSON(["get", "marketrequester", "app"]);
+  const have = root?.spec?.bidderDids ?? [];
+  if (bidders.every((did) => have.includes(did))) return;
+  const merged = [...new Set([...have, ...bidders])];
+  const result = await runKubectl(withServer([
+    "patch", "marketrequester", "app", "--type=merge", "-p", JSON.stringify({ spec: { bidderDids: merged } }),
+  ]));
+  if (result.code !== 0) {
+    throw new Error(String(result.stderr || result.stdout || "patching the bidders failed").trim());
+  }
+  setAppStatus(vmshellStatusEl, "waiting for the requester to pick up the bidders…", "warn");
+  for (let i = 0; i < 90; i++) {
+    const list = await kubectlJSON(["get", "requesters"]).catch(() => null);
+    const requester = list?.items?.[0];
+    if (requester && bidders.every((did) => (requester.spec?.bidderDIDs ?? []).includes(did)) &&
+      requester.status?.ready && requester.status?.observedGeneration === requester.metadata?.generation) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  throw new Error("the requester did not pick up the bidders within 3 minutes");
 }
 
 async function releaseVMShell() {
