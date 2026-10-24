@@ -75,9 +75,12 @@ const debugLogPath = options.get("debug-log");
 const debugControlPath = options.get("debug-control");
 
 async function* controlLines(signal: AbortSignal): AsyncGenerator<string> {
+  // Start at the beginning: the stream below replays only commands from the
+  // last two minutes, so a page that was away (locked phone, reload) still
+  // gets what was sent meanwhile; the page skips ids it already ran.
   let offset = 0;
   try {
-    offset = (await Deno.stat(debugControlPath!)).size;
+    await Deno.stat(debugControlPath!);
   } catch {
     await Deno.writeTextFile(debugControlPath!, "", { append: true });
   }
@@ -121,13 +124,14 @@ function controlStream(request: Request, session: string): Response {
       }, 15_000);
       try {
         for await (const line of controlLines(abort.signal)) {
-          let cmd: { session?: string };
+          let cmd: { session?: string; ts?: string };
           try {
             cmd = JSON.parse(line);
           } catch {
             continue;
           }
           if (cmd.session !== "*" && cmd.session !== session) continue;
+          if (!cmd.ts || Date.now() - Date.parse(cmd.ts) > 120_000) continue;
           controller.enqueue(enc.encode(`data: ${JSON.stringify(cmd)}\n\n`));
         }
       } catch {

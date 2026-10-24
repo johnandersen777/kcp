@@ -3055,6 +3055,18 @@ function startDebugControl() {
       return;
     }
     const id = cmd.id ?? "?";
+    let done = [];
+    try {
+      done = JSON.parse(sessionStorage.getItem("kcp.debugDone") ?? "[]");
+    } catch {
+      done = [];
+    }
+    if (done.includes(id)) return;
+    try {
+      sessionStorage.setItem("kcp.debugDone", JSON.stringify([...done.slice(-200), id]));
+    } catch {
+      // no sessionStorage: a replayed command may run twice
+    }
     try {
       const fn = new Function("d", `return (async () => { ${cmd.js} })();`);
       const value = await fn(debugHandle);
