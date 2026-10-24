@@ -134,6 +134,14 @@ build-kubectl-wasm: ## Build upstream kubectl for js/wasm and stage wasm_exec.js
 verify-kubectl-wasm: ## Run kubectl and kcp as separate WASM Deno workers and verify the Fetch CRD
 	./scripts/verify-kubectl-wasm.sh
 
+.PHONY: run-kubectl-wasm-web
+run-kubectl-wasm-web: build-kcp-wasm build-kubectl-wasm ## Serve the browser demo (kcp + kubectl WASM in the tab)
+	deno run --allow-read --allow-net ./scripts/kubectl_wasm_web.ts --port=$${WEB_PORT:-8090}
+
+.PHONY: verify-kubectl-wasm-web
+verify-kubectl-wasm-web: ## Verify the kubectl-wasm terminal UI and live Pele diagram
+	./scripts/verify-kubectl-wasm-web.sh
+
 .PHONY: verify-kcp-memory
 verify-kcp-memory: ## Run real kcp on the in-memory storage backend and verify CRDs/CRs
 	./scripts/verify-kcp-memory.sh

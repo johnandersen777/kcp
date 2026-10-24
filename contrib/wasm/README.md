@@ -227,6 +227,56 @@ the upstream sources for js/wasm: `k8s.io/kubectl`'s `syscall.SIGHUP`
 interrupt handler, `unix.Umask`, the `SIGWINCH` resize watcher, the
 `syscall.Exec` plugin path, and `moby/term`'s TTY ioctls.
 
+### Web UI: kcp + kubectl in the browser
+
+`scripts/kubectl_wasm_web.ts` is a static file server. The page it serves
+runs **both** WASM modules in the browser: kcp.wasm in one Web Worker and
+kubectl.wasm in another. The left pane is an
+[xterm.js](https://xtermjs.org) terminal; commands go straight to the kubectl
+worker. The right pane is a live [Pele](https://pele.run) diagram (Mermaid
+text rendered to themed SVG) built from periodic `get crds -o json` and
+`get fetches -o json` calls on the same worker and pushed only when it
+changes.
+
+```
+browser tab
+  xterm.js ──args──> kubectl WASM worker
+                         │ global fetch() shim
+                         │ "http://kcp.local/..."  (virtual origin)
+                         ▼
+                     postMessage ──> page relay ──> kcp WASM worker
+                         ▲                               │
+                         └──── Response ◄────────────────┘
+  page poller ──kubectl get crds/fetches──> Pele diagram
+```
+
+There is no API server process: the kubectl worker's `globalThis.fetch` is
+intercepted for the virtual origin `http://kcp.local`, forwarded to the kcp
+worker through the page, and answered with a synthesized `Response`. The kcp
+Fetch controller keeps using its own native `fetch`, so `spec.url` can point
+at the static server's `/echo`. `/demo.yaml` serves a ready-made Fetch whose
+URL is the page origin:
+
+```console
+$ ./scripts/build-kcp-wasm.sh
+$ ./scripts/build-kubectl-wasm.sh
+$ deno run --allow-read --allow-net scripts/kubectl_wasm_web.ts
+# open http://127.0.0.1:8090
+kubectl> get crds
+kubectl> create -f http://127.0.0.1:8090/demo.yaml
+kubectl> get fetches
+```
+
+The Deno process only serves `app.html`, `app.js`, the worker scripts, both
+`.wasm` files and `wasm_exec.js`; it has no kubectl or kcp instance. kcp state
+is snapshotted to `localStorage` and restored on reload. The browser has no
+filesystem, so `scripts/browser/fs_shim.js` provides an in-memory
+`globalThis.fs` (discovery cache, probed kubeconfig paths, stdin) and
+manifests must be fetched by URL rather than `-f <local path>`.
+
+xterm.js and Pele load from jsDelivr/esm.sh, so the browser needs network
+access. There is no build step for the page.
+
 ## The `Fetch` CRD (written in Go)
 
 * `apis/fetch/v1alpha1/types.go` — typed `Fetch`, `FetchList`, spec/status and
@@ -395,6 +445,14 @@ real-server entrypoint does not yet.
   and implements the `kubectlRun` → `__kubectlResolve` RPC.
 * `scripts/kubectl_wasm_fs.ts` — synchronous `globalThis.fs` shim: Deno-backed
   reads of kubeconfig/`-f` files, run-scoped stdin, in-memory writes.
+* `scripts/kubectl_wasm_web.ts` — static server for the browser demo: page,
+  worker scripts, both `.wasm` files, `/config`, `/echo`, `/demo.yaml`.
+* `scripts/browser/` — the browser side. `app.html` (layout), `app.js`
+  (terminal, worker orchestration, polling), `kcp_worker.js` (kcp.wasm),
+  `kubectl_worker.js` (kubectl.wasm + fetch bridge), `fs_shim.js` (in-memory
+  fs), `diagram.js` (Mermaid builder + unit test).
+* `scripts/verify-kubectl-wasm-web.sh` — builds both modules, serves the demo,
+  checks every asset and route, and runs the diagram tests.
 * `scripts/verify-kubectl-wasm.sh` — end-to-end check: builds both modules,
   runs them in separate Deno workers, and exercises discovery, create from
   stdin, the Fetch controller, `-o yaml` and Table output.
@@ -408,8 +466,10 @@ real-server entrypoint does not yet.
 $ go test -race ./contrib/wasm/...
 $ deno check scripts/kcp_wasm.ts scripts/kcp_wasm_worker.ts
 $ deno check scripts/kubectl_wasm.ts scripts/kubectl_wasm_worker.ts scripts/kubectl_wasm_fs.ts
+$ deno test scripts/browser/diagram_test.js
 $ ./scripts/verify-kcp-wasm.sh
 $ ./scripts/verify-kubectl-wasm.sh # upstream kubectl wasm -> kcp wasm, no native kubectl
+$ ./scripts/verify-kubectl-wasm-web.sh # browser demo assets and diagram builder
 $ ./scripts/verify-kcp-memory.sh   # real kcp control plane on memory://main
 $ ./scripts/build-kcp-real-wasm.sh # compile the real server for js/wasm
 ```
