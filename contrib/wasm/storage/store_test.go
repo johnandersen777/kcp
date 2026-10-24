@@ -1,0 +1,501 @@
+/*
+Copyright 2026 The KCP Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package storage
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
+	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
+	kstorage "k8s.io/apiserver/pkg/storage"
+
+	"github.com/kcp-dev/logicalcluster/v3"
+
+	fetchv1alpha1 "github.com/kcp-dev/kcp/contrib/wasm/apis/fetch/v1alpha1"
+)
+
+const prefix = "/fetches/"
+
+func key(name string) string { return prefix + name }
+
+func newFetch(name string) *fetchv1alpha1.Fetch {
+	return &fetchv1alpha1.Fetch{
+		TypeMeta:   metav1.TypeMeta{APIVersion: fetchv1alpha1.GroupVersion, Kind: fetchv1alpha1.Kind},
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status:     fetchv1alpha1.FetchStatus{Phase: fetchv1alpha1.FetchPhaseUnresolved},
+	}
+}
+
+func decodeFetch(raw []byte) (runtime.Object, error) {
+	var f fetchv1alpha1.Fetch
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return nil, err
+	}
+	return &f, nil
+}
+
+func expectEvent(t *testing.T, w watch.Interface, typ watch.EventType, name string) {
+	t.Helper()
+	select {
+	case ev, ok := <-w.ResultChan():
+		if !ok {
+			t.Fatalf("watch closed while waiting for %s %s", typ, name)
+		}
+		if ev.Type != typ {
+			t.Fatalf("event type = %s, want %s", ev.Type, typ)
+		}
+		accessor, err := meta.Accessor(ev.Object)
+		if err != nil {
+			t.Fatalf("accessor: %v", err)
+		}
+		if accessor.GetName() != name {
+			t.Fatalf("event object = %q, want %q", accessor.GetName(), name)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s %s", typ, name)
+	}
+}
+
+func TestCreateGetUpdateDelete(t *testing.T) {
+	ctx := context.Background()
+	s := New()
+	defer s.Close()
+
+	in := newFetch("a")
+	var created fetchv1alpha1.Fetch
+	if err := s.Create(ctx, key("a"), in, &created, 0); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.ResourceVersion != "2" {
+		t.Fatalf("resourceVersion = %q, want 2", created.ResourceVersion)
+	}
+	if err := s.Create(ctx, key("a"), newFetch("a"), nil, 0); !kstorage.IsExist(err) {
+		t.Fatalf("duplicate Create error = %v, want AlreadyExists", err)
+	}
+
+	var got fetchv1alpha1.Fetch
+	if err := s.Get(ctx, key("a"), kstorage.GetOptions{}, &got); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Name != "a" || got.ResourceVersion != "2" {
+		t.Fatalf("Get returned %+v", got.ObjectMeta)
+	}
+
+	var updated fetchv1alpha1.Fetch
+	err := s.GuaranteedUpdate(ctx, key("a"), &updated, false, nil,
+		func(input runtime.Object, res kstorage.ResponseMeta) (runtime.Object, *uint64, error) {
+			f := input.(*fetchv1alpha1.Fetch).DeepCopy()
+			f.Status.Phase = fetchv1alpha1.FetchPhaseFetching
+			return f, nil, nil
+		}, nil)
+	if err != nil {
+		t.Fatalf("GuaranteedUpdate: %v", err)
+	}
+	if updated.ResourceVersion != "3" {
+		t.Fatalf("updated resourceVersion = %q, want 3", updated.ResourceVersion)
+	}
+
+	// Updating with identical content must not bump the resource version.
+	var unchanged fetchv1alpha1.Fetch
+	err = s.GuaranteedUpdate(ctx, key("a"), &unchanged, false, nil,
+		func(input runtime.Object, res kstorage.ResponseMeta) (runtime.Object, *uint64, error) {
+			return input.DeepCopyObject(), nil, nil
+		}, nil)
+	if err != nil {
+		t.Fatalf("no-op GuaranteedUpdate: %v", err)
+	}
+	if unchanged.ResourceVersion != "3" {
+		t.Fatalf("no-op update resourceVersion = %q, want 3", unchanged.ResourceVersion)
+	}
+
+	var deleted fetchv1alpha1.Fetch
+	if err := s.Delete(ctx, key("a"), &deleted, nil, nil, nil, kstorage.DeleteOptions{}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if deleted.Name != "a" {
+		t.Fatalf("deleted object = %+v", deleted.ObjectMeta)
+	}
+	if err := s.Get(ctx, key("a"), kstorage.GetOptions{}, &got); !kstorage.IsNotFound(err) {
+		t.Fatalf("Get after Delete = %v, want NotFound", err)
+	}
+}
+
+func TestGetListPredicateAndPaging(t *testing.T) {
+	ctx := context.Background()
+	s := New()
+	defer s.Close()
+
+	for _, name := range []string{"a", "b", "c"} {
+		f := newFetch(name)
+		if name != "b" {
+			f.Labels = map[string]string{"app": "selected"}
+		}
+		if err := s.Create(ctx, key(name), f, nil, 0); err != nil {
+			t.Fatalf("Create(%s): %v", name, err)
+		}
+	}
+
+	sel, err := labels.Parse("app=selected")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var list fetchv1alpha1.FetchList
+	if err := s.GetList(ctx, prefix, kstorage.ListOptions{
+		Recursive: true,
+		Predicate: kstorage.SelectionPredicate{Label: sel},
+	}, &list); err != nil {
+		t.Fatalf("GetList: %v", err)
+	}
+	if len(list.Items) != 2 {
+		t.Fatalf("selected items = %d, want 2 (%v)", len(list.Items), list.Items)
+	}
+	for _, item := range list.Items {
+		if item.Name == "b" {
+			t.Fatalf("label selector returned unselected object b")
+		}
+	}
+
+	var page fetchv1alpha1.FetchList
+	if err := s.GetList(ctx, prefix, kstorage.ListOptions{
+		Recursive: true,
+		Predicate: kstorage.SelectionPredicate{Limit: 2},
+	}, &page); err != nil {
+		t.Fatalf("GetList page 1: %v", err)
+	}
+	if len(page.Items) != 2 || page.Continue == "" {
+		t.Fatalf("page 1 = %d items, continue %q", len(page.Items), page.Continue)
+	}
+
+	var page2 fetchv1alpha1.FetchList
+	if err := s.GetList(ctx, prefix, kstorage.ListOptions{
+		Recursive: true,
+		Predicate: kstorage.SelectionPredicate{Limit: 2, Continue: page.Continue},
+	}, &page2); err != nil {
+		t.Fatalf("GetList page 2: %v", err)
+	}
+	if len(page2.Items) != 1 {
+		t.Fatalf("page 2 = %d items, want 1", len(page2.Items))
+	}
+}
+
+func TestWatchEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := New()
+	defer s.Close()
+
+	if err := s.Create(ctx, key("existing"), newFetch("existing"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	w, err := s.Watch(ctx, prefix, kstorage.ListOptions{
+		Recursive:       true,
+		ResourceVersion: "0",
+	})
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	defer w.Stop()
+
+	expectEvent(t, w, watch.Added, "existing")
+
+	if err := s.Create(ctx, key("new"), newFetch("new"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	expectEvent(t, w, watch.Added, "new")
+
+	err = s.GuaranteedUpdate(ctx, key("new"), &fetchv1alpha1.Fetch{}, false, nil,
+		func(input runtime.Object, res kstorage.ResponseMeta) (runtime.Object, *uint64, error) {
+			f := input.(*fetchv1alpha1.Fetch).DeepCopy()
+			f.Status.Phase = fetchv1alpha1.FetchPhaseResolved
+			return f, nil, nil
+		}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectEvent(t, w, watch.Modified, "new")
+
+	if err := s.Delete(ctx, key("new"), nil, nil, nil, nil, kstorage.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	expectEvent(t, w, watch.Deleted, "new")
+}
+
+func TestWatchReplaysFromResourceVersion(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := New()
+	defer s.Close()
+
+	if err := s.Create(ctx, key("a"), newFetch("a"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Create(ctx, key("b"), newFetch("b"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	var list fetchv1alpha1.FetchList
+	if err := s.GetList(ctx, prefix, kstorage.ListOptions{Recursive: true}, &list); err != nil {
+		t.Fatal(err)
+	}
+
+	// Change b after the list; a watch from the list's RV must replay it.
+	err := s.GuaranteedUpdate(ctx, key("b"), &fetchv1alpha1.Fetch{}, false, nil,
+		func(input runtime.Object, res kstorage.ResponseMeta) (runtime.Object, *uint64, error) {
+			f := input.(*fetchv1alpha1.Fetch).DeepCopy()
+			f.Status.Phase = fetchv1alpha1.FetchPhaseResolved
+			return f, nil, nil
+		}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w, err := s.Watch(ctx, prefix, kstorage.ListOptions{
+		Recursive:       true,
+		ResourceVersion: list.ResourceVersion,
+	})
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	defer w.Stop()
+
+	expectEvent(t, w, watch.Modified, "b")
+}
+
+func TestClusterAnnotations(t *testing.T) {
+	s := New()
+	defer s.Close()
+
+	clusterCtx := func(name string) context.Context {
+		return genericapirequest.WithCluster(context.Background(), genericapirequest.Cluster{
+			Name: logicalcluster.Name(name),
+		})
+	}
+
+	if err := s.Create(clusterCtx("root:org"), key("a"), newFetch("a"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Create(clusterCtx("root:other"), key("b"), newFetch("b"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	var got fetchv1alpha1.Fetch
+	if err := s.Get(clusterCtx("root:org"), key("a"), kstorage.GetOptions{}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Annotations[logicalcluster.AnnotationKey] != "root:org" {
+		t.Errorf("Get annotation = %q, want root:org", got.Annotations[logicalcluster.AnnotationKey])
+	}
+
+	wildcard := genericapirequest.WithCluster(context.Background(), genericapirequest.Cluster{Wildcard: true})
+	var list fetchv1alpha1.FetchList
+	if err := s.GetList(wildcard, prefix, kstorage.ListOptions{Recursive: true}, &list); err != nil {
+		t.Fatal(err)
+	}
+	clusters := map[string]string{}
+	for _, item := range list.Items {
+		clusters[item.Name] = item.Annotations[logicalcluster.AnnotationKey]
+	}
+	if clusters["a"] != "root:org" || clusters["b"] != "root:other" {
+		t.Fatalf("wildcard list cluster annotations = %v", clusters)
+	}
+
+	snap, err := s.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := New()
+	defer restored.Close()
+	if err := restored.Restore(snap, decodeFetch); err != nil {
+		t.Fatal(err)
+	}
+	var restoredFetch fetchv1alpha1.Fetch
+	if err := restored.Get(clusterCtx("root:other"), key("b"), kstorage.GetOptions{}, &restoredFetch); err != nil {
+		t.Fatal(err)
+	}
+	if restoredFetch.Annotations[logicalcluster.AnnotationKey] != "root:other" {
+		t.Errorf("restored annotation = %q, want root:other", restoredFetch.Annotations[logicalcluster.AnnotationKey])
+	}
+}
+
+func TestWatchInitialEventsBookmark(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := New()
+	defer s.Close()
+
+	if err := s.Create(ctx, key("a"), newFetch("a"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	sendInitial := true
+	w, err := s.watch(ctx, prefix, kstorage.ListOptions{
+		Recursive:         true,
+		SendInitialEvents: &sendInitial,
+		Predicate:         kstorage.SelectionPredicate{AllowWatchBookmarks: true},
+	}, func() runtime.Object { return newFetch("") })
+	if err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	defer w.Stop()
+
+	expectEvent(t, w, watch.Added, "a")
+
+	select {
+	case ev, ok := <-w.ResultChan():
+		if !ok {
+			t.Fatal("watch closed before bookmark")
+		}
+		if ev.Type != watch.Bookmark {
+			t.Fatalf("event type = %s, want BOOKMARK", ev.Type)
+		}
+		has, err := kstorage.HasInitialEventsEndBookmarkAnnotation(ev.Object)
+		if err != nil {
+			t.Fatalf("checking bookmark annotation: %v", err)
+		}
+		if !has {
+			t.Fatal("bookmark is missing the initial-events-end annotation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for initial-events-end bookmark")
+	}
+}
+
+func TestWatchTooLargeResourceVersion(t *testing.T) {
+	ctx := context.Background()
+	s := New()
+	defer s.Close()
+
+	if err := s.Create(ctx, key("a"), newFetch("a"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := s.Watch(ctx, prefix, kstorage.ListOptions{
+		Recursive:       true,
+		ResourceVersion: "99",
+	})
+	if !kstorage.IsTooLargeResourceVersion(err) {
+		t.Fatalf("Watch error = %v, want TooLargeResourceVersion", err)
+	}
+}
+
+func TestPreconditions(t *testing.T) {
+	ctx := context.Background()
+	s := New()
+	defer s.Close()
+
+	if err := s.Create(ctx, key("a"), newFetch("a"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	stale := "999"
+	err := s.GuaranteedUpdate(ctx, key("a"), &fetchv1alpha1.Fetch{}, false,
+		&kstorage.Preconditions{ResourceVersion: &stale},
+		func(input runtime.Object, res kstorage.ResponseMeta) (runtime.Object, *uint64, error) {
+			return input.DeepCopyObject(), nil, nil
+		}, nil)
+	if err == nil {
+		t.Fatal("GuaranteedUpdate with stale resourceVersion succeeded")
+	}
+
+	wrongUID := types.UID("not-the-uid")
+	err = s.Delete(ctx, key("a"), nil, &kstorage.Preconditions{UID: &wrongUID}, nil, nil, kstorage.DeleteOptions{})
+	if err == nil {
+		t.Fatal("Delete with wrong UID succeeded")
+	}
+}
+
+func TestSnapshotRestore(t *testing.T) {
+	ctx := context.Background()
+	s := New()
+	defer s.Close()
+
+	for _, name := range []string{"a", "b"} {
+		if err := s.Create(ctx, key(name), newFetch(name), nil, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	snap, err := s.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	restored := New()
+	defer restored.Close()
+	if err := restored.Restore(snap, decodeFetch); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	var list fetchv1alpha1.FetchList
+	if err := restored.GetList(ctx, prefix, kstorage.ListOptions{Recursive: true}, &list); err != nil {
+		t.Fatalf("GetList after restore: %v", err)
+	}
+	if len(list.Items) != 2 {
+		t.Fatalf("restored items = %d, want 2", len(list.Items))
+	}
+	if list.ResourceVersion != "3" {
+		t.Fatalf("restored list RV = %q, want 3", list.ResourceVersion)
+	}
+
+	// New writes continue from the restored resource version.
+	var out fetchv1alpha1.Fetch
+	if err := restored.Create(ctx, key("c"), newFetch("c"), &out, 0); err != nil {
+		t.Fatal(err)
+	}
+	if out.ResourceVersion != "4" {
+		t.Fatalf("post-restore RV = %q, want 4", out.ResourceVersion)
+	}
+}
+
+func TestSnapshotHandler(t *testing.T) {
+	ctx := context.Background()
+	s := New()
+	defer s.Close()
+
+	ch := make(chan []byte, 1)
+	s.SetSnapshotHandler(func(b []byte) { ch <- b })
+
+	if err := s.Create(ctx, key("a"), newFetch("a"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case raw := <-ch:
+		var snap Snapshot
+		if err := json.Unmarshal(raw, &snap); err != nil {
+			t.Fatalf("snapshot JSON: %v", err)
+		}
+		if snap.ResourceVersion != 2 || len(snap.Items) != 1 {
+			t.Fatalf("snapshot = rv %d, %d items", snap.ResourceVersion, len(snap.Items))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("snapshot handler was not called")
+	}
+}

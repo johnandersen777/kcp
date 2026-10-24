@@ -27,7 +27,7 @@ import (
 // with a 503. All other requests fall through to next.
 func WithMigrationDumpHandler(next http.Handler, dump http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
-		if req.Method == http.MethodPost && req.URL.Path == migratingworkspaces.HandlerPath {
+		if dump != nil && req.Method == http.MethodPost && req.URL.Path == migratingworkspaces.HandlerPath {
 			dump.ServeHTTP(w, req)
 			return
 		}

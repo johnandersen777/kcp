@@ -58,7 +58,7 @@ import (
 	kcpdynamic "github.com/kcp-dev/client-go/dynamic"
 	kcpkubernetesinformers "github.com/kcp-dev/client-go/informers"
 	kcpkubernetesclientset "github.com/kcp-dev/client-go/kubernetes"
-	"github.com/kcp-dev/embeddedetcd"
+	embeddedetcd "github.com/kcp-dev/kcp/pkg/server/embeddedshim"
 	"github.com/kcp-dev/logicalcluster/v3"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
@@ -911,7 +911,8 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		}
 	}
 
-	if kcpfeatures.DefaultFeatureGate.Enabled(kcpfeatures.LogicalClusterMigration) {
+	if kcpfeatures.DefaultFeatureGate.Enabled(kcpfeatures.LogicalClusterMigration) &&
+		!isMemoryStorageConfig(c.Options.GenericControlPlane.Etcd.StorageConfig.Transport) {
 		etcdClient, err := newEtcdClient(c.Options.GenericControlPlane.Etcd.StorageConfig.Transport)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create etcd client for migration dump handler: %w", err)

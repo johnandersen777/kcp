@@ -118,6 +118,22 @@ build: require-jq require-go require-git verify-go-versions ## Build the project
     done
 .PHONY: build
 
+.PHONY: build-kcp-wasm
+build-kcp-wasm: ## Build kcp in its js/wasm build mode (./cmd/kcp) and stage wasm_exec.js
+	./scripts/build-kcp-wasm.sh
+
+.PHONY: verify-kcp-wasm
+verify-kcp-wasm: ## Run the WASM kcp and verify the Fetch CRD with kubectl
+	./scripts/verify-kcp-wasm.sh
+
+.PHONY: verify-kcp-memory
+verify-kcp-memory: ## Run real kcp on the in-memory storage backend and verify CRDs/CRs
+	./scripts/verify-kcp-memory.sh
+
+.PHONY: build-kcp-real-wasm
+build-kcp-real-wasm: ## Build the real kcp server for js/wasm (experimental)
+	./scripts/build-kcp-real-wasm.sh
+
 .PHONY: build-e2e
 build-e2e:
 	@$(MAKE) build WHAT='./cmd/... ./staging/src/github.com/kcp-dev/cli/cmd/...'

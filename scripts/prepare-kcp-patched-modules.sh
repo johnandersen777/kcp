@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+
+# Copyright 2026 The KCP Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -euo pipefail
+
+# Prepares a -modfile for building kcp with the memory storage backend.
+#
+# Mode "native" only replaces the apiserver storage factory. Mode "js" also
+# replaces unix-only dependencies (systemd journal, mount-utils, probe,
+# moby/term, kube securitycontext) with js/wasm implementations.
+#
+# Usage: KCP_PATCH_MODE=native|js scripts/prepare-kcp-patched-modules.sh [workdir] [modfile]
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+mode="${KCP_PATCH_MODE:-js}"
+case "${mode}" in
+  native|js) ;;
+  *) echo "KCP_PATCH_MODE must be 'native' or 'js', got '${mode}'" >&2; exit 1 ;;
+esac
+default_work="${TMPDIR:-/tmp}/kcp-patched-modules-${mode}"
+if [[ "${mode}" == "native" ]]; then
+  # Shared with earlier manual builds so the Go build cache stays warm.
+  default_work="${TMPDIR:-/tmp}/kcp-mem-build"
+fi
+work="${1:-${default_work}}"
+modfile="${2:-${repo_root}/.go.memory.mod}"
+sumfile="${modfile%.mod}.sum"
+
+mkdir -p "${work}"
+cp "${repo_root}/go.mod" "${modfile}"
+cp "${repo_root}/go.sum" "${sumfile}"
+
+set_replace() {
+  local mod="$1" target="$2"
+  python3 - "${modfile}" "${mod}" "${target}" <<'PY'
+import re, sys
+
+path, mod, target = sys.argv[1:4]
+src = open(path).read()
+pattern = re.compile(r"^(\s*)" + re.escape(mod) + r"\s+=>\s+.*$", re.MULTILINE)
+if pattern.search(src):
+    src = pattern.sub(lambda m: f"{m.group(1)}{mod} => {target}", src, count=1)
+else:
+    if not src.endswith("\n"):
+        src += "\n"
+    src += f"\nreplace {mod} => {target}\n"
+open(path, "w").write(src)
+PY
+}
+
+copy_module() {
+  local module="$1" dest="$2"
+  if [[ ! -d "${dest}" ]]; then
+    local dir
+    dir="$(cd "${repo_root}" && go list -m -f '{{.Dir}}' "${module}")"
+    cp -a "${dir}" "${dest}"
+    chmod -R u+w "${dest}"
+  fi
+  set_replace "${module}" "${dest}"
+}
+
+overlay="${repo_root}/contrib/wasm/_overlay"
+
+# The storagebackend factory gains a memory:// backend.
+copy_module k8s.io/apiserver "${work}/apiserver"
+cp "${overlay}/apiserver/factory.go" \
+  "${work}/apiserver/pkg/storage/storagebackend/factory/factory.go"
+if [[ "${mode}" == "js" ]]; then
+  cp "${overlay}/apiserver/serving_unix.go" \
+    "${work}/apiserver/pkg/server/options/serving_unix.go"
+fi
+
+if [[ "${mode}" == "js" ]]; then
+  # Systemd journal logging is replaced by stderr logging.
+  copy_module github.com/coreos/go-systemd/v22 "${work}/go-systemd"
+  cp "${overlay}/go-systemd/journal_unix.go" \
+    "${work}/go-systemd/journal/journal_unix.go"
+
+  # mount-utils' /proc and uname usage is replaced with stubs.
+  copy_module k8s.io/mount-utils "${work}/mount-utils"
+  cp "${overlay}/mount-utils/mount_helper_unix.go" \
+    "${work}/mount-utils/mount_helper_unix.go"
+
+  # kubelet-side probe dialer and cgroup CPU discovery.
+  copy_module k8s.io/kubernetes "${work}/kubernetes"
+  cp "${overlay}/probe/dialer_others.go" \
+    "${work}/kubernetes/pkg/probe/dialer_others.go"
+  cp "${overlay}/securitycontext/util_js.go" \
+    "${work}/kubernetes/pkg/securitycontext/util_js.go"
+
+  # etcd's flock-based file lock is a no-op in a single-instance wasm runtime.
+  copy_module go.etcd.io/etcd/client/pkg/v3 "${work}/etcd-client-pkg"
+  cp "${overlay}/etcd-fileutil/lock_flock.go" \
+    "${work}/etcd-client-pkg/fileutil/lock_flock.go"
+
+  # TTY ioctl usage in moby/term is replaced with no-ops.
+  copy_module github.com/moby/term "${work}/moby-term"
+  cp "${overlay}/moby-term/term_unix.go" \
+    "${work}/moby-term/term_unix.go"
+  cp "${overlay}/moby-term/termios_unix.go" \
+    "${work}/moby-term/termios_unix.go"
+  cp "${overlay}/moby-term/termios_nonbsd.go" \
+    "${work}/moby-term/termios_nonbsd.go"
+fi
+
+echo "prepared ${modfile} (mode=${mode})"

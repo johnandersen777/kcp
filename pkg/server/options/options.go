@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -147,6 +148,14 @@ func NewOptions(rootDir string) *Options {
 	o.GenericControlPlane.Authentication.ServiceAccounts.Issuers = []string{"https://kcp.default.svc"}
 	o.GenericControlPlane.Authentication.ServiceAccounts.OptionalTokenGetter = saCache.TokenGetter
 	o.GenericControlPlane.Etcd.StorageConfig.Transport.ServerList = []string{"embedded"}
+	if name := os.Getenv("KCP_MEMORY_STORAGE"); name != "" {
+		if name == "true" || name == "1" {
+			name = "main"
+		}
+		// Selects the in-memory storage.Interface backend added by the
+		// js/wasm build overlay (<repo>/contrib/wasm/overlay/apiserver).
+		o.GenericControlPlane.Etcd.StorageConfig.Transport.ServerList = []string{"memory://" + name}
+	}
 	o.GenericControlPlane.Authorization = nil // we have our own
 
 	// override set of admission plugins

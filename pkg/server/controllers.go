@@ -1169,6 +1169,10 @@ func (s *Server) installLogicalClusterCleanupController(ctx context.Context, con
 }
 
 func (s *Server) installLogicalClusterMigrationController(ctx context.Context, config *rest.Config) error {
+	if isMemoryStorageConfig(s.Options.GenericControlPlane.Etcd.StorageConfig.Transport) {
+		// Logical cluster migration needs raw etcd access.
+		return nil
+	}
 	externalConfig := rest.CopyConfig(s.ExternalLogicalClusterAdminConfig)
 	externalConfig = rest.AddUserAgent(externalConfig, logicalclustermigration.ControllerName)
 
@@ -1244,6 +1248,11 @@ func (s *Server) installLogicalClusterMigrationController(ctx context.Context, c
 // every replica because the registry is per-process, in-memory state the
 // local admission chain depends on.
 func (s *Server) installObjectCountScanner(_ context.Context) error {
+	if isMemoryStorageConfig(s.Options.GenericControlPlane.Etcd.StorageConfig.Transport) {
+		// The scanner walks etcd directly; there is nothing to scan with the
+		// in-memory backend.
+		return nil
+	}
 	etcdClient, err := s.newEtcdClient()
 	if err != nil {
 		return err

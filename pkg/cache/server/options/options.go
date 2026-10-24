@@ -17,6 +17,7 @@ limitations under the License.
 package options
 
 import (
+	"os"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -86,6 +87,13 @@ func NewOptions(rootDir string) *Options {
 	o.SecureServing.ServerCert.CertDirectory = rootDir
 	o.SecureServing.BindPort = 6443
 	o.Etcd.StorageConfig.Transport.ServerList = []string{"embedded"}
+	if name := os.Getenv("KCP_MEMORY_STORAGE"); name != "" {
+		if name == "true" || name == "1" {
+			name = "main"
+		}
+		// The cache server is a separate logical store from the shard.
+		o.Etcd.StorageConfig.Transport.ServerList = []string{"memory://" + name + "-cache"}
+	}
 	// TODO: enable the watch cache, it was disabled because
 	//  - we need to pass a shard name so that the watch cache can calculate the key
 	//    we already do that for cluster names (stored in the obj)

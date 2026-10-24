@@ -39,7 +39,7 @@ import (
 
 	kcpapiextensionsclientset "github.com/kcp-dev/client-go/apiextensions/client"
 	kcpapiextensionsinformers "github.com/kcp-dev/client-go/apiextensions/informers"
-	"github.com/kcp-dev/embeddedetcd"
+	embeddedetcd "github.com/kcp-dev/kcp/pkg/server/embeddedshim"
 	kcpclientset "github.com/kcp-dev/sdk/client/clientset/versioned/cluster"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
 

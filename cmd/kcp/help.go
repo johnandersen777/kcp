@@ -1,3 +1,5 @@
+//go:build !js || kcprealserver
+
 /*
 Copyright 2022 The kcp Authors.
 

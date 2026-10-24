@@ -1,3 +1,5 @@
+//go:build !js || kcprealserver
+
 /*
 Copyright 2021 The kcp Authors.
 
@@ -36,7 +38,7 @@ import (
 	"k8s.io/component-base/version"
 	"k8s.io/klog/v2"
 
-	"github.com/kcp-dev/embeddedetcd"
+	embeddedetcd "github.com/kcp-dev/kcp/pkg/server/embeddedshim"
 	"github.com/kcp-dev/sdk/cmd/help"
 
 	"github.com/kcp-dev/kcp/cmd/kcp/options"
