@@ -2709,15 +2709,28 @@ const ingressSubs = new Map();
 const ingressRegistered = new Set();
 let ingressList = [];
 
+// The ingress list can drop a host for one state update (an Exposure being
+// re-reconciled). Closing on that cut sockets still CONNECTING, so the relay
+// saw a register/close every few ms; close only after a host stays missing.
+const INGRESS_DROP_AFTER_MS = 15_000;
+const ingressMissingSince = new Map();
+
 function applyIngress(list) {
   ingressList = list;
   const hosts = new Set(list.map((entry) => entry.host));
+  const now = Date.now();
   for (const [host, sub] of ingressSubs) {
-    if (!hosts.has(host)) {
-      sub.close();
-      ingressSubs.delete(host);
-      ingressRegistered.delete(host);
+    if (hosts.has(host)) {
+      ingressMissingSince.delete(host);
+      continue;
     }
+    if (!ingressMissingSince.has(host)) ingressMissingSince.set(host, now);
+    if (now - ingressMissingSince.get(host) < INGRESS_DROP_AFTER_MS) continue;
+    ingressMissingSince.delete(host);
+    addLog("info", `ingress ${host} is gone from the Exposure list; closing it`);
+    sub.close();
+    ingressSubs.delete(host);
+    ingressRegistered.delete(host);
   }
   for (const entry of list) {
     if (!ingressSubs.has(entry.host)) startIngress(entry);
