@@ -232,11 +232,22 @@ async function restoreSnapshot() {
 }
 
 // finishRestore lets Go run and checks that the restored kcp answers.
+// A trap or exit in the restored program fails it at once instead of
+// reaching the page as a worker crash.
 async function finishRestore() {
-  restored.resume();
   const t0 = performance.now();
+  let onError;
   try {
-    const response = await new Promise((resolve, reject) => {
+    const failed = new Promise((_, reject) => {
+      onError = (event) => {
+        event.preventDefault();
+        reject(event.error ?? new Error(event.message));
+      };
+      self.addEventListener("error", onError);
+      go._exitPromise.then(() => reject(new Error(`Go exited (code ${go.exitCode})`)));
+    });
+    restored.resume();
+    const readyz = new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("/readyz timed out")), 30_000);
       const callbackID = nextCallbackID++;
       pending.set(callbackID, {
@@ -247,10 +258,13 @@ async function finishRestore() {
       });
       globalThis.kcpHandleRequest(JSON.stringify({ method: "GET", path: "/readyz" }), callbackID);
     });
+    const response = await Promise.race([readyz, failed]);
     if (response.status !== 200) throw new Error(`/readyz ${response.status}: ${response.body ?? ""}`);
     restored.stats.firstReadyzMs = Math.round(performance.now() - t0);
   } catch (err) {
     await restartCold(err);
+  } finally {
+    self.removeEventListener("error", onError);
   }
 }
 
