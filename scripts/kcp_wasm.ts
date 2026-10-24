@@ -73,8 +73,12 @@ const wasmExecPath = Deno.realPathSync(
 );
 const verbose = options.get("verbose") === "true";
 
+import { applySnapshot } from "./browser/state_store.js";
+
 // Deno owns persistence: it loads the snapshot before starting the wasm
 // module, and atomically rewrites the file whenever Go reports a mutation.
+// Go posts a full snapshot after boot and deltas afterwards; the host folds
+// them into one full snapshot, which is what the state file holds.
 const statePath = options.get("state") ?? `${wasmPath}.state.json`;
 let initialState = "";
 try {
@@ -158,16 +162,18 @@ worker.postMessage({
   },
 });
 
-let pendingSnapshot: string | null = null;
+// deno-lint-ignore no-explicit-any
+let state: any = null;
+let stateDirty = false;
 let writeInFlight = false;
 
 async function writeLoop(): Promise<void> {
   if (writeInFlight) return;
   writeInFlight = true;
   try {
-    while (pendingSnapshot !== null) {
-      const data = pendingSnapshot;
-      pendingSnapshot = null;
+    while (stateDirty) {
+      stateDirty = false;
+      const data = JSON.stringify(state);
       const tmp = `${statePath}.tmp`;
       await Deno.writeTextFile(tmp, data);
       await Deno.rename(tmp, statePath);
@@ -179,16 +185,22 @@ async function writeLoop(): Promise<void> {
   }
 }
 
-// Coalesces bursts: only the newest snapshot waiting in the queue is written.
+// Every message is applied in order; only the file writes are coalesced.
 function schedulePersist(snapshot: string): void {
-  pendingSnapshot = snapshot;
+  if (!snapshot) return;
+  const message = JSON.parse(snapshot);
+  if (message?.delta && state === null && initialState) {
+    state = JSON.parse(initialState);
+  }
+  state = applySnapshot(state, message);
+  stateDirty = true;
   void writeLoop();
 }
 
 async function flushPersistence(): Promise<void> {
-  while (writeInFlight || pendingSnapshot !== null) {
+  while (writeInFlight || stateDirty) {
     await new Promise((r) => setTimeout(r, 10));
-    if (!writeInFlight && pendingSnapshot !== null) void writeLoop();
+    if (!writeInFlight && stateDirty) void writeLoop();
   }
 }
 

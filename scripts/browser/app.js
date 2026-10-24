@@ -29,7 +29,7 @@ import {
 } from "https://esm.sh/just-bash@3.6.0/browser";
 import { buildDiagram, nodeID } from "./diagram.js";
 import { OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
-import { openBestBackend } from "./state_store.js";
+import { assembleSnapshot, openBestBackend, snapshotRecords } from "./state_store.js";
 
 const config = await (await fetch("/config")).json();
 const apiServer = String(config.apiServer);
@@ -37,6 +37,9 @@ const intervalMs = Number(config.intervalMs ?? 1500);
 const stateKey = "kcp";
 const socialwebStateKey = "socialweb";
 const legacyStateKey = "kcp-wasm-state";
+// kcp storage is saved as one IndexedDB record per object under this prefix;
+// the single-string snapshot under stateKey is the pre-delta format.
+const kcpRecordPrefix = `${stateKey}\u0000`;
 const stateDB = "kcp-wasm";
 const stateMaxBytes = 256 * 1024 * 1024;
 const shellStateKey = "kcp-shell-state";
@@ -407,7 +410,7 @@ function attachKcp(worker) {
         request: { response: data.response, error: data.error },
       });
     } else if (data.type === "persist") {
-      schedulePersist(data.snapshot);
+      persistKcp(data.snapshot);
     } else if (data.type === "socialweb-persist") {
       schedulePersist(data.snapshot, socialwebStateKey);
     } else if (data.type === "log") {
@@ -452,6 +455,36 @@ async function loadInitialState(key = stateKey) {
   return "";
 }
 
+// Rebuilds the full snapshot kcp restores from: per-object records when they
+// exist, otherwise a saved single-string snapshot.
+async function loadKcpState() {
+  const backend = await stateBackend();
+  const records = await backend.loadPrefix(kcpRecordPrefix);
+  if (records.length > 0) return JSON.stringify(assembleSnapshot(records));
+  return loadInitialState(stateKey);
+}
+
+// kcp posts a full snapshot after boot and deltas afterwards, so every
+// message is applied, in order; none may be coalesced away.
+let kcpPersistQueue = Promise.resolve();
+function persistKcp(snapshot) {
+  kcpPersistQueue = kcpPersistQueue.then(async () => {
+    const message = JSON.parse(snapshot);
+    const backend = await stateBackend();
+    if (!message.stores) {
+      // Not a storage envelope (older shard): keep it as one string.
+      await backend.apply({ clearPrefix: kcpRecordPrefix });
+      await backend.save(stateKey, snapshot);
+      return;
+    }
+    const ops = snapshotRecords(kcpRecordPrefix, message);
+    if (!message.delta) ops.deletes.push(stateKey);
+    await backend.apply(ops);
+  }).catch((err) => {
+    addLog("warn", `kcp state save failed: ${err instanceof Error ? err.message : err}`);
+  });
+}
+
 const persistTimers = new Map();
 const persistInFlight = new Set();
 function schedulePersist(snapshot, key = stateKey) {
@@ -476,7 +509,7 @@ function schedulePersist(snapshot, key = stateKey) {
 
 async function spawnKcp() {
   const [initialState, socialwebSnapshot] = await Promise.all([
-    loadInitialState(stateKey),
+    loadKcpState(),
     loadInitialState(socialwebStateKey),
   ]);
   const worker = new Worker("/kcp_worker.js", { type: "module" });
@@ -919,6 +952,7 @@ function makeCommands() {
     try {
       const backend = await stateBackend();
       await backend.remove(stateKey);
+      await backend.apply({ clearPrefix: kcpRecordPrefix });
       await backend.remove(socialwebStateKey);
     } catch {
       // A missing or read-only store is already a reset.
