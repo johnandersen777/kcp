@@ -687,6 +687,16 @@ async function spawnCli() {
   cliWorker = worker;
 }
 
+let cliLoading = null;
+function ensureCli() {
+  cliLoading ??= spawnCli().catch((err) => {
+    cliLoading = null;
+    addLog("warn", `goat/yq unavailable: ${err instanceof Error ? err.message : err}`);
+    throw err;
+  });
+  return cliLoading;
+}
+
 async function restartCli(reason) {
   if (cliRestarting) return;
   cliRestarting = true;
@@ -866,6 +876,7 @@ function makeCommands() {
   });
 
   const runCliCommand = async (tool, args, ctx) => {
+    if (!cliWorker && !cliRestarting) await ensureCli().catch(() => {});
     if (!cliWorker && !cliRestarting) {
       return { stdout: "", stderr: `${tool} worker is not available\n`, exitCode: 1 };
     }
@@ -1846,20 +1857,13 @@ function initSocialwebUI() {
 
 async function start() {
   term.writeln(cyan("kcp-wasm") + dim(" loading real kcp.wasm…"));
-  setStatus("loading real kcp…", "running");
-  await spawnKcp();
-
-  term.writeln(cyan("kubectl-wasm") + dim(" loading kubectl.wasm (122 MB)…"));
-  setStatus("loading kubectl…", "running");
-  await spawnKubectl();
-
-  term.writeln(cyan("cli-wasm") + dim(" loading goat.wasm + yq.wasm…"));
-  setStatus("loading goat + yq…", "running");
-  try {
-    await spawnCli();
-  } catch (err) {
-    addLog("warn", `goat/yq unavailable: ${err instanceof Error ? err.message : err}`);
-  }
+  term.writeln(cyan("kubectl-wasm") + dim(" loading kubectl.wasm…"));
+  setStatus("loading kcp + kubectl…", "running");
+  // kcp boots for tens of seconds; download and compile kubectl meanwhile.
+  // goat/yq follow kubectl at low priority, or load on first use.
+  const kubectlLoaded = spawnKubectl();
+  kubectlLoaded.then(ensureCli).catch(() => {});
+  await Promise.all([spawnKcp(), kubectlLoaded]);
 
   term.writeln(dim("loading just-bash shell…"));
   await restoreShell();
