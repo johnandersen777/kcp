@@ -142,6 +142,10 @@ build-goat-wasm: ## Build bluesky-social/goat for js/wasm (stock sources + indig
 build-yq-wasm: ## Build mikefarah/yq for js/wasm (stock sources)
 	./scripts/build-yq-wasm.sh
 
+.PHONY: build-kubectl-wasm-web-public
+build-kubectl-wasm-web-public: build-kcp-wasm build-kubectl-wasm build-goat-wasm build-yq-wasm ## Build ./public: static browser demo bundle
+	./scripts/build-kubectl-wasm-web-public.sh
+
 .PHONY: run-kubectl-wasm-web
 run-kubectl-wasm-web: build-kcp-wasm build-kubectl-wasm build-goat-wasm build-yq-wasm ## Serve the browser demo (kcp, kubectl, goat, yq WASM in the tab)
 	deno run --allow-read --allow-net ./scripts/kubectl_wasm_web.ts --port=$${WEB_PORT:-8090}
