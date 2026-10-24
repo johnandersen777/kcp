@@ -27,19 +27,22 @@ import (
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/app/compose"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/app/marketrequester"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/atproto/oauth"
+	atpds "github.com/johnandersen777/socialweb-computer-kcp/internal/atproto/pds"
+	reporemote "github.com/johnandersen777/socialweb-computer-kcp/internal/atprotorepo/remote"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/bus"
+	"github.com/johnandersen777/socialweb-computer-kcp/internal/component"
 	componentlink "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/componentlink"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketidentity"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketintents"
+	policyenginectl "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/policyengine"
+	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/repos"
 	ctlruntime "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/runtime"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/runtime/kcpapply"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/runtime/kube"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/runtime/manifests"
-	"github.com/johnandersen777/socialweb-computer-kcp/internal/component"
 	contractexposure "github.com/johnandersen777/socialweb-computer-kcp/internal/exposure"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/marketidentity/atproto"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/oauthcallback"
-	policyenginectl "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/policyengine"
 	pecontroller "github.com/johnandersen777/socialweb-computer-kcp/internal/policyengine/controller"
 
 	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserinfra/eventstream"
@@ -244,7 +247,7 @@ func Start(parent context.Context, cfg Config) (*Orchestrator, error) {
 		OAuth: atproto.OAuthOptions{
 			ClientID:    cfg.OAuthClientID,
 			RedirectURI: cfg.OAuthRedirectURI,
-			Scopes: oauth.RequesterOAuthScope,
+			Scopes:      oauth.RequesterOAuthScope,
 			// Pending PKCE states live in the vault so a reload during the
 			// OAuth dance still completes the callback.
 			StateRef:   &commonv1.SecretRef{Mount: "requester", Path: "oauth/requester"},
@@ -258,6 +261,26 @@ func Start(parent context.Context, cfg Config) (*Orchestrator, error) {
 	callbacks.Register("requester", func(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 		return identityCtl.CompleteBrowserAuthorization(ctx, "root", "requester", r)
 	})
+
+	// The repo controllers provide repo.write and the record readers the
+	// requester signs its market records with (AtprotoRepo bound to the
+	// account's RemoteRepo). The browser has no local PDS and reads secrets
+	// from its own vault.
+	if err := repos.Register(mgr, repos.Options{
+		Bus: cfg.Bus,
+		Log: log,
+		Dynamic: func(workspace string) (*kube.Client, error) {
+			return kube.ForWorkspace(cfg.Rest, workspace)
+		},
+		Network: reporemote.NewNetwork(reporemote.NetworkConfig{Directory: BrowserDirectory(), HTTP: http.DefaultClient}),
+		Pds:     func(string, string) (*atpds.Server, bool) { return nil, false },
+		Secrets: func(ctx context.Context, workspace string, ref commonv1.SecretRef) (map[string]any, error) {
+			return bvault.NewSecrets(vaultCtl.Provider().Store(workspace)).Get(ctx, ref)
+		},
+		Scope: scope,
+	}); err != nil {
+		return nil, fmt.Errorf("socialweb: repo controllers: %w", err)
+	}
 
 	if _, err := componentlink.Register(mgr, componentlink.Options{
 		Policy:    contractexposure.NewLinkPolicy(cfg.Bus),
@@ -281,9 +304,9 @@ func Start(parent context.Context, cfg Config) (*Orchestrator, error) {
 		return nil, err
 	}
 	if _, err := marketintents.Register(mgr, marketintents.Options{
-		Bus:    cfg.Bus,
-		Scope:  scope,
-		Log:    log,
+		Bus:     cfg.Bus,
+		Scope:   scope,
+		Log:     log,
 		Clients: workspaceClients(cfg.Rest),
 	}); err != nil {
 		return nil, err
