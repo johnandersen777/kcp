@@ -201,6 +201,14 @@ function setStatus(text, className) {
   statusEl.className = className;
 }
 
+// term.write parses asynchronously; scroll after the rows exist so the new
+// prompt is the last thing in view.
+function scrollToBottomSettled() {
+  term.scrollToBottom();
+  requestAnimationFrame(() => term.scrollToBottom());
+  setTimeout(() => term.scrollToBottom(), 120);
+}
+
 function waitReady(worker) {
   return new Promise((resolve, reject) => {
     const cleanup = () => {
@@ -947,8 +955,7 @@ async function runScript(script, stdin = "") {
     const elapsed = Math.round(performance.now() - started);
     if (result.stdout) term.write(normalizeNewlines(result.stdout));
     if (result.stderr) term.write(red(normalizeNewlines(result.stderr)));
-    term.write(dim(`[exit ${result.exitCode} · ${elapsed}ms]`));
-    term.scrollToBottom();
+    scrollToBottomSettled();
     addLog(
       result.exitCode === 0 ? "ok" : "warn",
       `exit ${result.exitCode} · ${elapsed}ms`,
@@ -970,8 +977,9 @@ async function runScript(script, stdin = "") {
     busy = false;
     if (!kubectlRestarting && !cliRestarting) setStatus("connected", "connected");
     prompt();
-    term.scrollToBottom();
+    scrollToBottomSettled();
     void poll();
+    runQueuedDiagramCommand();
   }
 }
 
@@ -1223,15 +1231,32 @@ async function completeLine() {
 
 let lastDiagram = "";
 let polling = false;
+let pendingDiagramCommand = null;
 let diagramTargets = new Map();
+
+function runQueuedDiagramCommand() {
+  if (!pendingDiagramCommand || busy || booting || bootActive || stdinMode) return;
+  const command = pendingDiagramCommand;
+  pendingDiagramCommand = null;
+  term.focus();
+  term.write(`\r\n${promptText()}${command}`);
+  line = command;
+  cursor = line.length;
+  submit();
+}
 
 diagramEl.addEventListener("click", (event) => {
   const node = event.target.closest?.("[data-id]");
   if (!node) return;
   const command = diagramTargets.get(node.getAttribute("data-id"));
   if (!command) return;
-  if (busy || stdinMode) {
-    addLog("warn", "busy; cannot describe from the diagram right now");
+  if (busy || booting) {
+    pendingDiagramCommand = command;
+    addLog("info", `queued diagram command: ${command}`);
+    return;
+  }
+  if (stdinMode) {
+    addLog("warn", "finish or abort stdin before describing from the diagram");
     return;
   }
   term.focus();
@@ -1355,9 +1380,11 @@ const BOOT_STEPS = [
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let booting = false;
+let bootActive = false;
 
 async function typeBootSteps(steps) {
   if (!ready || !kubectlWorker) return;
+  bootActive = true;
   booting = true;
   busy = true;
   setStatus("running boot sequence…", "running");
@@ -1395,6 +1422,10 @@ async function typeBootSteps(steps) {
     busy = true;
   }
   booting = false;
+  bootActive = false;
+  busy = false;
+  setStatus("connected", "connected");
+  runQueuedDiagramCommand();
 }
 
 // --- startup ---------------------------------------------------------------
