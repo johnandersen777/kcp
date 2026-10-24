@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-24.gateways.socialweb.computer
+  name: v1alpha1-26.gateways.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -181,6 +181,8 @@ spec:
                       - localRepo
                       - oauthDelegated
                   handle:
+                    type: string
+                  did:
                     type: string
                   pdsUrl:
                     type: string
@@ -734,6 +736,14 @@ spec:
               observedGeneration:
                 type: integer
                 format: int64
+              appliedSet:
+                type: object
+                properties:
+                  generation:
+                    type: integer
+                    format: int64
+                  digest:
+                    type: string
               phase:
                 type: string
                 enum:

@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-8.nodeclaims.socialweb.computer
+  name: v1alpha1-9.nodeclaims.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -380,3 +380,19 @@ spec:
                   - url
               joinedAt:
                 type: string
+              infra:
+                type: object
+                properties:
+                  workspace:
+                    type: string
+                  name:
+                    type: string
+                  contract:
+                    type: string
+                  computeContract:
+                    type: string
+                required:
+                  - workspace
+                  - name
+                  - contract
+                  - computeContract

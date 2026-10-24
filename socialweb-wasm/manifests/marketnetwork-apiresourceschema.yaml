@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-20.marketnetworks.socialweb.computer
+  name: v1alpha1-21.marketnetworks.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -946,6 +946,14 @@ spec:
               observedGeneration:
                 type: integer
                 format: int64
+              appliedSet:
+                type: object
+                properties:
+                  generation:
+                    type: integer
+                    format: int64
+                  digest:
+                    type: string
               phase:
                 type: string
                 enum:

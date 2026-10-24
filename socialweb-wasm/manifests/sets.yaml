@@ -39,6 +39,10 @@ sets:
           - path: atprotorecordwatch-apiresourceschema.yaml
           - path: marketidentity-apiexport.yaml
           - path: computecontract-apiresourceschema.yaml
+          - path: infra-apiresourceschema.yaml
+          - path: ephemeralinfra-apiresourceschema.yaml
+          - path: infracollection-apiresourceschema.yaml
+          - path: ephemeralinfracollection-apiresourceschema.yaml
           - path: computecontract-apiexport.yaml
           - path: computevm-apiresourceschema.yaml
           - path: firecrackervm-apiresourceschema.yaml
@@ -383,6 +387,10 @@ sets:
           - path: atprotorecordwatch-apiresourceschema.yaml
           - path: marketidentity-apiexport.yaml
           - path: computecontract-apiresourceschema.yaml
+          - path: infra-apiresourceschema.yaml
+          - path: ephemeralinfra-apiresourceschema.yaml
+          - path: infracollection-apiresourceschema.yaml
+          - path: ephemeralinfracollection-apiresourceschema.yaml
           - path: computecontract-apiexport.yaml
         after:
           - kind: APIExport
@@ -415,6 +423,10 @@ sets:
         workspace: root:socialweb-provider
         files:
           - path: computecontract-apiresourceschema.yaml
+          - path: infra-apiresourceschema.yaml
+          - path: ephemeralinfra-apiresourceschema.yaml
+          - path: infracollection-apiresourceschema.yaml
+          - path: ephemeralinfracollection-apiresourceschema.yaml
           - path: computecontract-apiexport.yaml
           - path: marketidentity-apiresourceschema.yaml
           - path: atprotorecord-apiresourceschema.yaml

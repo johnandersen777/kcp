@@ -11,7 +11,7 @@ spec:
         crd: {}
     - group: socialweb.computer
       name: atprotorecords
-      schema: v1alpha1-5.atprotorecords.socialweb.computer
+      schema: v1alpha1-7.atprotorecords.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
