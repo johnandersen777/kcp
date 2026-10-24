@@ -44,6 +44,22 @@ Deno.test("fetchWasm falls back to the raw module", async () => {
   if (seen.join() !== "/m.wasm.gz,/m.wasm") throw new Error(seen.join());
 });
 
+Deno.test("fetchWasm hashes the wire bytes", async () => {
+  const gz = await gzip(wasm);
+  const want = Array.from(
+    new Uint8Array(await crypto.subtle.digest("SHA-256", gz)),
+    (x) => x.toString(16).padStart(2, "0"),
+  ).join("");
+  const { fn } = fakeFetch({ "/m.wasm.gz": { body: gz, type: "application/gzip" } });
+  const [response, , digest] = await fetchWasm("/m.wasm", fn, { hash: true });
+  await WebAssembly.compileStreaming(response);
+  if (await digest !== want) throw new Error("gz digest");
+  const raw = fakeFetch({ "/m.wasm": { body: wasm, type: "application/wasm" } });
+  const [rawResponse, , rawDigest] = await fetchWasm("/m.wasm", raw.fn, { hash: true });
+  await WebAssembly.compileStreaming(rawResponse);
+  if ((await rawDigest).length !== 64) throw new Error("raw digest");
+});
+
 Deno.test("fetchWasm reports a missing module", async () => {
   const { fn } = fakeFetch({});
   let message = "";
