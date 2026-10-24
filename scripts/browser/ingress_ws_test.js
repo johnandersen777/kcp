@@ -9,7 +9,7 @@ import {
   parseFrame,
   register,
   SUBSCRIBE_NSID,
-} from "./ingress_ws.ts";
+} from "./ingress_ws.js";
 
 function assertEquals(actual, expected) {
   const a = JSON.stringify(actual);
