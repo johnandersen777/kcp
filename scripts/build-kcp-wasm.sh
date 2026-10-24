@@ -33,8 +33,9 @@ echo "Building kcp for js/wasm (the kcp command's wasm build mode)..."
 goroot="$(go env GOROOT)"
 cp "${goroot}/lib/wasm/wasm_exec.js" "${out_dir}/wasm_exec.js"
 
-# ~282 MB becomes ~54 MB; kubectl_wasm_web.ts prefers this sibling.
-gzip -1 -c "${out_dir}/kcp.wasm" > "${out_dir}/kcp.wasm.gz"
+# ~282 MB becomes ~43 MB; kubectl_wasm_web.ts and the browser workers
+# prefer this sibling.
+gzip -9 -n -c "${out_dir}/kcp.wasm" > "${out_dir}/kcp.wasm.gz"
 
 echo "Built:"
 ls -lh "${out_dir}/kcp.wasm" "${out_dir}/wasm_exec.js"

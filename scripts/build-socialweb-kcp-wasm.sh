@@ -47,6 +47,7 @@ echo "building combined kcp + socialweb wasm..."
 )
 
 cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$(dirname "${out}")/wasm_exec.js"
-# The page server prefers this sibling; ~269 MB becomes ~54 MB.
-gzip -1 -c "${out}" > "${out}.gz"
+# The page server and the browser workers prefer this sibling; gzip -9 takes
+# ~269 MB to ~41 MB (browsers can only inflate gzip, not brotli/zstd).
+gzip -9 -n -c "${out}" > "${out}.gz"
 ls -lh "${out}" "${out}.gz" "$(dirname "${out}")/wasm_exec.js"

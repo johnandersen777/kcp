@@ -31,6 +31,11 @@ set -euo pipefail
 # header; the Deno server's dynamic /echo and /demo.yaml routes are not part of
 # the bundle.
 #
+# The WASM modules ship only as gzip -9 `<module>.wasm.gz` files, which the
+# workers inflate with DecompressionStream. Static hosts such as wisp.place
+# cap files at 200 MB raw (kcp.wasm is ~282 MB) and sites at 300 MB, and never
+# gzip application/wasm themselves; the four .gz files total ~78 MB.
+#
 # Usage: scripts/build-kubectl-wasm-web-public.sh [outdir] [artifacts]
 #   outdir     default: <repo>/public
 #   artifacts  default: <repo>/bin/wasm (run the build-*-wasm targets first)
@@ -57,11 +62,14 @@ assets=(
   state_store.js
   wasm_fetch.js
 )
-modules=(
+wasm_modules=(
   kcp.wasm
   kubectl.wasm
   goat.wasm
   yq.wasm
+)
+modules=(
+  "${wasm_modules[@]}"
   wasm_exec.js
   wasm_exec_cli.js
 )
@@ -84,8 +92,14 @@ done
 # needs index.html for "/".
 cp "${out_dir}/app.html" "${out_dir}/index.html"
 
-for file in "${modules[@]}"; do
-  cp "${artifacts}/${file}" "${out_dir}/${file}"
+cp "${artifacts}/wasm_exec.js" "${artifacts}/wasm_exec_cli.js" "${out_dir}/"
+pids=()
+for file in "${wasm_modules[@]}"; do
+  gzip -9 -n -c "${artifacts}/${file}" > "${out_dir}/${file}.gz" &
+  pids+=("$!")
+done
+for pid in "${pids[@]}"; do
+  wait "${pid}"
 done
 
 printf '%s\n' '{"apiServer":"http://kcp.local","intervalMs":1500}' \
