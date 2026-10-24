@@ -1330,55 +1330,69 @@ function renderDiagram(mermaid, summary = "") {
 
 
 // Boot sequence: resolve socialweb.computer via goat, build the PDS getRecord
-// URL for its profile, apply it as a Fetch, wait for the fetch to finish, and
-// render the result with yq. It is typed into the terminal on every load.
-const BOOT_SCRIPT = [
-  "DID=$(goat resolve socialweb.computer | jq -r .id)",
-  "PDS=$(goat resolve \"$DID\" | jq -r '.service[] | select(.type==\"AtprotoPersonalDataServer\") | .serviceEndpoint')",
-  "kubectl apply -f - <<EOF",
-  "apiVersion: fetch.kcp.io/v1alpha1",
-  "kind: Fetch",
-  "metadata:",
-  "  name: socialweb-profile",
-  "spec:",
-  '  url: "$PDS/xrpc/com.atproto.repo.getRecord?repo=$DID&collection=app.bsky.actor.profile&rkey=self"',
-  "EOF",
-  'kubectl wait --for=jsonpath=\'{.status.phase}\'=Resolved fetch/socialweb-profile --timeout=20s || true',
-  "kubectl get fetch socialweb-profile -o json | yq -P",
-].join("\n");
+// URL for its profile, apply it as a Fetch, wait for completion, tee the
+// Fetch to a file while printing it with yq, then print the fetched body from
+// that file. Each step is typed and auto-entered in the terminal on load.
+const BOOT_STEPS = [
+  [
+    "DID=$(goat resolve socialweb.computer | jq -r .id)",
+    "PDS=$(goat resolve \"$DID\" | jq -r '.service[] | select(.type==\"AtprotoPersonalDataServer\") | .serviceEndpoint')",
+    "kubectl apply -f - <<EOF",
+    "apiVersion: fetch.kcp.io/v1alpha1",
+    "kind: Fetch",
+    "metadata:",
+    "  name: socialweb-profile",
+    "spec:",
+    '  url: "$PDS/xrpc/com.atproto.repo.getRecord?repo=$DID&collection=app.bsky.actor.profile&rkey=self"',
+    "EOF",
+    'kubectl wait --for=jsonpath=\'{.status.phase}\'=Resolved fetch/socialweb-profile --timeout=20s || true',
+  ].join("\n"),
+  "kubectl get fetch socialweb-profile -o json | tee /tmp/socialweb-profile.json | yq -P",
+  "jq -r '.status.body' /tmp/socialweb-profile.json | yq -P",
+];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let booting = false;
 
-async function typeBootScript(script) {
+async function typeBootSteps(steps) {
   if (!ready || !kubectlWorker) return;
   booting = true;
   busy = true;
   setStatus("running boot sequence…", "running");
 
-  const lines = script.split("\n");
-  let heredoc = null;
-  for (let i = 0; i < lines.length; i++) {
-    const current = lines[i];
-    if (i === 0) term.write(promptText());
-    else term.write(`\r\n${heredoc ? continuationPrompt() : promptText()}`);
-    if (heredoc) {
-      if (current.trim() === heredoc) heredoc = null;
-    } else {
-      const match = current.match(/<<-?\s*(['"]?)([A-Za-z0-9_]+)\1/);
-      if (match) heredoc = match[2];
+  for (let stepIndex = 0; stepIndex < steps.length; stepIndex++) {
+    const lines = steps[stepIndex].split("\n");
+    let heredoc = null;
+    for (let i = 0; i < lines.length; i++) {
+      const current = lines[i];
+      if (i === 0) {
+        if (stepIndex === 0) term.write(promptText());
+        // Later steps already have a prompt from the previous run.
+      } else {
+        term.write(`\r\n${heredoc ? continuationPrompt() : promptText()}`);
+      }
+      if (heredoc) {
+        if (current.trim() === heredoc) heredoc = null;
+      } else {
+        const match = current.match(/<<-?\s*(['"]?)([A-Za-z0-9_]+)\1/);
+        if (match) heredoc = match[2];
+      }
+      for (const ch of current) {
+        term.write(ch);
+        await sleep(2);
+      }
     }
-    for (const ch of current) {
-      term.write(ch);
-      await sleep(2);
-    }
+
+    // Visible Enter press before the step runs.
+    await sleep(150);
+    term.write("\r\n");
+    await sleep(150);
+    booting = false;
+    await runScript(steps[stepIndex]);
+    booting = true;
+    busy = true;
   }
-  // Visible Enter press on the final line before running the script.
-  await sleep(150);
-  term.write("\r\n");
-  await sleep(150);
   booting = false;
-  await runScript(script);
 }
 
 // --- startup ---------------------------------------------------------------
@@ -1413,7 +1427,7 @@ async function start() {
 
   void poll();
   setInterval(() => void poll(), intervalMs);
-  void typeBootScript(BOOT_SCRIPT);
+  void typeBootSteps(BOOT_STEPS);
 }
 
 // Dropping a manifest runs `apply -f -` with the file contents as stdin.

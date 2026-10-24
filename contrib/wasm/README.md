@@ -270,11 +270,13 @@ spec: {url: http://127.0.0.1:8090/echo?msg=heredoc}
 EOF
 ```
 
-On every page load a boot sequence is typed into the terminal: it resolves
-`socialweb.computer` with goat, derives the PDS `getRecord` URL for its
-`app.bsky.actor.profile/self` record, applies that URL as a Fetch, waits for
-the controller to finish, and prints the resulting Fetch with `yq -P` (the
-same command substitution / pipe chain works interactively).
+On every page load a boot sequence is typed and auto-entered, one command at
+a time: it resolves `socialweb.computer` with goat, derives the PDS
+`getRecord` URL for its `app.bsky.actor.profile/self` record, applies that URL
+as a Fetch, waits with `kubectl wait --for=jsonpath=...`, tees the Fetch JSON
+to `/tmp/socialweb-profile.json` while printing it with `yq -P`, then prints
+`.status.body` from that tee'd file through `jq -r ... | yq -P`. The same
+command substitution / pipe chains work interactively.
 
 Files live in just-bash's in-memory filesystem. Before each goat/yq run the
 shell files are seeded into the CLI worker, and its resulting files are merged
