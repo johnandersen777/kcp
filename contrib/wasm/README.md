@@ -227,77 +227,71 @@ the upstream sources for js/wasm: `k8s.io/kubectl`'s `syscall.SIGHUP`
 interrupt handler, `unix.Umask`, the `SIGWINCH` resize watcher, the
 `syscall.Exec` plugin path, and `moby/term`'s TTY ioctls.
 
-### Web UI: kcp + kubectl in the browser
+### Web UI: a just-bash shell with kubectl, goat and yq
 
-`scripts/kubectl_wasm_web.ts` is a static file server. The page it serves
-runs **both** WASM modules in the browser: kcp.wasm in one Web Worker and
-kubectl.wasm in another. The left pane is an
-[xterm.js](https://xtermjs.org) terminal; commands go straight to the kubectl
-worker. The right pane is a live [Pele](https://pele.run) diagram (Mermaid
-text rendered to themed SVG) built from periodic `get crds -o json` and
-`get fetches -o json` calls on the same worker and pushed only when it
-changes.
+`scripts/kubectl_wasm_web.ts` serves a page whose terminal is a
+[just-bash](https://github.com/vercel-labs/just-bash) shell. The shell's
+custom commands bridge to WebAssembly workers; real shell parsing gives pipes,
+redirection, heredocs, `&&`, variables and the built-in unix commands.
 
 ```
-browser tab
-  xterm.js ──args──> kubectl WASM worker
-                         │ global fetch() shim
-                         │ "http://kcp.local/..."  (virtual origin)
-                         ▼
-                     postMessage ──> page relay ──> kcp WASM worker
-                         ▲                               │
-                         └──── Response ◄────────────────┘
-  page poller ──kubectl get crds/fetches──> Pele diagram
+just-bash (page)                        Deno static server
+  kubectl ─╮                              /proxy ← cross-origin CLI HTTP
+  goat ────┼──> WASM workers                  ▲
+  yq ──────╯    kcp / kubectl / cli ──fetch()─┘
 ```
 
-There is no API server process: the kubectl worker's `globalThis.fetch` is
-intercepted for the virtual origin `http://kcp.local`, forwarded to the kcp
-worker through the page, and answered with a synthesized `Response`. The kcp
-Fetch controller keeps using its own native `fetch`, so `spec.url` can point
-at the static server's `/echo`. `/demo.yaml` serves a ready-made Fetch whose
-URL is the page origin:
+* `kubectl` — the upstream kubectl WASM worker; requests for the virtual API
+  origin are relayed to the kcp worker through the page.
+* `goat` and `yq` — stock upstream Go binaries compiled to WASM. Each
+  invocation gets a **fresh Go runtime instance** in `cli_worker.js`, exactly
+  like running the native binary: argv, env, cwd and stdin come from the
+  shell, and stdout/stderr/exit code and filesystem changes go back to it.
+* `jq` — just-bash's built-in jq implementation (no WASM worker).
 
 ```console
 $ ./scripts/build-kcp-wasm.sh
 $ ./scripts/build-kubectl-wasm.sh
+$ ./scripts/build-goat-wasm.sh
+$ ./scripts/build-yq-wasm.sh
 $ deno run --allow-read --allow-net scripts/kubectl_wasm_web.ts
 # open http://127.0.0.1:8090
-kubectl> get crds
-kubectl> create -f http://127.0.0.1:8090/demo.yaml
-kubectl> get fetches
+/home/user $ kubectl get fetches
+/home/user $ kubectl get fetches -o json > fetches.json
+/home/user $ yq '.items[].metadata.name' fetches.json
+/home/user $ echo '{"a":1}' | jq .a
+/home/user $ goat resolve bsky.app
+/home/user $ goat xrpc query https://public.api.bsky.app app.bsky.actor.getProfile actor==atproto.com
+/home/user $ kubectl apply -f - <<'EOF'
+apiVersion: fetch.kcp.io/v1alpha1
+kind: Fetch
+metadata: {name: demo}
+spec: {url: http://127.0.0.1:8090/echo?msg=heredoc}
+EOF
 ```
 
-The terminal supports cursor editing, history and Ctrl-C: because kubectl runs
-inside the tab, cancelling restarts the kubectl worker (its Go runtime cannot
-be interrupted mid-command; the kcp worker keeps all state). `apply -f -` and
-`create -f -` enter stdin mode: paste or type a manifest, Ctrl-D runs kubectl
-with it, Ctrl-C aborts. Tab completion calls kubectl's own `__complete`
-(commands, flags, resource types and live resource names). Dropping a YAML
-file onto the terminal applies it, and Ctrl+Shift+C/V copy and paste the
-terminal selection. The kubectl entrypoint overrides `cmdutil.BehaviorOnFatal`
-so errors that upstream treats as `os.Exit` come back as normal results
-instead of killing the runtime.
+Files live in just-bash's in-memory filesystem. Before each goat/yq run the
+shell files are seeded into the CLI worker, and its resulting files are merged
+back, so `goat lex new` output appears in `ls` and yq edits are visible to
+`cat`. The shell filesystem, history and environment (including goat auth
+sessions under `$XDG_STATE_HOME`) persist in localStorage.
 
-Below the terminal, an activity log shows module load times, every bridge
-request and response with status and latency, kubectl exit codes, kcp snapshot
-writes and diagram state changes. GET polling traffic is tagged `debug` and
-hidden unless the log's `verbose` box is checked; `save` downloads the log.
-The log pane is resizeable and remembers its height.
+Upstream sources are not modified. goat and yq are built from their repos'
+default branches, and the stock `main()` runs per invocation. The only
+platform adaptation is an indigo copy for js/wasm: Go's wasm port has no DNS
+and net/http only uses `fetch` without a custom `DialContext`, so the copy
+skips DNS, keeps a fetch-capable transport, and falls back to the public
+AppView for handle resolution. It is built through a generated `-modfile`;
+the goat checkout and module cache stay untouched. goat's HTTP (and yq's)
+goes through the page origin's `/proxy` to avoid CORS.
 
-The Pele diagram colors each Fetch by phase (green resolved, amber pending,
-red error). Clicking a node runs `describe` for that CRD or Fetch in the
-terminal. WASM assets are served with ETags, so reloads revalidate instead of
-re-downloading 140+ MiB.
+xterm.js, Pele and just-bash load from jsDelivr/esm.sh, so the browser needs
+network access. There is no build step for the page.
 
-The Deno process only serves `app.html`, `app.js`, the worker scripts, both
-`.wasm` files and `wasm_exec.js`; it has no kubectl or kcp instance. kcp state
-is snapshotted to `localStorage` and restored on reload. The browser has no
-filesystem, so `scripts/browser/fs_shim.js` provides an in-memory
-`globalThis.fs` (discovery cache, probed kubeconfig paths, stdin) and
-manifests must be fetched by URL rather than `-f <local path>`.
-
-xterm.js and Pele load from jsDelivr/esm.sh, so the browser needs network
-access. There is no build step for the page.
+Limitations: websocket-based commands (`goat firehose`) cannot upgrade through
+`/proxy`; files shared with goat/yq are UTF-8 text up to 1 MiB; two tabs share
+one localStorage snapshot. `/proxy` is an unrestricted egress endpoint, so
+keep the server bound to localhost.
 
 ## The `Fetch` CRD (written in Go)
 
@@ -457,6 +451,10 @@ real-server entrypoint does not yet.
   `js/wasm` with the patched modules (`kcp-real.wasm`).
 * `scripts/build-kubectl-wasm.sh` — builds upstream kubectl
   (`contrib/wasm/kubectl`, js/wasm) and stages `wasm_exec.js`.
+* `scripts/build-goat-wasm.sh` — builds bluesky-social/goat (stock main) and
+  stages the matching `wasm_exec_cli.js`; indigo gets a js/wasm adaptation via
+  a generated `-modfile`.
+* `scripts/build-yq-wasm.sh` — builds mikefarah/yq (stock) for js/wasm.
 * `scripts/prepare-kubectl-wasm-modules.sh` — copies `k8s.io/kubectl` and
   `moby/term` to a writable directory, installs the js/wasm replacements, and
   writes the `-modfile` used by the kubectl build.
@@ -468,11 +466,13 @@ real-server entrypoint does not yet.
 * `scripts/kubectl_wasm_fs.ts` — synchronous `globalThis.fs` shim: Deno-backed
   reads of kubeconfig/`-f` files, run-scoped stdin, in-memory writes.
 * `scripts/kubectl_wasm_web.ts` — static server for the browser demo: page,
-  worker scripts, both `.wasm` files, `/config`, `/echo`, `/demo.yaml`.
+  worker scripts, all `.wasm` files, `/config`, `/echo`, `/demo.yaml`, and the
+  `/proxy` egress endpoint for goat/yq.
 * `scripts/browser/` — the browser side. `app.html` (layout), `app.js`
-  (terminal, worker orchestration, polling), `kcp_worker.js` (kcp.wasm),
-  `kubectl_worker.js` (kubectl.wasm + fetch bridge), `fs_shim.js` (in-memory
-  fs), `diagram.js` (Mermaid builder + unit test).
+  (just-bash shell, worker orchestration, polling), `kcp_worker.js` (kcp.wasm),
+  `kubectl_worker.js` (kubectl.wasm + fetch bridge), `cli_worker.js` (fresh
+  goat/yq instance per command), `fs_shim.js` (in-memory fs, stdout capture,
+  cwd), `diagram.js` (Mermaid builder + unit test).
 * `scripts/verify-kubectl-wasm-web.sh` — builds both modules, serves the demo,
   checks every asset and route, and runs the diagram tests.
 * `scripts/verify-kubectl-wasm.sh` — end-to-end check: builds both modules,
@@ -491,6 +491,8 @@ $ deno check scripts/kubectl_wasm.ts scripts/kubectl_wasm_worker.ts scripts/kube
 $ deno test scripts/browser/diagram_test.js
 $ ./scripts/verify-kcp-wasm.sh
 $ ./scripts/verify-kubectl-wasm.sh # upstream kubectl wasm -> kcp wasm, no native kubectl
+$ ./scripts/build-goat-wasm.sh
+$ ./scripts/build-yq-wasm.sh
 $ ./scripts/verify-kubectl-wasm-web.sh # browser demo assets and diagram builder
 $ ./scripts/verify-kcp-memory.sh   # real kcp control plane on memory://main
 $ ./scripts/build-kcp-real-wasm.sh # compile the real server for js/wasm

@@ -58,13 +58,18 @@ done
 echo "== building WASM modules =="
 "${repo_root}/scripts/build-kcp-wasm.sh" "${workdir}/bin" >/dev/null
 "${repo_root}/scripts/build-kubectl-wasm.sh" "${workdir}/bin" >/dev/null
+"${repo_root}/scripts/build-goat-wasm.sh" "${workdir}/bin" >/dev/null
+"${repo_root}/scripts/build-yq-wasm.sh" "${workdir}/bin" >/dev/null
 
 echo "== starting static demo server on http://${host}:${port} =="
 deno run --allow-read --allow-net \
   "${repo_root}/scripts/kubectl_wasm_web.ts" \
   --kcp-wasm="${workdir}/bin/kcp.wasm" \
   --kubectl-wasm="${workdir}/bin/kubectl.wasm" \
+  --goat-wasm="${workdir}/bin/goat.wasm" \
+  --yq-wasm="${workdir}/bin/yq.wasm" \
   --wasm-exec="${workdir}/bin/wasm_exec.js" \
+  --wasm-exec-cli="${workdir}/bin/wasm_exec_cli.js" \
   --host="${host}" --port="${port}" \
   >>"${workdir}/web.log" 2>&1 &
 web_pid=$!
@@ -84,11 +89,14 @@ page="$(curl -sf "http://${host}:${port}/")"
 [[ "${page}" == *"@xterm/xterm"* ]] || fail "page does not reference xterm.js"
 [[ "${page}" == *"pele"* ]] || fail "page does not reference Pele"
 [[ "${page}" == *"/app.js"* ]] || fail "page does not load app.js"
+app_js="$(curl -sf "http://${host}:${port}/app.js")"
+[[ "${app_js}" == *"just-bash"* ]] || fail "app.js does not load just-bash"
+[[ "${app_js}" == *"cli_worker.js"* ]] || fail "app.js does not load cli_worker.js"
 
-for asset in app.js diagram.js kcp_worker.js kubectl_worker.js fs_shim.js wasm_exec.js; do
+for asset in app.js diagram.js kcp_worker.js kubectl_worker.js cli_worker.js fs_shim.js wasm_exec.js wasm_exec_cli.js; do
   curl -sf -o /dev/null "http://${host}:${port}/${asset}" || fail "missing ${asset}"
 done
-for wasm in kcp.wasm kubectl.wasm; do
+for wasm in kcp.wasm kubectl.wasm goat.wasm yq.wasm; do
   size="$(curl -sf -o /dev/null -w '%{size_download}' "http://${host}:${port}/${wasm}")"
   [[ "${size}" -gt 1000000 ]] || fail "${wasm} looks empty (${size} bytes)"
 done
@@ -109,4 +117,4 @@ demo="$(curl -sf "http://${host}:${port}/demo.yaml")"
 echo "== running diagram tests =="
 deno test "${repo_root}/scripts/browser/diagram_test.js" >/dev/null
 
-echo "PASS: browser demo assets served; open http://${host}:${port} to run kcp+kubectl in the browser"
+echo "PASS: browser demo assets served; open http://${host}:${port} for the just-bash shell with kcp, kubectl, goat and yq"

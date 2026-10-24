@@ -14,21 +14,28 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// app.js wires the browser UI: xterm.js terminal -> kubectl WASM worker ->
-// fetch bridge -> kcp WASM worker, plus a poller that renders the live Pele
-// diagram and an activity log. Both Go modules run in this tab; the Deno
-// server only serves static files.
+// app.js runs a just-bash shell in the browser. kubectl and goat are custom
+// just-bash commands that bridge to their own WebAssembly workers; kcp runs
+// in a third worker. The Deno server serves files and proxies goat's
+// cross-origin HTTP.
 
 import { Terminal } from "https://esm.sh/@xterm/xterm@5.5.0";
 import { FitAddon } from "https://esm.sh/@xterm/addon-fit@0.10.0";
 import { WebLinksAddon } from "https://esm.sh/@xterm/addon-web-links@0.11.0";
+import {
+  Bash,
+  defineCommand,
+  getCommandNames,
+} from "https://esm.sh/just-bash@3.6.0/browser";
 import { buildDiagram, nodeID } from "./diagram.js";
 
 const config = await (await fetch("/config")).json();
 const apiServer = String(config.apiServer);
 const intervalMs = Number(config.intervalMs ?? 1500);
 const stateKey = "kcp-wasm-state";
+const shellStateKey = "kcp-shell-state";
 const maxLogEntries = 500;
+const homeDir = "/home/user";
 
 const statusEl = document.getElementById("status");
 const retryEl = document.getElementById("retry");
@@ -109,36 +116,13 @@ new ResizeObserver(() => {
 term.focus();
 document.getElementById("terminal-pane").addEventListener("click", () => term.focus());
 
-// Dropping a manifest runs `apply -f -` with the file contents as stdin.
-const terminalPaneEl = document.getElementById("terminal-pane");
-terminalPaneEl.addEventListener("dragover", (event) => {
-  event.preventDefault();
-});
-terminalPaneEl.addEventListener("drop", async (event) => {
-  event.preventDefault();
-  const file = event.dataTransfer?.files?.[0];
-  if (!file) return;
-  if (busy || stdinMode || !ready) {
-    addLog("warn", "busy; cannot apply the dropped manifest right now");
-    return;
-  }
-  const text = await file.text();
-  term.focus();
-  term.write(
-    `\r\n${promptText()}apply -f - ${dim(`(dropped ${file.name}, ${text.length} bytes)`)}\r\n`,
-  );
-  execute(["apply", "-f", "-"], text);
-});
-
 // Ctrl+Shift+C/V copy and paste terminal selections without stealing Ctrl-C
 // (which cancels) or plain Ctrl-V (browser paste into xterm's textarea).
 term.attachCustomKeyEventHandler((event) => {
   if (event.type !== "keydown") return true;
   if (event.ctrlKey && event.shiftKey && event.code === "KeyC") {
     const selection = term.getSelection();
-    if (selection) {
-      navigator.clipboard?.writeText(selection).catch(() => {});
-    }
+    if (selection) navigator.clipboard?.writeText(selection).catch(() => {});
     return false;
   }
   if (event.ctrlKey && event.shiftKey && event.code === "KeyV") {
@@ -155,7 +139,6 @@ term.attachCustomKeyEventHandler((event) => {
 const dim = (text) => `\x1b[90m${text}\x1b[0m`;
 const red = (text) => `\x1b[31m${text}\x1b[0m`;
 const cyan = (text) => `\x1b[36m${text}\x1b[0m`;
-const promptText = () => cyan("kubectl") + "\x1b[90m>\x1b[0m ";
 
 // --- splitter --------------------------------------------------------------
 
@@ -181,26 +164,10 @@ for (const type of ["pointerup", "pointercancel"]) {
   });
 }
 
-// --- worker plumbing -------------------------------------------------------
+// --- shared worker helpers -------------------------------------------------
 
-let kcpWorker = null;
-let kubectlWorker = null;
-let kubectlGate = Promise.resolve();
-let gateResolve = null;
-let restarting = false;
 let ready = false;
 let busy = false;
-const pendingRuns = new Map();
-const pendingBridges = new Map();
-let nextRunID = 1;
-let runQueue = Promise.resolve();
-
-class CancelledError extends Error {
-  constructor() {
-    super("cancelled");
-    this.name = "CancelledError";
-  }
-}
 
 function setStatus(text, className) {
   statusEl.textContent = text;
@@ -228,12 +195,31 @@ function waitReady(worker) {
   });
 }
 
+class CancelledError extends Error {
+  constructor() {
+    super("cancelled");
+    this.name = "CancelledError";
+  }
+}
+
+function serializeQueue() {
+  let queue = Promise.resolve();
+  return (task) => {
+    const result = queue.then(task);
+    queue = result.catch(() => {});
+    return result;
+  };
+}
+
+// --- kcp worker ------------------------------------------------------------
+
+let kcpWorker = null;
+const pendingBridges = new Map();
+
 function attachKcp(worker) {
   worker.addEventListener("error", (event) => {
     const message = event.message ?? "worker error";
     addLog("error", `kcp worker crashed: ${message}`);
-    // Fail in-flight bridge requests instead of leaving kubectl waiting for
-    // the 120s fetch timeout.
     for (const id of pendingBridges.keys()) {
       kubectlWorker?.postMessage({
         type: "fetchResult",
@@ -259,6 +245,43 @@ function attachKcp(worker) {
     }
   });
 }
+
+let persistTimer = null;
+function schedulePersist(snapshot) {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(stateKey, snapshot);
+    } catch {
+      addLog("warn", `snapshot too large for localStorage (${snapshot.length} bytes)`);
+    }
+  }, 250);
+}
+
+async function spawnKcp() {
+  const worker = new Worker("/kcp_worker.js", { type: "module" });
+  attachKcp(worker);
+  const readyPromise = waitReady(worker);
+  worker.postMessage({
+    type: "init",
+    wasmUrl: "/kcp.wasm",
+    execUrl: "/wasm_exec.js",
+    initialState: localStorage.getItem(stateKey) ?? "",
+  });
+  await readyPromise;
+  kcpWorker = worker;
+}
+
+// --- kubectl worker --------------------------------------------------------
+
+let kubectlWorker = null;
+let kubectlGate = Promise.resolve();
+let kubectlGateResolve = null;
+let kubectlRestarting = false;
+let kubectlInFlight = 0;
+const pendingRuns = new Map();
+let nextRunID = 1;
+const runKubectlQueued = serializeQueue();
 
 function attachKubectl(worker) {
   worker.addEventListener("message", (event) => {
@@ -287,7 +310,8 @@ function attachKubectl(worker) {
       const message = `kubectl exited (code ${data.code ?? "?"})`;
       for (const entry of pendingRuns.values()) entry.reject(new Error(message));
       pendingRuns.clear();
-      void restartKubectl(message);
+      pendingBridges.clear();
+      if (!kubectlRestarting) void restartKubectl(message);
     }
   });
 
@@ -315,12 +339,12 @@ async function spawnKubectl() {
 }
 
 async function restartKubectl(reason) {
-  if (restarting) return;
-  restarting = true;
+  if (kubectlRestarting) return;
+  kubectlRestarting = true;
   setStatus("restarting kubectl…", "running");
   addLog("warn", `restarting kubectl worker: ${reason}`);
   kubectlGate = new Promise((resolve) => {
-    gateResolve = resolve;
+    kubectlGateResolve = resolve;
   });
   const old = kubectlWorker;
   kubectlWorker = null;
@@ -334,42 +358,418 @@ async function restartKubectl(reason) {
   } catch (err) {
     addLog("error", `kubectl restart failed: ${err instanceof Error ? err.message : err}`);
   } finally {
-    restarting = false;
-    gateResolve?.();
-    gateResolve = null;
-    if (kubectlWorker) setStatus("connected", "connected");
-    else setStatus("kubectl failed", "disconnected");
+    kubectlRestarting = false;
+    kubectlGateResolve?.();
+    kubectlGateResolve = null;
+    if (kubectlWorker && !cliRestarting) setStatus("connected", "connected");
   }
 }
 
 function runKubectl(args, stdin = "") {
-  const task = runQueue.then(async () => {
+  return runKubectlQueued(async () => {
     await kubectlGate;
     const worker = kubectlWorker;
     if (!worker) throw new Error("kubectl worker is not running");
-    return await new Promise((resolve, reject) => {
-      const id = nextRunID++;
-      pendingRuns.set(id, { resolve, reject });
-      worker.postMessage({ type: "run", id, request: { args, stdin } });
-    });
+    kubectlInFlight++;
+    try {
+      return await new Promise((resolve, reject) => {
+        const id = nextRunID++;
+        pendingRuns.set(id, { resolve, reject });
+        worker.postMessage({ type: "run", id, request: { args, stdin } });
+      });
+    } finally {
+      kubectlInFlight--;
+    }
   });
-  runQueue = task.catch(() => {});
-  return task;
 }
 
-let persistTimer = null;
-function schedulePersist(snapshot) {
-  if (persistTimer) clearTimeout(persistTimer);
-  persistTimer = setTimeout(() => {
+function withServer(args) {
+  if (args.some((arg) => arg === "--server" || arg.startsWith("--server="))) {
+    return args;
+  }
+  return [...args, `--server=${apiServer}`];
+}
+
+// --- CLI worker (goat, yq) -------------------------------------------------
+
+const cliBaseEnv = {
+  HOME: homeDir,
+  XDG_STATE_HOME: `${homeDir}/.local/state`,
+  XDG_DATA_HOME: `${homeDir}/.local/share`,
+  XDG_CONFIG_HOME: `${homeDir}/.config`,
+  XDG_CACHE_HOME: `${homeDir}/.cache`,
+  TMPDIR: "/tmp",
+  PATH: "/usr/local/bin:/usr/bin:/bin",
+  USER: "user",
+  LOGNAME: "user",
+  LANG: "C.UTF-8",
+};
+
+let cliWorker = null;
+let cliGate = Promise.resolve();
+let cliGateResolve = null;
+let cliRestarting = false;
+let cliInFlight = 0;
+const pendingCli = new Map();
+let nextCliID = 1;
+const runCliQueued = serializeQueue();
+
+function attachCli(worker) {
+  worker.addEventListener("message", (event) => {
+    const data = event.data ?? {};
+    if (data.type === "log") {
+      addLog(data.level ?? "info", `cli: ${data.message}`);
+      return;
+    }
+    if (data.type === "result" && typeof data.id === "number") {
+      const entry = pendingCli.get(data.id);
+      if (!entry) return;
+      pendingCli.delete(data.id);
+      entry.resolve(data.result ?? {});
+    }
+  });
+
+  worker.addEventListener("error", (event) => {
+    const message = event.message ?? "cli worker error";
+    addLog("error", `cli worker crashed: ${message}`);
+    for (const entry of pendingCli.values()) entry.reject(new Error(message));
+    pendingCli.clear();
+  });
+}
+
+async function spawnCli() {
+  const worker = new Worker("/cli_worker.js", { type: "module" });
+  attachCli(worker);
+  const readyPromise = waitReady(worker);
+  worker.postMessage({
+    type: "init",
+    execUrl: "/wasm_exec_cli.js",
+    modules: { goat: "/goat.wasm", yq: "/yq.wasm" },
+    env: cliBaseEnv,
+    cwd: homeDir,
+  });
+  await readyPromise;
+  cliWorker = worker;
+}
+
+async function restartCli(reason) {
+  if (cliRestarting) return;
+  cliRestarting = true;
+  addLog("warn", `restarting CLI worker: ${reason}`);
+  cliGate = new Promise((resolve) => {
+    cliGateResolve = resolve;
+  });
+  const old = cliWorker;
+  cliWorker = null;
+  for (const entry of pendingCli.values()) entry.reject(new CancelledError());
+  pendingCli.clear();
+  old?.terminate();
+  try {
+    await spawnCli();
+    addLog("ok", "CLI worker restarted");
+  } catch (err) {
+    addLog("error", `CLI restart failed: ${err instanceof Error ? err.message : err}`);
+  } finally {
+    cliRestarting = false;
+    cliGateResolve?.();
+    cliGateResolve = null;
+  }
+}
+
+function runCli(tool, args, env, cwd, stdin, files, dirs) {
+  return runCliQueued(async () => {
+    await cliGate;
+    const worker = cliWorker;
+    if (!worker) throw new Error(`${tool} worker is not running`);
+    cliInFlight++;
     try {
-      localStorage.setItem(stateKey, snapshot);
+      return await new Promise((resolve, reject) => {
+        const id = nextCliID++;
+        pendingCli.set(id, { resolve, reject });
+        worker.postMessage({
+          type: "run",
+          id,
+          request: { tool, args, env, cwd, stdin, files, dirs },
+        });
+      });
+    } finally {
+      cliInFlight--;
+    }
+  });
+}
+
+// --- just-bash shell and filesystem sharing --------------------------------
+
+let bash = null;
+let shellAbort = null;
+
+function decodeStdin(value) {
+  if (!value) return "";
+  if (typeof value === "string") {
+    const bytes = new Uint8Array(value.length);
+    for (let i = 0; i < value.length; i++) bytes[i] = value.charCodeAt(i) & 0xff;
+    return new TextDecoder().decode(bytes);
+  }
+  return new TextDecoder().decode(value);
+}
+
+async function walkBashFs(fs, dir = "/", files = {}, dirs = []) {
+  let names = [];
+  try {
+    names = await fs.readdir(dir);
+  } catch {
+    return { files, dirs };
+  }
+  if (dir !== "/") dirs.push(dir);
+  for (const name of names) {
+    const path = dir === "/" ? `/${name}` : `${dir}/${name}`;
+    if (path === "/dev" || path === "/proc") continue;
+    let stat;
+    try {
+      stat = await fs.stat(path);
     } catch {
-      addLog("warn", `snapshot too large for localStorage (${snapshot.length} bytes)`);
+      continue;
+    }
+    if (stat.isDirectory) {
+      await walkBashFs(fs, path, files, dirs);
+    } else if (stat.isFile && stat.size < 1_000_000) {
+      try {
+        files[path] = await fs.readFile(path);
+      } catch {
+        // Binary or unreadable file; not shareable with goat.
+      }
+    }
+  }
+  return { files, dirs };
+}
+
+async function applyCliFiles(files, sent) {
+  for (const path of Object.keys(sent)) {
+    if (!(path in files)) {
+      await bash.fs.rm(path, { force: true }).catch(() => {});
+    }
+  }
+  for (const [path, content] of Object.entries(files)) {
+    if (sent[path] === content) continue;
+    const directory = path.slice(0, path.lastIndexOf("/")) || "/";
+    await bash.fs.mkdir(directory, { recursive: true }).catch(() => {});
+    await bash.fs.writeFile(path, content).catch((err) => {
+      addLog("warn", `cli fs: ${path}: ${err instanceof Error ? err.message : err}`);
+    });
+  }
+}
+
+function shellHelp() {
+  return [
+    "just-bash shell. kubectl and goat run as WebAssembly workers in this tab.",
+    "",
+    "examples:",
+    "  get crds",
+    "  get fetches | grep demo",
+    "  kubectl get fetch demo -o yaml > demo.yaml",
+    "  kubectl apply -f - <<'EOF' ... EOF",
+    "  goat resolve bsky.app",
+    "  goat account login -u handle -p app-password",
+    "  goat xrpc query https://public.api.bsky.app app.bsky.actor.getProfile actor==atproto.com",
+    "  yq '.items[].metadata.name' fetches.json",
+    "  echo '{\"a\":1}' | jq .a    (jq is built into just-bash)",
+    "  export GOAT_USERNAME=... GOAT_PASSWORD=...",
+    "  ls /tmp; cat demo.yaml",
+    "",
+    "builtins: help · clear · reset (wipe kcp state and reload)",
+    "keys: Ctrl-C cancel · Ctrl-D finish stdin · Tab complete · ↑/↓ history",
+    "",
+  ].join("\n");
+}
+
+function makeCommands() {
+  const kubectl = defineCommand("kubectl", async (args, ctx) => {
+    const result = await runKubectl(withServer(args), decodeStdin(ctx.stdin));
+    return {
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+      exitCode: result.code ?? 0,
+    };
+  });
+
+  const runCliCommand = async (tool, args, ctx) => {
+    if (!cliWorker && !cliRestarting) {
+      return { stdout: "", stderr: `${tool} worker is not available\n`, exitCode: 1 };
+    }
+    if (cliRestarting) await cliGate;
+    const env = { ...cliBaseEnv, ...Object.fromEntries(ctx.env) };
+    const { files, dirs } = await walkBashFs(bash.fs);
+    const result = await runCli(
+      tool,
+      args,
+      env,
+      ctx.cwd,
+      decodeStdin(ctx.stdin),
+      files,
+      dirs,
+    );
+    await applyCliFiles(result.files ?? {}, files);
+    return {
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+      exitCode: result.code ?? 0,
+    };
+  };
+
+  const goat = defineCommand("goat", (args, ctx) => runCliCommand("goat", args, ctx));
+  const yq = defineCommand("yq", (args, ctx) => runCliCommand("yq", args, ctx));
+
+  const help = defineCommand("help", async () => ({
+    stdout: shellHelp(),
+    stderr: "",
+    exitCode: 0,
+  }));
+
+  const clear = defineCommand("clear", async () => {
+    term.clear();
+    return { stdout: "", stderr: "", exitCode: 0 };
+  });
+
+  const reset = defineCommand("reset", async () => {
+    localStorage.removeItem(stateKey);
+    localStorage.removeItem(shellStateKey);
+    addLog("warn", "shell and kcp state cleared; reloading");
+    setTimeout(() => location.reload(), 300);
+    return { stdout: "cleared shell and kcp state; reloading…\n", stderr: "", exitCode: 0 };
+  });
+
+  return [kubectl, goat, yq, help, clear, reset];
+}
+
+async function restoreShell() {
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(shellStateKey) ?? "{}");
+  } catch {
+    saved = {};
+  }
+
+  bash = new Bash({
+    cwd: homeDir,
+    env: saved.env ?? {},
+    customCommands: makeCommands(),
+    executionLimits: { maxExecutionTimeMs: 60 * 60 * 1000 },
+  });
+
+  for (const directory of ["/home", homeDir, "/tmp", "/etc", "/bin", "/usr/bin"]) {
+    await bash.fs.mkdir(directory, { recursive: true }).catch(() => {});
+  }
+  for (const directory of saved.dirs ?? []) {
+    await bash.fs.mkdir(directory, { recursive: true }).catch(() => {});
+  }
+  for (const [path, content] of Object.entries(saved.files ?? {})) {
+    await bash.fs.writeFile(path, content).catch(() => {});
+  }
+  if (saved.cwd && saved.cwd !== bash.getCwd()) {
+    await bash.exec(`cd '${saved.cwd.replace(/'/g, "'\\''")}'`).catch(() => {});
+  }
+}
+
+let persistShellTimer = null;
+function scheduleShellPersist(env) {
+  if (!bash) return;
+  if (persistShellTimer) clearTimeout(persistShellTimer);
+  persistShellTimer = setTimeout(async () => {
+    try {
+      const { files, dirs } = await walkBashFs(bash.fs);
+      const payload = JSON.stringify({
+        files,
+        dirs,
+        env: env ?? bash.getEnv(),
+        cwd: bash.getCwd(),
+      });
+      localStorage.setItem(shellStateKey, payload);
+    } catch (err) {
+      addLog(
+        "warn",
+        `could not persist shell filesystem: ${err instanceof Error ? err.message : err}`,
+      );
     }
   }, 250);
 }
 
-// --- helpers ---------------------------------------------------------------
+// --- shell prompt and execution --------------------------------------------
+
+let line = "";
+let cursor = 0;
+let history = [];
+let historyIndex = 0;
+let continuation = [];
+let stdinMode = false;
+let stdinScript = "";
+let stdinLines = [];
+let stdinCurrent = "";
+let completing = false;
+
+try {
+  const saved = JSON.parse(localStorage.getItem("kcp-cmd-history") ?? "[]");
+  if (Array.isArray(saved)) {
+    history = saved.filter((entry) => typeof entry === "string");
+  }
+} catch {
+  // Corrupt history is not worth surfacing.
+}
+historyIndex = history.length;
+
+function promptText() {
+  const cwd = bash?.getCwd() ?? homeDir;
+  return `${cyan(cwd)} $ `;
+}
+
+const stdinPrompt = () => "\x1b[90m...\x1b[0m ";
+const continuationPrompt = () => "\x1b[90m> \x1b[0m ";
+
+function prompt() {
+  term.write(`\r\n${promptText()}`);
+}
+
+function redraw() {
+  term.write(`\r\x1b[2K${promptText()}${line}`);
+  const back = line.length - cursor;
+  if (back > 0) term.write(`\x1b[${back}D`);
+}
+
+function replaceLine(next) {
+  line = next;
+  cursor = next.length;
+  redraw();
+}
+
+function insertText(text) {
+  if (!text) return;
+  if (cursor === line.length) {
+    line += text;
+    cursor = line.length;
+    term.write(text);
+  } else {
+    line = line.slice(0, cursor) + text + line.slice(cursor);
+    cursor += text.length;
+    redraw();
+  }
+}
+
+function deleteWordBeforeCursor() {
+  if (cursor === 0) return;
+  let index = cursor;
+  while (index > 0 && line[index - 1] === " ") index--;
+  while (index > 0 && line[index - 1] !== " ") index--;
+  line = line.slice(0, index) + line.slice(cursor);
+  cursor = index;
+  redraw();
+}
+
+function saveHistory() {
+  try {
+    localStorage.setItem("kcp-cmd-history", JSON.stringify(history.slice(-100)));
+  } catch {
+    // History is best-effort.
+  }
+}
 
 function splitArgs(text) {
   const args = [];
@@ -394,60 +794,365 @@ function splitArgs(text) {
   return args;
 }
 
-function withServer(args) {
-  if (args.some((arg) => arg === "--server" || arg.startsWith("--server="))) {
-    return args;
+function needsStdin(args) {
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if ((arg === "-f" || arg === "--filename") && args[index + 1] === "-") {
+      return true;
+    }
+    if (arg === "--filename=-") return true;
   }
-  return [...args, `--server=${apiServer}`];
+  return false;
 }
 
 function normalizeNewlines(text) {
   return String(text).replace(/\r\n/g, "\n").replace(/\n/g, "\r\n");
 }
 
-// --- startup ---------------------------------------------------------------
-
-async function start() {
-  const initial = localStorage.getItem(stateKey) ?? "";
-  kcpWorker = new Worker("/kcp_worker.js", { type: "module" });
-  attachKcp(kcpWorker);
-  term.writeln(cyan("kcp-wasm") + dim(" loading kcp.wasm…"));
-  setStatus("loading kcp…", "running");
-  const kcpReady = waitReady(kcpWorker);
-  kcpWorker.postMessage({
-    type: "init",
-    wasmUrl: "/kcp.wasm",
-    execUrl: "/wasm_exec.js",
-    initialState: initial,
-  });
-  await kcpReady;
-
-  term.writeln(cyan("kubectl-wasm") + dim(" loading kubectl.wasm (122 MB)…"));
-  setStatus("loading kubectl…", "running");
-  await spawnKubectl();
-
-  ready = true;
-  retryEl.hidden = true;
-  setStatus("connected", "connected");
-  term.writeln(dim(`kcp + kubectl running in this browser tab (api ${apiServer})`));
-  term.writeln(dim("type 'help' for examples; Ctrl-C cancels a running command"));
-  writePromptHint();
-  prompt();
-
-  void poll();
-  setInterval(() => void poll(), intervalMs);
+function heredocDelimiter(script) {
+  const lines = script.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(/<<-?\s*(['"]?)([A-Za-z0-9_]+)\1/);
+    if (!match) continue;
+    const delimiter = match[2];
+    const closes = lines.slice(i + 1).some((entry) => entry.trim() === delimiter);
+    if (!closes) return delimiter;
+  }
+  return null;
 }
 
-function writePromptHint() {
-  term.writeln(dim("try: get crds   |   get fetches"));
-  term.writeln(dim(`create a Fetch: create -f ${location.origin}/demo.yaml`));
+function stripHeredocBodies(script) {
+  const lines = script.split("\n");
+  const kept = [];
+  let active = null;
+  for (const current of lines) {
+    if (active !== null) {
+      if (current.trim() === active) active = null;
+      continue;
+    }
+    kept.push(current);
+    const match = current.match(/<<-?\s*(['"]?)([A-Za-z0-9_]+)\1/);
+    if (match) active = match[2];
+  }
+  return kept.join("\n");
+}
+
+function unbalancedQuote(script) {
+  let quote = null;
+  for (let i = 0; i < script.length; i++) {
+    const ch = script[i];
+    if (ch === "\\" && quote !== "'") {
+      i++;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+    }
+  }
+  return quote;
+}
+
+function needsContinuation(script) {
+  if (heredocDelimiter(script)) return true;
+  if (unbalancedQuote(stripHeredocBodies(script))) return true;
+  const trimmed = script.replace(/\s+$/, "");
+  if (trimmed.endsWith("\\")) return true;
+  if (/(\||&&|\|\||\()$/.test(trimmed)) return true;
+  return false;
+}
+
+async function runScript(script, stdin = "") {
+  busy = true;
+  const label = script.split("\n")[0].slice(0, 80);
+  setStatus(`running ${label}…`, "running");
+  addLog("info", `$ ${label.replace(/\s+/g, " ")}${script.includes("\n") ? " …" : ""}`);
+  const started = performance.now();
+  shellAbort = new AbortController();
+
+  try {
+    const result = await bash.exec(script, {
+      signal: shellAbort.signal,
+      stdin,
+      rawScript: script.includes("\n"),
+    });
+    const elapsed = Math.round(performance.now() - started);
+    if (result.stdout) term.write(normalizeNewlines(result.stdout));
+    if (result.stderr) term.write(red(normalizeNewlines(result.stderr)));
+    term.write(dim(`[exit ${result.exitCode} · ${elapsed}ms]`));
+    addLog(
+      result.exitCode === 0 ? "ok" : "warn",
+      `exit ${result.exitCode} · ${elapsed}ms`,
+    );
+    scheduleShellPersist(result.env);
+  } catch (err) {
+    if (err instanceof CancelledError || err?.name === "AbortError") {
+      term.writeln(dim("[cancelled]"));
+      addLog("warn", "script cancelled");
+    } else {
+      const message = err instanceof Error ? err.message : String(err);
+      term.writeln(red(`error: ${message}`));
+      addLog("error", `script failed: ${message}`);
+    }
+    scheduleShellPersist();
+  } finally {
+    shellAbort = null;
+    busy = false;
+    if (!kubectlRestarting && !cliRestarting) setStatus("connected", "connected");
+    prompt();
+    void poll();
+  }
+}
+
+function submit() {
+  const current = line.trimEnd();
+  line = "";
+  cursor = 0;
+  term.write("\r\n");
+
+  if (!current && continuation.length === 0) {
+    prompt();
+    return;
+  }
+
+  continuation.push(current);
+  const script = continuation.join("\n");
+  if (needsContinuation(script)) {
+    term.write(continuationPrompt());
+    return;
+  }
+  continuation = [];
+
+  if (!current) {
+    prompt();
+    return;
+  }
+
+  history.push(current);
+  saveHistory();
+  historyIndex = history.length;
+
+  if (!ready) {
+    term.writeln(red("still loading WASM modules…"));
+    prompt();
+    return;
+  }
+
+  const words = splitArgs(current);
+  if (needsStdin(words) && !script.includes("\n") && !/[|<>&]/.test(current)) {
+    stdinMode = true;
+    stdinScript = script;
+    stdinLines = [];
+    stdinCurrent = "";
+    term.writeln(
+      dim("stdin mode: paste or type the manifest. Ctrl-D runs, Ctrl-C aborts."),
+    );
+    term.write(stdinPrompt());
+    return;
+  }
+
+  void runScript(script);
+}
+
+function abortStdin() {
+  stdinMode = false;
+  stdinScript = "";
+  stdinLines = [];
+  stdinCurrent = "";
+  term.write("^C\r\n");
+  addLog("warn", "stdin aborted");
+  prompt();
+}
+
+function finishStdin() {
+  if (stdinCurrent) {
+    stdinLines.push(stdinCurrent);
+    stdinCurrent = "";
+  }
+  const stdin = stdinLines.length > 0 ? `${stdinLines.join("\n")}\n` : "";
+  const script = stdinScript;
+  stdinMode = false;
+  stdinScript = "";
+  stdinLines = [];
+  term.write("\r\n");
+  term.writeln(dim(`[stdin ${stdin.split("\n").length - 1} line(s), ${stdin.length} bytes]`));
+  void runScript(script, stdin);
+}
+
+function handleStdinData(data) {
+  if (data.startsWith("\u001b")) return;
+  for (const ch of data) {
+    if (ch === "\r" || ch === "\n") {
+      stdinLines.push(stdinCurrent);
+      stdinCurrent = "";
+      term.write("\r\n" + stdinPrompt());
+    } else if (ch === "\u007f") {
+      if (stdinCurrent.length > 0) {
+        stdinCurrent = stdinCurrent.slice(0, -1);
+        term.write("\b \b");
+      }
+    } else if (ch === "\t") {
+      stdinCurrent += "  ";
+      term.write("  ");
+    } else if (ch >= " ") {
+      stdinCurrent += ch;
+      term.write(ch);
+    }
+  }
+}
+
+function cancelRunning() {
+  line = "";
+  cursor = 0;
+  if (continuation.length > 0) {
+    continuation = [];
+    term.write("\r\x1b[2K^C");
+    prompt();
+    return;
+  }
+  if (!busy) {
+    term.write("\r\x1b[2K");
+    prompt();
+    return;
+  }
+  term.write("^C");
+  addLog("warn", "Ctrl-C: cancelling");
+  shellAbort?.abort();
+  if (kubectlInFlight > 0) void restartKubectl("Ctrl-C");
+  if (cliInFlight > 0) void restartCli("Ctrl-C");
+}
+
+// --- completion ------------------------------------------------------------
+
+function commonPrefix(values) {
+  if (values.length === 0) return "";
+  let prefix = values[0];
+  for (const value of values.slice(1)) {
+    let index = 0;
+    while (
+      index < prefix.length &&
+      index < value.length &&
+      prefix[index] === value[index]
+    ) {
+      index++;
+    }
+    prefix = prefix.slice(0, index);
+  }
+  return prefix;
+}
+
+function shellCommandNames() {
+  const builtins = [
+    "cd", "export", "unset", "alias", "source", ".", "history",
+    "kubectl", "goat", "yq", "help", "clear", "reset",
+  ];
+  return [...new Set([...getCommandNames(), ...builtins])].sort();
+}
+
+async function pathCompletions(token) {
+  const slash = token.lastIndexOf("/");
+  const directory = slash === -1 ? "." : (token.slice(0, slash) || "/");
+  const prefix = slash === -1 ? token : token.slice(slash + 1);
+  const absolute = directory.startsWith("/")
+    ? directory
+    : `${bash.getCwd().replace(/\/$/, "")}/${directory}`;
+  const names = await bash.fs.readdir(absolute).catch(() => []);
+  const results = [];
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const parent = slash === -1 ? token.slice(0, token.length - prefix.length) : token.slice(0, slash + 1);
+    let isDir = false;
+    try {
+      isDir = (await bash.fs.stat(`${absolute.replace(/\/$/, "")}/${name}`)).isDirectory;
+    } catch {
+      isDir = false;
+    }
+    results.push({ value: `${parent}${name}${isDir ? "/" : ""}`, description: isDir ? "dir" : "" });
+  }
+  return results;
+}
+
+async function kubectlCompletions(parts, token) {
+  const result = await runKubectl([
+    "__complete",
+    `--server=${apiServer}`,
+    ...parts,
+    token,
+  ]);
+  return String(result.stdout ?? "")
+    .split("\n")
+    .filter((entry) => entry && !entry.startsWith(":") && !entry.startsWith("_activeHelp_"))
+    .map((entry) => {
+      const [value, ...description] = entry.split("\t");
+      return { value, description: description.join(" ").trim() };
+    });
+}
+
+async function completeLine() {
+  if (completing || busy || stdinMode || !ready || continuation.length > 0) return;
+  const original = line;
+  const endsWithSpace = /\s$/.test(original);
+  const parts = splitArgs(original);
+  const token = endsWithSpace ? "" : (parts.pop() ?? "");
+
+  completing = true;
+  try {
+    let candidates;
+    if (parts[0] === "kubectl") {
+      candidates = await kubectlCompletions(parts.slice(1), token);
+    } else if (parts.length === 0) {
+      candidates = shellCommandNames()
+        .filter((name) => name.startsWith(token))
+        .map((name) => ({ value: name, description: "" }));
+    } else {
+      candidates = await pathCompletions(token);
+    }
+
+    if (line !== original || busy) return;
+    if (candidates.length === 0) {
+      term.write("\x07");
+      return;
+    }
+
+    const base = endsWithSpace ? line : line.slice(0, line.length - token.length);
+    if (candidates.length === 1) {
+      line = `${base}${candidates[0].value}${candidates[0].value.endsWith("/") ? "" : " "}`;
+      cursor = line.length;
+      redraw();
+      return;
+    }
+
+    const prefix = commonPrefix(candidates.map((candidate) => candidate.value));
+    if (prefix.length > token.length) {
+      line = `${base}${prefix}`;
+      cursor = line.length;
+    }
+
+    term.write("\r\n");
+    for (const candidate of candidates.slice(0, 40)) {
+      term.writeln(
+        candidate.description
+          ? `${cyan(candidate.value)}  ${dim(candidate.description)}`
+          : candidate.value,
+      );
+    }
+    if (candidates.length > 40) {
+      term.writeln(dim(`... ${candidates.length - 40} more`));
+    }
+    term.write("\r\n");
+    redraw();
+  } catch (err) {
+    addLog("warn", `completion failed: ${err instanceof Error ? err.message : err}`);
+  } finally {
+    completing = false;
+  }
 }
 
 // --- live Pele diagram -----------------------------------------------------
 
 let lastDiagram = "";
 let polling = false;
-// Maps Pele node ids to the kubectl command that describes them.
 let diagramTargets = new Map();
 
 diagramEl.addEventListener("click", (event) => {
@@ -517,7 +1222,9 @@ async function poll() {
     const items = fetches?.items ?? [];
     renderDiagram(
       mermaid,
-      crds ? `${crdCount} CRD${crdCount === 1 ? "" : "s"} · ${items.length} Fetch${items.length === 1 ? "" : "es"}` : "error",
+      crds
+        ? `${crdCount} CRD${crdCount === 1 ? "" : "s"} · ${items.length} Fetch${items.length === 1 ? "" : "es"}`
+        : "error",
     );
     const summary = items
       .map((item) => {
@@ -548,346 +1255,62 @@ function renderDiagram(mermaid, summary = "") {
   }
 }
 
-// --- terminal state and editing --------------------------------------------
+// --- startup ---------------------------------------------------------------
 
-let line = "";
-let cursor = 0;
-let history = [];
-let historyIndex = 0;
+async function start() {
+  term.writeln(cyan("kcp-wasm") + dim(" loading kcp.wasm…"));
+  setStatus("loading kcp…", "running");
+  await spawnKcp();
 
-const historyKey = "kcp-cmd-history";
-try {
-  const saved = JSON.parse(localStorage.getItem(historyKey) ?? "[]");
-  if (Array.isArray(saved)) {
-    history = saved.filter((entry) => typeof entry === "string");
-  }
-} catch {
-  // Corrupt history is not worth surfacing.
-}
-historyIndex = history.length;
+  term.writeln(cyan("kubectl-wasm") + dim(" loading kubectl.wasm (122 MB)…"));
+  setStatus("loading kubectl…", "running");
+  await spawnKubectl();
 
-// Multi-line stdin for `apply -f -`, `create -f -`, ...
-let stdinMode = false;
-let stdinArgs = null;
-let stdinLines = [];
-let stdinCurrent = "";
-let completing = false;
-
-const stdinPrompt = () => "\x1b[90m...\x1b[0m ";
-
-function prompt() {
-  term.write(`\r\n${promptText()}`);
-}
-
-function redraw() {
-  term.write(`\r\x1b[2K${promptText()}${line}`);
-  const back = line.length - cursor;
-  if (back > 0) term.write(`\x1b[${back}D`);
-}
-
-function replaceLine(next) {
-  line = next;
-  cursor = next.length;
-  redraw();
-}
-
-function insertText(text) {
-  if (!text) return;
-  if (cursor === line.length) {
-    line += text;
-    cursor = line.length;
-    term.write(text);
-  } else {
-    line = line.slice(0, cursor) + text + line.slice(cursor);
-    cursor += text.length;
-    redraw();
-  }
-}
-
-function deleteWordBeforeCursor() {
-  if (cursor === 0) return;
-  let index = cursor;
-  while (index > 0 && line[index - 1] === " ") index--;
-  while (index > 0 && line[index - 1] !== " ") index--;
-  line = line.slice(0, index) + line.slice(cursor);
-  cursor = index;
-  redraw();
-}
-
-function commonPrefix(values) {
-  if (values.length === 0) return "";
-  let prefix = values[0];
-  for (const value of values.slice(1)) {
-    let index = 0;
-    while (index < prefix.length && index < value.length && prefix[index] === value[index]) {
-      index++;
-    }
-    prefix = prefix.slice(0, index);
-  }
-  return prefix;
-}
-
-// Tab completion via kubectl's own __complete command. The partial command is
-// appended after __complete; the virtual API server flag is passed so
-// resource-name completion can query kcp.
-async function completeLine() {
-  if (completing || busy || stdinMode || !ready) return;
-  const original = line;
-  const endsWithSpace = /\s$/.test(original);
-  const parts = splitArgs(original);
-  const token = endsWithSpace ? "" : (parts.pop() ?? "");
-
-  completing = true;
+  term.writeln(cyan("cli-wasm") + dim(" loading goat.wasm + yq.wasm…"));
+  setStatus("loading goat + yq…", "running");
   try {
-    const result = await runKubectl([
-      "__complete",
-      `--server=${apiServer}`,
-      ...parts,
-      token,
-    ]);
-    // The line changed while completions were in flight; drop the result.
-    if (line !== original || busy) return;
-
-    const candidates = String(result.stdout ?? "")
-      .split("\n")
-      .filter((entry) => entry && !entry.startsWith(":") && !entry.startsWith("_activeHelp_"))
-      .map((entry) => {
-        const [value, ...description] = entry.split("\t");
-        return { value, description: description.join(" ").trim() };
-      });
-
-    if (candidates.length === 0) {
-      term.write("\x07");
-      addLog("debug", `no completions for "${token}"`);
-      return;
-    }
-
-    const base = endsWithSpace ? line : line.slice(0, line.length - token.length);
-    if (candidates.length === 1) {
-      line = `${base}${candidates[0].value} `;
-      cursor = line.length;
-      redraw();
-      return;
-    }
-
-    const prefix = commonPrefix(candidates.map((candidate) => candidate.value));
-    if (prefix.length > token.length) {
-      line = `${base}${prefix}`;
-      cursor = line.length;
-    }
-
-    term.write("\r\n");
-    for (const candidate of candidates.slice(0, 40)) {
-      term.writeln(
-        candidate.description
-          ? `${cyan(candidate.value)}  ${dim(candidate.description)}`
-          : candidate.value,
-      );
-    }
-    if (candidates.length > 40) {
-      term.writeln(dim(`... ${candidates.length - 40} more`));
-    }
-    term.write("\r\n");
-    redraw();
+    await spawnCli();
   } catch (err) {
-    addLog("warn", `completion failed: ${err instanceof Error ? err.message : err}`);
-  } finally {
-    completing = false;
+    addLog("warn", `goat/yq unavailable: ${err instanceof Error ? err.message : err}`);
   }
-}
 
-function printHelp() {
-  term.writeln(dim("This terminal runs upstream kubectl compiled to WebAssembly."));
-  term.writeln(dim("kcp runs in another Web Worker in this tab; --server is added for you."));
-  term.writeln(dim("examples:"));
-  term.writeln("  get crds");
-  term.writeln("  get fetches");
-  term.writeln("  get fetch demo -o yaml");
-  term.writeln("  describe fetch demo");
-  term.writeln(`  create -f ${location.origin}/demo.yaml`);
-  term.writeln("  delete fetch demo");
-  term.writeln("  apply -f -        (paste a manifest; Ctrl-D runs it, Ctrl-C aborts)");
-  term.writeln(dim("builtins: help · clear · reset (wipe kcp state and reload)"));
-  term.writeln(dim("keys: Ctrl-C cancel · Ctrl-D run stdin · Ctrl-L clear · ↑/↓ history"));
-  term.writeln(dim("      ←/→ cursor · Ctrl-A/E/U/W · Tab completion"));
-  term.writeln(dim("no local files in WASM: use URLs with -f, or stdin with -f -"));
-  term.writeln(dim("you can also drag a YAML file onto the terminal to apply it"));
-}
+  term.writeln(dim("loading just-bash shell…"));
+  await restoreShell();
 
-/** True when kubectl would read the manifest from stdin. */
-function needsStdin(args) {
-  for (let index = 0; index < args.length; index++) {
-    const arg = args[index];
-    if ((arg === "-f" || arg === "--filename") && args[index + 1] === "-") {
-      return true;
-    }
-    if (arg === "--filename=-") return true;
-  }
-  return false;
-}
-
-function saveHistory() {
-  try {
-    localStorage.setItem(historyKey, JSON.stringify(history.slice(-100)));
-  } catch {
-    // History is best-effort.
-  }
-}
-
-function abortStdin() {
-  stdinMode = false;
-  stdinArgs = null;
-  stdinLines = [];
-  stdinCurrent = "";
-  term.write("^C\r\n");
-  addLog("warn", "stdin aborted");
+  ready = true;
+  retryEl.hidden = true;
+  setStatus("connected", "connected");
+  term.writeln(dim(`kcp + kubectl + goat + yq running in this browser tab (api ${apiServer})`));
+  term.writeln(dim("type 'help' for examples; Ctrl-C cancels a running command"));
   prompt();
+  term.focus();
+
+  void poll();
+  setInterval(() => void poll(), intervalMs);
 }
 
-function finishStdin() {
-  if (stdinCurrent) {
-    stdinLines.push(stdinCurrent);
-    stdinCurrent = "";
+// Dropping a manifest runs `apply -f -` with the file contents as stdin.
+const terminalPaneEl = document.getElementById("terminal-pane");
+terminalPaneEl.addEventListener("dragover", (event) => {
+  event.preventDefault();
+});
+terminalPaneEl.addEventListener("drop", async (event) => {
+  event.preventDefault();
+  const file = event.dataTransfer?.files?.[0];
+  if (!file) return;
+  if (busy || stdinMode || !ready) {
+    addLog("warn", "busy; cannot apply the dropped manifest right now");
+    return;
   }
-  const text = stdinLines.length > 0 ? `${stdinLines.join("\n")}\n` : "";
-  const args = stdinArgs;
-  stdinMode = false;
-  stdinArgs = null;
-  stdinLines = [];
-  term.write("\r\n");
-  term.writeln(dim(`[stdin ${text.split("\n").length - 1} line(s), ${text.length} bytes]`));
-  execute(args, text);
-}
-
-function handleStdinData(data) {
-  if (data.startsWith("\u001b")) return;
-  for (const ch of data) {
-    if (ch === "\r" || ch === "\n") {
-      stdinLines.push(stdinCurrent);
-      stdinCurrent = "";
-      term.write("\r\n" + stdinPrompt());
-    } else if (ch === "\u007f") {
-      if (stdinCurrent.length > 0) {
-        stdinCurrent = stdinCurrent.slice(0, -1);
-        term.write("\b \b");
-      }
-    } else if (ch === "\t") {
-      stdinCurrent += "  ";
-      term.write("  ");
-    } else if (ch >= " ") {
-      stdinCurrent += ch;
-      term.write(ch);
-    }
-  }
-}
-
-function execute(args, stdin) {
-  busy = true;
-  const label = args.slice(0, 2).join(" ");
-  setStatus(`running ${label}…`, "running");
-  addLog(
-    "info",
-    stdin === "" ? `> ${args.join(" ")}` : `> ${args.join(" ")} (stdin ${stdin.length} bytes)`,
+  const text = await file.text();
+  term.focus();
+  term.write(
+    `\r\n${promptText()}kubectl apply -f - ${dim(`(dropped ${file.name}, ${text.length} bytes)`)}\r\n`,
   );
-  const started = performance.now();
-  runKubectl(withServer(args), stdin)
-    .then((result) => {
-      const elapsed = Math.round(performance.now() - started);
-      if (result.stdout) term.write(normalizeNewlines(result.stdout));
-      if (result.stderr) term.write(red(normalizeNewlines(result.stderr)));
-      term.write(dim(`[exit ${result.code} · ${elapsed}ms]`));
-      addLog(
-        result.code === 0 ? "ok" : "warn",
-        `exit ${result.code} · ${elapsed}ms · ${args[0]}`,
-      );
-    })
-    .catch((err) => {
-      if (err instanceof CancelledError) {
-        term.writeln(dim("[cancelled]"));
-        addLog("warn", "command cancelled");
-      } else {
-        const message = err instanceof Error ? err.message : String(err);
-        term.writeln(red(`error: ${message}`));
-        addLog("error", `command failed: ${message}`);
-      }
-    })
-    .finally(() => {
-      busy = false;
-      if (!restarting) setStatus("connected", "connected");
-      prompt();
-      void poll();
-    });
-}
+  void runScript("kubectl apply -f -", text);
+});
 
-function submit() {
-  const command = line.trim();
-  line = "";
-  cursor = 0;
-  term.write("\r\n");
-  if (!command) {
-    prompt();
-    return;
-  }
-  history.push(command);
-  saveHistory();
-  historyIndex = history.length;
-
-  const args = splitArgs(command);
-  if (args[0] === "kubectl") args.shift();
-
-  if (args[0] === "help") {
-    printHelp();
-    prompt();
-    return;
-  }
-  if (args[0] === "clear") {
-    term.clear();
-    prompt();
-    return;
-  }
-  if (args[0] === "reset") {
-    localStorage.removeItem(stateKey);
-    addLog("warn", "kcp state cleared from localStorage; reloading");
-    term.writeln(dim("cleared kcp state; reloading…"));
-    setTimeout(() => location.reload(), 300);
-    return;
-  }
-  if (args.length === 0) {
-    prompt();
-    return;
-  }
-  if (!ready) {
-    term.writeln(red("still loading WASM modules…"));
-    prompt();
-    return;
-  }
-
-  if (needsStdin(args)) {
-    stdinMode = true;
-    stdinArgs = args;
-    stdinLines = [];
-    stdinCurrent = "";
-    term.writeln(
-      dim("stdin mode: paste or type the manifest. Ctrl-D runs, Ctrl-C aborts."),
-    );
-    term.write(stdinPrompt());
-    return;
-  }
-
-  execute(args, "");
-}
-
-function cancelRunning() {
-  line = "";
-  cursor = 0;
-  if (!busy) {
-    prompt();
-    return;
-  }
-  term.write("^C");
-  addLog("warn", "Ctrl-C: restarting the kubectl worker to cancel");
-  void restartKubectl("Ctrl-C");
-}
+// --- input -----------------------------------------------------------------
 
 term.onData((data) => {
   if (stdinMode) {
@@ -1007,7 +1430,6 @@ term.onData((data) => {
       insertText(text);
       text = "";
       submit();
-      // A paste can carry the command and its stdin manifest in one chunk.
       const rest = data.slice(index + 1);
       if (rest) {
         if (stdinMode) handleStdinData(rest);

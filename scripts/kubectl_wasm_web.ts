@@ -40,8 +40,17 @@ const kcpWasmPath = Deno.realPathSync(
 const kubectlWasmPath = Deno.realPathSync(
   options.get("kubectl-wasm") ?? "bin/wasm/kubectl.wasm",
 );
+const goatWasmPath = Deno.realPathSync(
+  options.get("goat-wasm") ?? "bin/wasm/goat.wasm",
+);
+const yqWasmPath = Deno.realPathSync(
+  options.get("yq-wasm") ?? "bin/wasm/yq.wasm",
+);
 const wasmExecPath = Deno.realPathSync(
   options.get("wasm-exec") ?? "bin/wasm/wasm_exec.js",
+);
+const wasmExecCliPath = Deno.realPathSync(
+  options.get("wasm-exec-cli") ?? "bin/wasm/wasm_exec_cli.js",
 );
 const hostname = options.get("host") ?? "127.0.0.1";
 const port = Number(options.get("port") ?? "8090");
@@ -56,6 +65,7 @@ const assets = new Map<string, string>([
   ["/diagram.js", "diagram.js"],
   ["/kcp_worker.js", "kcp_worker.js"],
   ["/kubectl_worker.js", "kubectl_worker.js"],
+  ["/cli_worker.js", "cli_worker.js"],
   ["/fs_shim.js", "fs_shim.js"],
 ]);
 
@@ -109,6 +119,65 @@ Deno.serve({ hostname, port }, async (request) => {
     );
   }
 
+  if (url.pathname === "/proxy") {
+    const target = url.searchParams.get("url") ?? "";
+    let upstreamURL: URL;
+    try {
+      upstreamURL = new URL(target);
+    } catch {
+      return new Response("invalid url\n", { status: 400, headers });
+    }
+    if (upstreamURL.protocol !== "http:" && upstreamURL.protocol !== "https:") {
+      return new Response("unsupported scheme\n", { status: 400, headers });
+    }
+
+    const forwarded = new Headers();
+    const skip = new Set([
+      "host",
+      "origin",
+      "referer",
+      "connection",
+      "accept-encoding",
+      "content-length",
+    ]);
+    request.headers.forEach((value, key) => {
+      if (!skip.has(key.toLowerCase())) forwarded.set(key, value);
+    });
+
+    const body = request.method === "GET" || request.method === "HEAD"
+      ? undefined
+      : await request.arrayBuffer();
+
+    try {
+      const upstream = await fetch(upstreamURL, {
+        method: request.method,
+        headers: forwarded,
+        body,
+        redirect: "follow",
+      });
+      const headersOut = new Headers();
+      for (const [key, value] of upstream.headers) {
+        const name = key.toLowerCase();
+        if (
+          name === "content-encoding" || name === "content-length" ||
+          name === "transfer-encoding" || name === "connection"
+        ) {
+          continue;
+        }
+        headersOut.set(key, value);
+      }
+      return new Response(upstream.body, {
+        status: upstream.status,
+        headers: headersOut,
+      });
+    } catch (err) {
+      return new Response(
+        `proxy error: ${err instanceof Error ? err.message : err}\n`,
+        { status: 502, headers },
+      );
+    }
+  }
+
   if (url.pathname === "/demo.yaml") {
     const body = [
       "apiVersion: fetch.kcp.io/v1alpha1",
@@ -134,8 +203,17 @@ Deno.serve({ hostname, port }, async (request) => {
   if (url.pathname === "/kubectl.wasm") {
     return await fileResponse(request, kubectlWasmPath, "application/wasm");
   }
+  if (url.pathname === "/goat.wasm") {
+    return await fileResponse(request, goatWasmPath, "application/wasm");
+  }
+  if (url.pathname === "/yq.wasm") {
+    return await fileResponse(request, yqWasmPath, "application/wasm");
+  }
   if (url.pathname === "/wasm_exec.js") {
     return await fileResponse(request, wasmExecPath, "text/javascript; charset=utf-8");
+  }
+  if (url.pathname === "/wasm_exec_cli.js") {
+    return await fileResponse(request, wasmExecCliPath, "text/javascript; charset=utf-8");
   }
 
   const asset = assets.get(url.pathname);
@@ -150,5 +228,5 @@ Deno.serve({ hostname, port }, async (request) => {
 });
 
 console.error(
-  `browser demo: http://${hostname}:${port} (all WASM in the browser; virtual API ${apiServer})`,
+  `browser demo: http://${hostname}:${port} (all WASM in the browser; virtual API ${apiServer}; goat/yq egress via /proxy)`,
 );

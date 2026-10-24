@@ -36,13 +36,80 @@ const files = new Map();
 let nextFD = 10;
 
 const memFiles = new Map();
-const memDirs = new Set();
+const memDirs = new Set(["/"]);
 
 const stdin = { bytes: new Uint8Array(0), offset: 0 };
+
+let cwd = "/";
+let outputSink = null;
 
 export function setStdin(text) {
   stdin.bytes = new TextEncoder().encode(text ?? "");
   stdin.offset = 0;
+}
+
+/** Resolves relative paths against the Go process working directory. */
+export function setCwd(path) {
+  cwd = normalizePath(path);
+}
+
+export function getCwd() {
+  return cwd;
+}
+
+/** Routes writes to fd 1/2 into a per-run capture instead of the console. */
+export function setOutputSink(sink) {
+  outputSink = sink;
+}
+
+export function snapshotFiles() {
+  const snapshot = {};
+  const decoder = new TextDecoder();
+  for (const [path, data] of memFiles) {
+    snapshot[path] = decoder.decode(data);
+  }
+  return snapshot;
+}
+
+export function clearMemoryFs() {
+  memFiles.clear();
+  memDirs.clear();
+  memDirs.add("/");
+  files.clear();
+  nextFD = 10;
+}
+
+export function writeMemoryFile(path, content) {
+  const resolved = normalizePath(path);
+  ensureParents(resolved);
+  memFiles.set(resolved, new TextEncoder().encode(content));
+}
+
+export function makeMemoryDir(path) {
+  const resolved = normalizePath(path);
+  ensureParents(resolved);
+  memDirs.add(resolved);
+}
+
+function normalizePath(path) {
+  const absolute = String(path).startsWith("/")
+    ? String(path)
+    : `${cwd.replace(/\/$/, "")}/${path}`;
+  const parts = [];
+  for (const part of absolute.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return `/${parts.join("/")}`;
+}
+
+function ensureParents(path) {
+  const parts = path.split("/").filter(Boolean);
+  for (let i = 1; i < parts.length; i++) {
+    memDirs.add(`/${parts.slice(0, i).join("/")}`);
+  }
+  memDirs.add("/");
 }
 
 function jsError(code) {
@@ -79,6 +146,7 @@ function plainStat(mode, size) {
 }
 
 function statPath(path) {
+  path = normalizePath(path);
   if (memFiles.has(path)) {
     return plainStat(S_IFREG | 0o644, memFiles.get(path).length);
   }
@@ -114,6 +182,7 @@ export function installFsShim() {
   };
 
   fs.open = (path, flags, _mode, cb) => {
+    path = normalizePath(path);
     try {
       const writable = (flags & (O_WRONLY | O_RDWR)) !== 0;
       if (writable) {
@@ -204,7 +273,12 @@ export function installFsShim() {
   fs.write = (fd, buffer, offset, length, position, cb) => {
     if (fd === 1 || fd === 2) {
       const text = new TextDecoder().decode(buffer.subarray(offset, offset + length));
-      (fd === 1 ? console.log : console.error)(text);
+      if (outputSink) {
+        if (fd === 1) outputSink.stdout += text;
+        else outputSink.stderr += text;
+      } else {
+        (fd === 1 ? console.log : console.error)(text);
+      }
       cb(null, length);
       return;
     }
@@ -227,22 +301,25 @@ export function installFsShim() {
   };
 
   fs.mkdir = (path, _mode, cb) => {
+    path = normalizePath(path);
     for (const dir of parentDirs(path)) memDirs.add(dir);
     memDirs.add(path);
     cb(null);
   };
 
   fs.rmdir = (path, cb) => {
-    memDirs.delete(path);
+    memDirs.delete(normalizePath(path));
     cb(null);
   };
 
   fs.unlink = (path, cb) => {
-    memFiles.delete(path);
+    memFiles.delete(normalizePath(path));
     cb(null);
   };
 
   fs.rename = (from, to, cb) => {
+    from = normalizePath(from);
+    to = normalizePath(to);
     const data = memFiles.get(from);
     if (data) {
       memFiles.delete(from);
@@ -252,6 +329,7 @@ export function installFsShim() {
   };
 
   fs.truncate = (path, length, cb) => {
+    path = normalizePath(path);
     const data = memFiles.get(path) ?? new Uint8Array(0);
     const next = new Uint8Array(length);
     next.set(data.subarray(0, Math.min(length, data.length)));
@@ -281,7 +359,7 @@ export function installFsShim() {
   fs.utimes = (_path, _atime, _mtime, cb) => cb(null);
 
   fs.readdir = (path, cb) => {
-    const base = path.replace(/\/$/, "");
+    const base = normalizePath(path).replace(/\/$/, "");
     const names = new Set();
     for (const file of memFiles.keys()) {
       if (file.startsWith(base + "/")) {

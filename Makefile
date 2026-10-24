@@ -134,8 +134,16 @@ build-kubectl-wasm: ## Build upstream kubectl for js/wasm and stage wasm_exec.js
 verify-kubectl-wasm: ## Run kubectl and kcp as separate WASM Deno workers and verify the Fetch CRD
 	./scripts/verify-kubectl-wasm.sh
 
+.PHONY: build-goat-wasm
+build-goat-wasm: ## Build bluesky-social/goat for js/wasm (stock sources + indigo shim)
+	./scripts/build-goat-wasm.sh
+
+.PHONY: build-yq-wasm
+build-yq-wasm: ## Build mikefarah/yq for js/wasm (stock sources)
+	./scripts/build-yq-wasm.sh
+
 .PHONY: run-kubectl-wasm-web
-run-kubectl-wasm-web: build-kcp-wasm build-kubectl-wasm ## Serve the browser demo (kcp + kubectl WASM in the tab)
+run-kubectl-wasm-web: build-kcp-wasm build-kubectl-wasm build-goat-wasm build-yq-wasm ## Serve the browser demo (kcp, kubectl, goat, yq WASM in the tab)
 	deno run --allow-read --allow-net ./scripts/kubectl_wasm_web.ts --port=$${WEB_PORT:-8090}
 
 .PHONY: verify-kubectl-wasm-web
