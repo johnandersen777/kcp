@@ -217,6 +217,14 @@ GO
     replace_in "${reflector}" 'defaultBackoffMax  = 30 * time.Second' 'defaultBackoffMax  = 1 * time.Second'
   done
 
+  # Every informer event handler preallocates a 1024-slot notification ring
+  # (16 KiB); the browser shard registers ~650 of them (~17 MiB). Start at 16
+  # slots: the ring doubles on demand.
+  for informer in "${work}/client-go/tools/cache/shared_informer.go" \
+    "${work}/kcp-apimachinery/third_party/informers/shared_informer.go"; do
+    replace_in "${informer}" 's.clock.Now(), initialBufferSize, s.HasSyncedChecker())' 's.clock.Now(), 16, s.HasSyncedChecker())'
+  done
+
   # The CRD handler builds a fresh scale scheme (autoscaling, extensions and
   # apps conversions) for every served CRD version: ~10 MiB of heap in the
   # browser shard. The scheme is read-only once built; share one.
