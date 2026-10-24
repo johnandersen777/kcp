@@ -415,6 +415,34 @@ function kcpPageRequest(request, timeoutMs = 60_000) {
   });
 }
 
+// A REST call to kcp through the same bridge kubectl's requests use, without
+// kubectl itself (a 120 MiB module). The identity and Compute panels use it,
+// so a phone in low-memory mode loads kubectl only when someone types it.
+async function kcpREST(method, path, body, contentType = "application/json") {
+  const headers = { Host: new URL(apiServer).host, Accept: "application/json" };
+  if (body !== undefined) headers["Content-Type"] = contentType;
+  const response = await kcpPageRequest({
+    method,
+    path,
+    headers,
+    body: body === undefined ? "" : typeof body === "string" ? body : JSON.stringify(body),
+  });
+  const text = response?.bodyBase64 ? atob(response.bodyBase64) : String(response?.body ?? "");
+  const status = response?.status ?? 500;
+  if (status >= 400) {
+    let message = text;
+    try {
+      message = JSON.parse(text).message ?? text;
+    } catch {
+      // not a Status object
+    }
+    throw new Error(`${method} ${path}: ${status} ${message}`.trim());
+  }
+  return text ? JSON.parse(text) : null;
+}
+
+const SOCIALWEB_API = "/apis/socialweb.computer/v1alpha1";
+
 function attachKcp(worker) {
   worker.addEventListener("error", (event) => {
     const message = event.message ?? "worker error";
@@ -1837,26 +1865,26 @@ function setAppStatus(el, text, className = "") {
   el.className = `app-status ${className}`.trim();
 }
 
+// Without a handle, sign in through bsky.social's authorization server and
+// pick the account on its page; the placeholder looks like a value but is not.
+const DEFAULT_PDS_URL = "https://bsky.social";
+
 function requesterIdentity() {
-  return {
-    mode: identityModeEl.value,
-    handle: identityHandleEl.value.trim(),
-    association: "Skip",
-  };
+  const handle = identityHandleEl.value.trim();
+  const identity = { mode: identityModeEl.value, association: "Skip" };
+  if (handle) identity.handle = handle;
+  else identity.pdsUrl = DEFAULT_PDS_URL;
+  return identity;
 }
 
 async function patchRequesterIdentity() {
   const identity = requesterIdentity();
   localStorage.setItem(identityPrefs.mode, identity.mode);
   localStorage.setItem(identityPrefs.handle, identity.handle);
-  const patch = JSON.stringify({ spec: { identity } });
-  const result = await runKubectl(withServer([
-    "patch", "marketrequester", "app", "--type=merge", "-p", patch,
-  ]));
-  if (result.code !== 0) {
-    throw new Error(String(result.stderr ?? "patch failed").trim());
-  }
-  addLog("info", `identity ${identity.mode} handle=${identity.handle || "(unset)"}`);
+  // A merge patch: unset fields are dropped, so a cleared handle must be null.
+  const patch = { spec: { identity: { handle: null, pdsUrl: null, ...identity } } };
+  await kcpREST("PATCH", `${SOCIALWEB_API}/marketrequesters/app`, patch, "application/merge-patch+json");
+  addLog("info", `identity ${identity.mode} ${identity.handle ? `handle=${identity.handle}` : `pds=${identity.pdsUrl}`}`);
 }
 
 async function completeOAuth(message) {
@@ -2046,14 +2074,11 @@ async function requestVM() {
         bundle: vmshell.secretsBundle(token),
       });
     }
-    const identity = await kubectlJSON(["get", "marketidentity", "requester"]).catch(() => null);
+    const identity = await kcpREST("GET", `${SOCIALWEB_API}/marketidentities/requester`).catch(() => null);
     const manifest = vmshell.contractManifest({
       name, bidders, ownerDid: identity?.status?.did ?? "", shell, sshKeys: ssh ? [ssh] : [], ttlSeconds,
     });
-    const result = await runKubectl(withServer(["apply", "-f", "-"]), JSON.stringify(manifest));
-    if (result.code !== 0) {
-      throw new Error(String(result.stderr || result.stdout || "apply failed").trim());
-    }
+    await kcpREST("POST", `${SOCIALWEB_API}/computecontracts`, manifest);
     setAppStatus(computeStatusEl, `${name} requested from ${bidders.join(", ")}`, "ok");
     addLog("ok", `ComputeContract ${name} requested from ${bidders.join(", ")}${shell ? " with a web shell" : ""}`);
   } catch (err) {
@@ -2066,12 +2091,12 @@ async function requestVM() {
 async function releaseContract(name) {
   computeReleaseAsked.add(name);
   computeLastRender = "";
-  const result = await runKubectl(withServer([
-    "patch", "computecontract", name, "--type=merge", "-p", JSON.stringify({ spec: { release: true } }),
-  ]));
-  if (result.code !== 0) {
+  try {
+    await kcpREST("PATCH", `${SOCIALWEB_API}/computecontracts/${name}`, { spec: { release: true } },
+      "application/merge-patch+json");
+  } catch (err) {
     computeReleaseAsked.delete(name);
-    setAppStatus(computeStatusEl, String(result.stderr ?? "release failed").trim(), "err");
+    setAppStatus(computeStatusEl, String(err.message ?? err), "err");
     return;
   }
   addLog("info", `ComputeContract ${name} released`);
