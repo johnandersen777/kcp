@@ -86,6 +86,7 @@ type Server struct {
 	// VirtualOrigin is the browser-facing virtual origin.
 	VirtualOrigin string
 
+	dial   func(ctx context.Context, network, address string) (net.Conn, error)
 	cancel context.CancelFunc
 	done   chan struct{}
 }
@@ -113,7 +114,10 @@ func Boot(parent context.Context, cfg Config) (*Server, error) {
 
 	listener := NewPipeListener(tcpAddr)
 	dialer := NewPipeDialer(listener, 30*time.Second)
-	server.SetLoopbackDial(dialer.DialContext)
+	// One func value for every client: the js build's client-go shares a
+	// transport (and its HTTP/2 connection) per dial func value.
+	dial := dialer.DialContext
+	server.SetLoopbackDial(dial)
 
 	// The logical-cluster migration controller needs raw etcd and is disabled
 	// in memory mode. APIBindings check the migration annotation before it can
@@ -188,7 +192,7 @@ func Boot(parent context.Context, cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("real: building the server config: %w", err)
 	}
 	loopback := serverConfig.GenericConfig.LoopbackClientConfig
-	loopback.Dial = dialer.DialContext
+	loopback.Dial = dial
 	if cfg.ShardBaseURL != "" {
 		serverConfig.GenericConfig.ExternalAddress = hostOnly(cfg.ShardBaseURL)
 	}
@@ -241,6 +245,7 @@ func Boot(parent context.Context, cfg Config) (*Server, error) {
 		KCP:           kcpServer,
 		Listener:      listener,
 		Dialer:        dialer,
+		dial:          dial,
 		Client:        client,
 		BaseURL:       baseURL,
 		VirtualOrigin: cfg.ShardBaseURL,
@@ -306,7 +311,7 @@ func (s *Server) RestConfig() *rest.Config {
 		return nil
 	}
 	cfg := rest.CopyConfig(s.KCP.GenericConfig.LoopbackClientConfig)
-	cfg.Dial = s.Dialer.DialContext
+	cfg.Dial = s.dial
 	return cfg
 }
 

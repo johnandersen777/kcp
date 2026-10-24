@@ -172,6 +172,37 @@ if [[ "${mode}" == "js" ]]; then
     '\tif err := pem.Encode(&keyBuffer, &pem.Block{Type: keyutil.RSAPrivateKeyBlockType, Bytes: x509.MarshalPKCS1PrivateKey(priv)}); err != nil {' \
     '\tkeyDER, err := x509.MarshalECPrivateKey(priv)\n\tif err != nil {\n\t\treturn nil, nil, err\n\t}\n\tif err := pem.Encode(&keyBuffer, &pem.Block{Type: keyutil.ECPrivateKeyBlockType, Bytes: keyDER}); err != nil {'
 
+  # rest.Config wraps a custom Dial in a fresh DialHolder per client, so the
+  # transport cache never hits and every client opens its own TLS + HTTP/2
+  # connection over the in-process pipe: ~250 connections, ~1500 goroutines
+  # and their buffers in the browser shard. Share one holder per dial func
+  # value; rest.CopyConfig copies the same value, so equal configs share a
+  # connection as they do without a custom Dial.
+  replace_in "${work}/client-go/rest/transport.go" \
+    'conf.DialHolder = &transport.DialHolder{Dial: c.Dial}' 'conf.DialHolder = sharedDialHolder(c.Dial)'
+  cat > "${work}/client-go/rest/dialholder_shared.go" <<'GO'
+package rest
+
+import (
+	"context"
+	"net"
+	"sync"
+	"unsafe"
+
+	"k8s.io/client-go/transport"
+)
+
+// dialHolders maps a dial func value (its funcval pointer) to one
+// DialHolder. Holders keep their func alive, so a pointer is never reused.
+var dialHolders sync.Map
+
+func sharedDialHolder(dial func(ctx context.Context, network, address string) (net.Conn, error)) *transport.DialHolder {
+	key := *(*unsafe.Pointer)(unsafe.Pointer(&dial))
+	h, _ := dialHolders.LoadOrStore(key, &transport.DialHolder{Dial: dial})
+	return h.(*transport.DialHolder)
+}
+GO
+
   # Informers start before their CRDs exist and their reflectors back off
   # 800ms doubling to 30s, so a resource that appears a moment later is only
   # listed tens of seconds after. A single in-process apiserver has no
