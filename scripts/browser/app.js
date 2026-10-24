@@ -2072,6 +2072,16 @@ async function releaseVMShell() {
   addLog("info", `VM shell ${name} released`);
 }
 
+// The release runs in this tab's requester: closing the tab mid-release
+// leaves the guest running until the bidder's release deadline. A reload
+// resumes it, but warn before the tab goes away.
+let vmshellReleasing = false;
+addEventListener("beforeunload", (event) => {
+  if (!vmshellReleasing) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+
 function applyVMShellState(state) {
   vmshellRequestEl.disabled = vmshellBusy || state.marketIdentity?.phase !== "Ready";
   if (!vmshellName) return;
@@ -2082,6 +2092,7 @@ function applyVMShellState(state) {
     return;
   }
   const phase = contract.phase ?? "Pending";
+  vmshellReleasing = Boolean(contract.release) && phase !== "Released" && phase !== "Failed";
   vmshellReleaseEl.disabled = Boolean(contract.release);
   setAppStatus(vmshellStatusEl,
     [vmshellName, phase, contract.chosenDid ? `bidder ${contract.chosenDid}` : "",
