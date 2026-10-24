@@ -1328,6 +1328,57 @@ function renderDiagram(mermaid, summary = "") {
   }
 }
 
+
+// Boot sequence: resolve socialweb.computer via goat, build the PDS getRecord
+// URL for its profile, apply it as a Fetch, wait for the fetch to finish, and
+// render the result with yq. It is typed into the terminal on every load.
+const BOOT_SCRIPT = [
+  "DID=$(goat resolve socialweb.computer | jq -r .id)",
+  "PDS=$(goat resolve \"$DID\" | jq -r '.service[] | select(.type==\"AtprotoPersonalDataServer\") | .serviceEndpoint')",
+  "kubectl apply -f - <<EOF",
+  "apiVersion: fetch.kcp.io/v1alpha1",
+  "kind: Fetch",
+  "metadata:",
+  "  name: socialweb-profile",
+  "spec:",
+  '  url: "$PDS/xrpc/com.atproto.repo.getRecord?repo=$DID&collection=app.bsky.actor.profile&rkey=self"',
+  "EOF",
+  'phase=""',
+  'while [ "$phase" != "Resolved" ] && [ "$phase" != "Error" ]; do sleep 0.2; phase=$(kubectl get fetch socialweb-profile -o jsonpath=\'{.status.phase}\' 2>/dev/null); done',
+  "kubectl get fetch socialweb-profile -o json | yq -P",
+].join("\n");
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let booting = false;
+
+async function typeBootScript(script) {
+  if (!ready || !kubectlWorker) return;
+  booting = true;
+  busy = true;
+  setStatus("running boot sequence…", "running");
+
+  const lines = script.split("\n");
+  let heredoc = null;
+  for (let i = 0; i < lines.length; i++) {
+    const current = lines[i];
+    if (i === 0) term.write(promptText());
+    else term.write(`\r\n${heredoc ? continuationPrompt() : promptText()}`);
+    if (heredoc) {
+      if (current.trim() === heredoc) heredoc = null;
+    } else {
+      const match = current.match(/<<-?\s*(['"]?)([A-Za-z0-9_]+)\1/);
+      if (match) heredoc = match[2];
+    }
+    for (const ch of current) {
+      term.write(ch);
+      await sleep(2);
+    }
+  }
+  term.write("\r\n");
+  booting = false;
+  await runScript(script);
+}
+
 // --- startup ---------------------------------------------------------------
 
 async function start() {
@@ -1360,6 +1411,7 @@ async function start() {
 
   void poll();
   setInterval(() => void poll(), intervalMs);
+  void typeBootScript(BOOT_SCRIPT);
 }
 
 // Dropping a manifest runs `apply -f -` with the file contents as stdin.
@@ -1406,6 +1458,7 @@ term.onData((data) => {
     return;
   }
   if (data === "\u0003") {
+    if (booting) return;
     cancelRunning();
     return;
   }
