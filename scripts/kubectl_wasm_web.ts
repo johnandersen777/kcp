@@ -88,6 +88,8 @@ const assets = new Map<string, string>([
   ["/wasm_fetch.js", "wasm_fetch.js"],
   ["/ingress_ws.js", "ingress_ws.js"],
   ["/vmshell.js", "vmshell.js"],
+  ["/webrtc_guest.js", "webrtc_guest.js"],
+  ["/ssh_worker.js", "ssh_worker.js"],
   ["/wasm_snapshot.js", "wasm_snapshot.js"],
   ["/kcp_hibernate.js", "kcp_hibernate.js"],
 ]);
@@ -98,6 +100,13 @@ const wasmModules = new Map<string, string>([
   ["/goat.wasm", goatWasmPath],
   ["/yq.wasm", yqWasmPath],
 ]);
+// ssh.wasm (scripts/build-sshclient-wasm.sh) is optional: without it only
+// the WebRTC shell is unavailable.
+try {
+  wasmModules.set("/ssh.wasm", Deno.realPathSync(options.get("ssh-wasm") ?? "bin/wasm/ssh.wasm"));
+} catch {
+  console.error("no ssh.wasm; the WebRTC VM shell is unavailable");
+}
 
 const headers = {
   "cache-control": "no-cache",

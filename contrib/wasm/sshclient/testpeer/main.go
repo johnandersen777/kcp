@@ -317,8 +317,11 @@ func session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 				log.Printf("window-change %dx%d", binary.BigEndian.Uint32(req.Payload), binary.BigEndian.Uint32(req.Payload[4:]))
 			}
 		case "shell":
-			cmd := exec.Command("/bin/bash", "-i")
-			cmd.Env = append(os.Environ(), "TERM=xterm-256color", "PS1=testpeer$ ")
+			// No rc files and a clean environment: a login shell's rc can
+			// auto-attach tmux, which would hand the browser a live session.
+			cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-i")
+			cmd.Dir = os.TempDir()
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + os.TempDir(), "TERM=xterm-256color", "PS1=testpeer$ "}
 			f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 			if err != nil {
 				_ = req.Reply(false, nil)
