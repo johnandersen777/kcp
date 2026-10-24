@@ -287,6 +287,12 @@ AppView directly from the browser; those services send
 `Access-Control-Allow-Origin: *` (and allow Authorization in preflight), so no
 proxy is involved.
 
+The layout is responsive: narrow/iPhone viewports stack the diagram under the
+terminal, show a touch toolbar for the actions that need Ctrl (Ctrl-C,
+Ctrl-D, Enter, Tab, history), shrink the terminal font, and render the
+diagram top-to-bottom. The activity log starts collapsed; `show`/`hide`
+toggles it and the choice is remembered.
+
 xterm.js, Pele and just-bash load from jsDelivr/esm.sh, so the browser needs
 network access. There is no build step for the page.
 

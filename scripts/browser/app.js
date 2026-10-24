@@ -49,6 +49,7 @@ const logVerboseEl = document.getElementById("log-verbose");
 const leftPaneEl = document.getElementById("left-pane");
 const logPaneEl = document.getElementById("log-pane");
 const splitterEl = document.getElementById("splitter");
+const logToggleEl = document.getElementById("log-toggle");
 
 serverEl.textContent = apiServer;
 
@@ -109,9 +110,15 @@ const fitAddon = new FitAddon();
 term.loadAddon(fitAddon);
 term.loadAddon(new WebLinksAddon());
 term.open(document.getElementById("terminal"));
+const isNarrow = () => window.innerWidth < 700;
+
 fitAddon.fit();
 new ResizeObserver(() => {
-  try { fitAddon.fit(); } catch { /* layout not ready */ }
+  try {
+    const size = isNarrow() ? 12 : 13;
+    if (term.options.fontSize !== size) term.options.fontSize = size;
+    fitAddon.fit();
+  } catch { /* layout not ready */ }
 }).observe(document.getElementById("terminal-pane"));
 term.focus();
 document.getElementById("terminal-pane").addEventListener("click", () => term.focus());
@@ -143,12 +150,32 @@ const cyan = (text) => `\x1b[36m${text}\x1b[0m`;
 // --- splitter --------------------------------------------------------------
 
 const splitKey = "kcp-log-height";
+const logExpandedKey = "kcp-log-expanded";
 const savedSplit = localStorage.getItem(splitKey);
 if (savedSplit) logPaneEl.style.height = savedSplit;
+
+let logExpanded = localStorage.getItem(logExpandedKey) === "1";
+
+function setLogExpanded(expanded) {
+  logExpanded = expanded;
+  logPaneEl.classList.toggle("collapsed", !expanded);
+  leftPaneEl.classList.toggle("log-collapsed", !expanded);
+  logPaneEl.style.height = expanded ? (savedSplit ?? "190px") : "";
+  logToggleEl.textContent = expanded ? "hide" : "show";
+  localStorage.setItem(logExpandedKey, expanded ? "1" : "0");
+  if (expanded) logEl.scrollTop = logEl.scrollHeight;
+}
+
+logPaneEl.classList.toggle("collapsed", !logExpanded);
+leftPaneEl.classList.toggle("log-collapsed", !logExpanded);
+logPaneEl.style.height = logExpanded ? logPaneEl.style.height : "";
+logToggleEl.textContent = logExpanded ? "hide" : "show";
+logToggleEl.addEventListener("click", () => setLogExpanded(!logExpanded));
 
 let draggingSplitter = false;
 splitterEl.addEventListener("pointerdown", (event) => {
   draggingSplitter = true;
+  if (!logExpanded) setLogExpanded(true);
   splitterEl.setPointerCapture(event.pointerId);
 });
 splitterEl.addEventListener("pointermove", (event) => {
@@ -1231,16 +1258,21 @@ async function poll() {
       kubectlJSON(["get", "crds"]),
       kubectlJSON(["get", "fetches"]),
     ]);
-    mermaid = buildDiagram(apiServer, crds.items ?? [], fetches.items ?? []);
+    mermaid = buildDiagram(
+      apiServer,
+      crds.items ?? [],
+      fetches.items ?? [],
+      isNarrow() ? "TD" : "LR",
+    );
 
     const targets = new Map();
     for (const crd of crds.items ?? []) {
       const name = crd?.metadata?.name;
-      if (name) targets.set(nodeID("crd", name), `describe crd ${name}`);
+      if (name) targets.set(nodeID("crd", name), `kubectl describe crd ${name}`);
     }
     for (const fetch of fetches.items ?? []) {
       const name = fetch?.metadata?.name;
-      if (name) targets.set(nodeID("fetch", name), `describe fetch ${name}`);
+      if (name) targets.set(nodeID("fetch", name), `kubectl describe fetch ${name}`);
     }
     diagramTargets = targets;
   } catch (err) {
@@ -1481,6 +1513,48 @@ term.onData((data) => {
     if (ch >= " ") text += ch;
   }
   insertText(text);
+});
+
+// Touch devices have no Ctrl key: expose the control actions the terminal
+// needs on a small toolbar.
+document.getElementById("mobile-keys").addEventListener("click", (event) => {
+  const action = event.target.closest("button")?.dataset.action;
+  if (!action) return;
+  term.focus();
+  if (action === "ctrl-c") {
+    if (stdinMode) abortStdin();
+    else cancelRunning();
+    return;
+  }
+  if (action === "ctrl-d") {
+    if (stdinMode) finishStdin();
+    return;
+  }
+  if (busy) return;
+  if (stdinMode) {
+    if (action === "enter") handleStdinData("\r");
+    else if (action === "tab") handleStdinData("\t");
+    return;
+  }
+  if (action === "enter") {
+    submit();
+  } else if (action === "tab") {
+    void completeLine();
+  } else if (action === "up") {
+    if (history.length > 0) {
+      historyIndex = Math.max(0, historyIndex - 1);
+      replaceLine(history[historyIndex] ?? "");
+    }
+  }
+});
+
+let lastNarrow = isNarrow();
+window.addEventListener("resize", () => {
+  if (isNarrow() === lastNarrow) return;
+  lastNarrow = isNarrow();
+  // Different Mermaid direction changes the diagram text; force a repaint.
+  lastDiagram = "";
+  void poll();
 });
 
 setStatus("starting…", "running");

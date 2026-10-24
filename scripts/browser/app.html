@@ -53,14 +53,6 @@
     font-size: 12px;
     cursor: pointer;
   }
-  @media (max-width: 900px) {
-    main {
-      grid-template-columns: 1fr;
-      grid-template-rows: minmax(300px, 60vh) minmax(240px, 40vh);
-    }
-    #left-pane { border-right: none; border-bottom: 1px solid var(--border); }
-    #log-pane { max-height: 40%; }
-  }
   main {
     flex: 1;
     min-height: 0;
@@ -83,6 +75,7 @@
   }
   #terminal { width: 100%; height: 100%; }
   .xterm { height: 100%; }
+  #mobile-keys { display: none; }
   #splitter {
     height: 6px;
     flex: none;
@@ -101,10 +94,14 @@
     background: #070a10;
     overflow: hidden;
   }
+  #log-pane.collapsed { height: auto; min-height: 0; flex: 0 0 auto; }
+  #log-pane.collapsed #log { display: none; }
+  #left-pane.log-collapsed #splitter { display: none; }
   .log-head {
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap;
     padding: 3px 10px;
     font-size: 11px;
     text-transform: uppercase;
@@ -114,7 +111,7 @@
     background: var(--panel);
   }
   .log-head button {
-    margin-left: auto;
+    margin-left: 0;
     background: transparent;
     color: var(--muted);
     border: 1px solid var(--border);
@@ -145,6 +142,7 @@
     align-items: center;
     gap: 4px;
     cursor: pointer;
+    margin-left: auto;
   }
   .log-head input { margin: 0; }
   #diagram-pane {
@@ -188,6 +186,48 @@
     font-size: 11px;
     background: var(--panel);
   }
+  @media (max-width: 900px) {
+    main {
+      grid-template-columns: 1fr;
+      grid-template-rows: minmax(0, 1fr) minmax(200px, 38vh);
+    }
+    #left-pane { border-right: none; border-bottom: 1px solid var(--border); }
+    #log-pane { max-height: 40%; }
+  }
+  @media (max-width: 700px) {
+    #mobile-keys {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 4px 8px;
+      border-top: 1px solid var(--border);
+      background: var(--panel);
+    }
+    #mobile-keys button {
+      flex: 1 1 auto;
+      min-height: 30px;
+      padding: 2px 8px;
+      background: transparent;
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font: inherit;
+      font-size: 11px;
+    }
+    #mobile-keys button:active { background: var(--border); }
+  }
+  @media (max-width: 700px) {
+    header { padding: 6px 10px; gap: 6px; flex-wrap: wrap; row-gap: 4px; }
+    header h1 { font-size: 12px; }
+    header .meta { display: none; }
+    #status { font-size: 11px; }
+    #diagram-pane { padding: 6px 8px; }
+    #diagram-pane h2 { font-size: 10px; margin-bottom: 4px; }
+    #diagram-pane h2 .hint { display: none; }
+    .log-head { padding: 2px 8px; }
+    #log { padding: 3px 8px; font-size: 10px; }
+    footer { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -200,9 +240,16 @@
 <main>
   <section id="left-pane">
     <div id="terminal-pane"><div id="terminal"></div></div>
+    <div id="mobile-keys">
+      <button type="button" data-action="ctrl-c">Ctrl-C</button>
+      <button type="button" data-action="enter">Enter</button>
+      <button type="button" data-action="tab">Tab</button>
+      <button type="button" data-action="up">↑</button>
+      <button type="button" data-action="ctrl-d">Ctrl-D</button>
+    </div>
     <div id="splitter" title="drag to resize"></div>
     <div id="log-pane">
-      <div class="log-head">activity log<label><input id="log-verbose" type="checkbox" />verbose</label><button id="log-save" type="button">save</button><button id="log-clear" type="button">clear</button></div>
+      <div class="log-head">activity log<button id="log-toggle" type="button">show</button><label><input id="log-verbose" type="checkbox" />verbose</label><button id="log-save" type="button">save</button><button id="log-clear" type="button">clear</button></div>
       <div id="log"></div>
     </div>
   </section>

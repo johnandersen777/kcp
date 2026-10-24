@@ -25,8 +25,8 @@ export function nodeID(prefix, name) {
   return `${prefix}_${String(name).replace(/[^A-Za-z0-9_]/g, "_")}`;
 }
 
-export function buildDiagram(apiServer, crds, fetches) {
-  const lines = ["flowchart LR", `  api["kcp-wasm<br/>${label(apiServer)}"]`];
+export function buildDiagram(apiServer, crds, fetches, direction = "LR") {
+  const lines = [`flowchart ${direction}`, `  api["kcp-wasm<br/>${label(apiServer)}"]`];
   const crdIDs = new Map();
 
   for (const item of crds ?? []) {
