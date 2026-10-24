@@ -115,7 +115,7 @@ const isNarrow = () => window.innerWidth < 700;
 fitAddon.fit();
 new ResizeObserver(() => {
   try {
-    const size = isNarrow() ? 12 : 13;
+    const size = isNarrow() ? 11 : 13;
     if (term.options.fontSize !== size) term.options.fontSize = size;
     fitAddon.fit();
   } catch { /* layout not ready */ }
@@ -1343,8 +1343,7 @@ const BOOT_SCRIPT = [
   "spec:",
   '  url: "$PDS/xrpc/com.atproto.repo.getRecord?repo=$DID&collection=app.bsky.actor.profile&rkey=self"',
   "EOF",
-  'phase=""',
-  'while [ "$phase" != "Resolved" ] && [ "$phase" != "Error" ]; do sleep 0.2; phase=$(kubectl get fetch socialweb-profile -o jsonpath=\'{.status.phase}\' 2>/dev/null); done',
+  'kubectl wait --for=jsonpath=\'{.status.phase}\'=Resolved fetch/socialweb-profile --timeout=20s || true',
   "kubectl get fetch socialweb-profile -o json | yq -P",
 ].join("\n");
 
@@ -1374,7 +1373,10 @@ async function typeBootScript(script) {
       await sleep(2);
     }
   }
+  // Visible Enter press on the final line before running the script.
+  await sleep(150);
   term.write("\r\n");
+  await sleep(150);
   booting = false;
   await runScript(script);
 }
