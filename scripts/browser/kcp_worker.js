@@ -41,6 +41,10 @@ if (globalThis.__kcpInitialState) {
 }
 // Read by the Go entrypoint before the socialweb orchestrator starts.
 if (init.socialweb) globalThis.__socialwebConfig = JSON.stringify(init.socialweb);
+// Go pushes the ingress Exposures the page must hold relay subscriptions for.
+globalThis.__socialwebIngress = (json) => {
+  self.postMessage({ type: "socialweb-ingress", ingress: JSON.parse(json) });
+};
 let lastPersistLog = 0;
 globalThis.__kcpPersist = (snapshot) => {
   const now = Date.now();
@@ -124,6 +128,21 @@ self.onmessage = (event) => {
   const { type, id, request } = event.data ?? {};
   if (type === "state-subscribe") {
     if (latestState) self.postMessage({ type: "state", state: latestState });
+    return;
+  }
+  // Page-only Go exports (vault writes, relay signing and request frames).
+  // Answered like "request" through __kcpResolve.
+  if (type === "socialweb-call" && typeof id === "number") {
+    const { fn, payload } = event.data;
+    const allowed = ["socialwebVaultPut", "socialwebIngressSign",
+      "socialwebIngressToken", "socialwebIngressRequest"];
+    if (!allowed.includes(fn) || typeof globalThis[fn] !== "function") {
+      self.postMessage({ type: "response", id, error: `${fn} is not available` });
+      return;
+    }
+    const callbackID = nextCallbackID++;
+    pending.set(callbackID, { id });
+    globalThis[fn](String(payload ?? ""), callbackID);
     return;
   }
   if (type !== "request" || typeof id !== "number") return;
