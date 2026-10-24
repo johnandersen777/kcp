@@ -1943,6 +1943,20 @@ function signInFailed(err) {
   identitySignInEl.disabled = false;
 }
 
+// A callback consumes its PAR state even when it fails, but the identity keeps
+// showing the same URL until it expires. Clear it so the controller starts a
+// fresh authorization, and offer it with the next tap.
+async function restartSignIn() {
+  pendingSignInURL = "";
+  try {
+    await kcpREST("PATCH", `${SOCIALWEB_API}/marketidentities/requester/status`,
+      { status: { pendingAction: null } }, "application/merge-patch+json");
+    addLog("info", "asked the PDS for a fresh sign-in URL");
+  } catch (err) {
+    addLog("warn", `could not reset the sign-in URL: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
 async function openSignInPopup() {
   const url = pendingSignInURL;
   if (!url) throw new Error("the identity has no pending sign-in URL yet");
@@ -1958,7 +1972,12 @@ async function openSignInPopup() {
   setAppStatus(identityStatusEl, "waiting for the AT Protocol popup…", "warn");
   const message = await openOAuthPopup(url);
   if (message.type !== OAUTH_CALLBACK_MESSAGE) return;
-  await completeOAuth(message);
+  try {
+    await completeOAuth(message);
+  } catch (err) {
+    await restartSignIn();
+    throw err;
+  }
 }
 
 function parseTTLSeconds(value) {
