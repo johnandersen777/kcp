@@ -2073,16 +2073,22 @@ async function ensureRequesterBidders(bidders) {
     throw new Error(String(result.stderr || result.stdout || "patching the bidders failed").trim());
   }
   setAppStatus(vmshellStatusEl, "waiting for the requester to pick up the bidders…", "warn");
-  for (let i = 0; i < 90; i++) {
+  // The Requester writes observedGeneration only on a phase change, so a
+  // restart back to Ready is seen as: its spec has the bidders and it is ready.
+  for (let i = 0; i < 30; i++) {
     const list = await kubectlJSON(["get", "requesters"]).catch(() => null);
     const requester = list?.items?.[0];
-    if (requester && bidders.every((did) => (requester.spec?.bidderDIDs ?? []).includes(did)) &&
-      requester.status?.ready && requester.status?.observedGeneration === requester.metadata?.generation) {
-      return;
+    const have = requester?.spec?.bidderDIDs ?? [];
+    const picked = bidders.every((did) => have.includes(did));
+    if (picked && requester?.status?.ready) return;
+    if (i % 5 === 4) {
+      addLog("debug", `vmshell: requester bidderDIDs=${JSON.stringify(have)} ready=${requester?.status?.ready} ` +
+        `phase=${requester?.status?.phase} generation=${requester?.metadata?.generation} ` +
+        `observed=${requester?.status?.observedGeneration}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
-  throw new Error("the requester did not pick up the bidders within 3 minutes");
+  addLog("warn", "vmshell: the requester did not report ready with the bidders within 60s; requesting anyway");
 }
 
 async function releaseVMShell() {
