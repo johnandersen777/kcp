@@ -351,3 +351,26 @@ Deno.test("response bodies are sent as raw JSON when possible", async () => {
     subscriber.close();
   }
 });
+
+Deno.test("connecting is true only while the socket is CONNECTING", async () => {
+  FakeWebSocket.instances = [];
+  const subscriber = await register({
+    proxyHost: "relay.example.com",
+    did: "did:plc:test",
+    serviceAuth: "service-token",
+    signer: (bytes) => bytes,
+    fetchImpl: nonceFetch(new Uint8Array([1])),
+    WebSocketImpl: (url) => new FakeWebSocket(url),
+    reconnect: false,
+  });
+  try {
+    const ws = FakeWebSocket.instances[0];
+    ws.readyState = 0;
+    assertEquals(subscriber.connecting, true);
+    ws.readyState = 1;
+    assertEquals(subscriber.connecting, false);
+  } finally {
+    subscriber.close();
+  }
+  assertEquals(subscriber.connecting, false);
+});

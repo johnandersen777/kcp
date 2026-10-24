@@ -159,6 +159,10 @@ var SubscriberConnection = class {
   get connected() {
     return this.ws !== null && (this.ws.readyState === void 0 || this.ws.readyState === 1);
   }
+  // True while the socket is still upgrading (WebSocket.CONNECTING).
+  get connecting() {
+    return this.ws !== null && this.ws.readyState === 0;
+  }
   async connect() {
     if (this.closed) return;
     const url = await this.prepare();

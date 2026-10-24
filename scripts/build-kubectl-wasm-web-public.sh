@@ -63,6 +63,7 @@ assets=(
   state_store.js
   wasm_fetch.js
   ingress_ws.js
+  ingress_manager.js
   vmshell.js
   webrtc_guest.js
   ssh_worker.js
