@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-9.computevms.socialweb.computer
+  name: v1alpha1-10.computevms.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -254,6 +254,20 @@ spec:
                           required:
                             - type
                             - publicKey
+                      networks:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            tag:
+                              type: string
+                            address:
+                              type: string
+                            reportedAt:
+                              type: string
+                          required:
+                            - tag
+                            - address
                   published:
                     type: object
                     properties:
@@ -261,6 +275,18 @@ spec:
                         type: string
                       hostKeysUri:
                         type: string
+                      networks:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            tag:
+                              type: string
+                            uri:
+                              type: string
+                          required:
+                            - tag
+                            - uri
       additionalPrinterColumns:
         - name: Phase
           type: string

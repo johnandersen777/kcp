@@ -6,7 +6,7 @@ spec:
   resources:
     - group: socialweb.computer
       name: computevms
-      schema: v1alpha1-9.computevms.socialweb.computer
+      schema: v1alpha1-10.computevms.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer

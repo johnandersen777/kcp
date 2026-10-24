@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-9.nodeclaims.socialweb.computer
+  name: v1alpha1-10.nodeclaims.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -193,6 +193,31 @@ spec:
                     type: boolean
                   vmAddress:
                     type: string
+                  networks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        tag:
+                          type: string
+                        address:
+                          type: string
+                        at:
+                          type: string
+                        event:
+                          type: object
+                          properties:
+                            uri:
+                              type: string
+                            cid:
+                              type: string
+                          required:
+                            - uri
+                            - cid
+                      required:
+                        - tag
+                        - address
+                        - event
                   bids:
                     type: integer
                   release:
