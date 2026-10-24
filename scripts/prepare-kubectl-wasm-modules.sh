@@ -95,6 +95,10 @@ if 'syscall.Exec' in src:
     open(path, 'w').write(src)
 PY
 
+# Unpatched copy: build-kubectl-wasm.sh overlays files in it for the slim
+# kubectl (go build -overlay cannot replace files in the module cache).
+copy_module k8s.io/cli-runtime "${work}/cli-runtime"
+
 copy_module github.com/moby/term "${work}/moby-term"
 cp "${term_overlay}/term_unix.go" "${work}/moby-term/term_unix.go"
 cp "${term_overlay}/termios_unix.go" "${work}/moby-term/termios_unix.go"

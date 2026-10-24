@@ -107,7 +107,6 @@ globalThis.fetch = async (input, options = {}) => {
 };
 
 const wasmStarted = performance.now();
-const [wasmResponse, wasmBytes] = await fetchWasm(init.wasmUrl, nativeFetch);
 const go = new globalThis.Go();
 // Override the default (console.warn) so the page can restart the worker:
 // the kubectl entrypoint blocks forever, so this only fires on os.Exit.
@@ -115,8 +114,24 @@ go.exit = (code) => {
   log("error", `kubectl Go runtime exited (code ${code})`);
   self.postMessage({ type: "exit", code });
 };
-const { instance } = await WebAssembly.instantiateStreaming(wasmResponse, go.importObject);
-log("info", `kubectl.wasm ${mib(wasmBytes)} MiB downloaded + compiled`);
+async function instantiate(url) {
+  const [wasmResponse, wasmBytes] = await fetchWasm(url, nativeFetch);
+  const { instance } = await WebAssembly.instantiateStreaming(wasmResponse, go.importObject);
+  log("info", `${url.split("/").pop()} ${mib(wasmBytes)} MiB downloaded + compiled`);
+  return instance;
+}
+// Low-memory mode asks for kubectl-slim.wasm with kubectl.wasm as
+// fallbackUrl, for bundles built without the slim module.
+let wasmUrl = init.wasmUrl;
+let instance;
+try {
+  instance = await instantiate(wasmUrl);
+} catch (err) {
+  if (!init.fallbackUrl) throw err;
+  log("warn", `${wasmUrl}: ${err instanceof Error ? err.message : err}; loading ${init.fallbackUrl}`);
+  wasmUrl = init.fallbackUrl;
+  instance = await instantiate(wasmUrl);
+}
 
 go.run(instance).catch((err) => console.error("kubectl-wasm exited:", err));
 

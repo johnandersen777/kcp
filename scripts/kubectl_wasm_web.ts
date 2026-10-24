@@ -103,6 +103,18 @@ const wasmModules = new Map<string, string>([
   ["/goat.wasm", goatWasmPath],
   ["/yq.wasm", yqWasmPath],
 ]);
+// Optional: without it, low-memory mode falls back to kubectl.wasm.
+try {
+  wasmModules.set(
+    "/kubectl-slim.wasm",
+    Deno.realPathSync(
+      options.get("kubectl-slim-wasm") ??
+        kubectlWasmPath.replace(/[^/]*$/, "kubectl-slim.wasm"),
+    ),
+  );
+} catch {
+  console.error("no kubectl-slim.wasm; low-memory mode loads kubectl.wasm");
+}
 
 const headers = {
   "cache-control": "no-cache",

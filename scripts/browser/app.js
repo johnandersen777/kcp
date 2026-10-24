@@ -721,7 +721,10 @@ async function spawnKubectl() {
   const readyPromise = waitReady(worker);
   worker.postMessage({
     type: "init",
-    wasmUrl: "/kubectl.wasm",
+    // The mobile kubectl links only the commands the page and a typical
+    // shell session use (see contrib/wasm/kubectl/cmd_slim.go).
+    wasmUrl: lowMemory ? "/kubectl-slim.wasm" : "/kubectl.wasm",
+    fallbackUrl: lowMemory ? "/kubectl.wasm" : undefined,
     execUrl: "/wasm_exec.js",
     apiServer,
   });
