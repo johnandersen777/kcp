@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-12.computecontracts.socialweb.computer
+  name: v1alpha1-14.computecontracts.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -151,12 +151,12 @@ spec:
                       maximum: 65535
                     server:
                       type: string
-                    shell:
-                      type: object
-                      properties:
-                        envFile:
-                          type: string
-                          default: /etc/wootty/wootty.env
+                    transport:
+                      type: string
+                      enum:
+                        - opentunnel
+                        - webrtc
+                      default: opentunnel
                   required:
                     - tag
                     - port
@@ -309,6 +309,12 @@ spec:
                       properties:
                         tag:
                           type: string
+                        kind:
+                          type: string
+                          enum:
+                            - iroh
+                            - https
+                            - webrtc
                         address:
                           type: string
                         at:

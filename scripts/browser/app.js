@@ -32,6 +32,8 @@ import { OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
 import { assembleSnapshot, openBestBackend, snapshotRecords } from "./state_store.js";
 import { decodeBase64, encodeBase64, register as registerIngress } from "./ingress_ws.js";
 import * as vmshell from "./vmshell.js";
+import * as webrtcGuest from "./webrtc_guest.js";
+import * as sshCmd from "./ssh_cmd.js";
 import { discardSnapshot } from "./kcp_hibernate.js";
 
 const config = await (await fetch("/config")).json();
@@ -706,6 +708,12 @@ function attachKubectl(worker) {
   worker.addEventListener("message", (event) => {
     const data = event.data ?? {};
     if (data.type === "fetch") {
+      // kcp restarts (e.g. a discarded snapshot) leave a gap with no worker;
+      // fail the request instead of leaving kubectl waiting for its timeout.
+      if (!kcpWorker) {
+        worker.postMessage({ type: "fetchResult", id: data.id, request: { error: "kcp worker is not running" } });
+        return;
+      }
       pendingBridges.set(data.id, true);
       kcpWorker.postMessage({
         type: "request",
@@ -1021,6 +1029,8 @@ function shellHelp() {
     "  echo '{\"a\":1}' | jq .a    (jq is built into just-bash)",
     "  export GOAT_USERNAME=... GOAT_PASSWORD=...",
     "  ls /tmp; cat demo.yaml",
+    "  ssh vmshell-abc123            (a Held ComputeContract, over WebRTC; see ~/.ssh/config)",
+    "  ssh vmshell-abc123 uname -a | grep Linux",
     "",
     "builtins: help · clear · reset (wipe kcp state and reload) · snapshot-discard (cold boot next load)",
     "keys: Ctrl-C cancel · Ctrl-D finish stdin · Tab complete · ↑/↓ history",
@@ -1062,7 +1072,7 @@ function detectTtyTool(script) {
   const segment = lastPipelineSegment(script);
   if (/[<>]/.test(segment)) return null;
   const first = splitArgs(segment)[0];
-  return ["kubectl", "goat", "yq"].includes(first) ? first : null;
+  return ["kubectl", "goat", "yq", "ssh"].includes(first) ? first : null;
 }
 
 function makeCommands() {
@@ -1141,7 +1151,9 @@ function makeCommands() {
     return { stdout: "cleared shell and kcp state; reloading…\n", stderr: "", exitCode: 0 };
   });
 
-  return [kubectl, goat, yq, help, clear, reset, snapshotDiscard];
+  const ssh = defineCommand("ssh", (args, ctx) => runSsh(args, ctx));
+
+  return [kubectl, goat, yq, ssh, help, clear, reset, snapshotDiscard];
 }
 
 async function restoreShell() {
@@ -1154,7 +1166,7 @@ async function restoreShell() {
 
   bash = new Bash({
     cwd: homeDir,
-    env: saved.env ?? {},
+    env: { HOME: homeDir, ...(saved.env ?? {}) },
     customCommands: makeCommands(),
     executionLimits: { maxExecutionTimeMs: 60 * 60 * 1000 },
   });
@@ -1562,7 +1574,7 @@ function commonPrefix(values) {
 function shellCommandNames() {
   const builtins = [
     "cd", "export", "unset", "alias", "source", ".", "history",
-    "kubectl", "goat", "yq", "help", "clear", "reset", "snapshot-discard",
+    "kubectl", "goat", "yq", "ssh", "help", "clear", "reset", "snapshot-discard",
   ];
   return [...new Set([...getCommandNames(), ...builtins])].sort();
 }
@@ -1618,6 +1630,10 @@ async function completeLine() {
     let candidates;
     if (parts[0] === "kubectl") {
       candidates = await kubectlCompletions(parts.slice(1), token);
+    } else if (parts[0] === "ssh" && !token.startsWith("-") && !parts.slice(1).some((p) => !p.startsWith("-"))) {
+      candidates = sshCmd.sshHosts(lastFeedState, { testPeer: Boolean(sshTestPeer) })
+        .filter((name) => name.startsWith(token))
+        .map((name) => ({ value: name, description: "ComputeContract" }));
     } else if (parts.length === 0) {
       candidates = shellCommandNames()
         .filter((name) => name.startsWith(token))
@@ -2070,13 +2086,13 @@ function initSocialwebUI() {
 
 // --- compute -----------------------------------------------------------------
 // One panel for ComputeContracts. "Request VM" applies a contract for the
-// chosen bidders; with "Web shell" it also writes the wootty token bundle into
-// the browser vault first (the requester reads secretsRef once and fails a
-// contract whose bundle is missing) and adds a plan 0032 shell tunnel. Every
-// contract from the status feed is listed with its phase, its shell link (the
-// "wootty" tagged address plus #token=, the token kept in localStorage by
-// contract name) and its own Release button. One VM at a time: Request stays
-// disabled while a contract is active, so repeated clicks cannot rent more.
+// chosen bidders. Shell "ssh over WebRTC" (plan 0034) adds the webrtc ssh
+// tunnel and the public half of a non-extractable WebCrypto Ed25519 key (kept
+// in IndexedDB per contract). Every contract from the status feed is listed
+// with its phase, its "Connect" action and its own Release button. One VM at a time: Request
+// stays disabled while a contract is active, so repeated clicks cannot rent
+// more. ?sshTestPeer=http://127.0.0.1:7795 adds a button that connects the
+// pane to contrib/wasm/sshclient/testpeer instead of a guest.
 
 const computeBiddersEl = document.getElementById("compute-bidders");
 const computeSSHEl = document.getElementById("compute-ssh");
@@ -2086,11 +2102,15 @@ const computeRequestEl = document.getElementById("compute-request");
 const computeStatusEl = document.getElementById("compute-status");
 const computeListEl = document.getElementById("compute-list");
 const vmshellIngressEl = document.getElementById("compute-ingress");
+const computeTestPeerEl = document.getElementById("compute-testpeer");
 const computePrefs = {
   bidders: "socialweb.vmshell.bidders",
   shell: "socialweb.compute.shell",
-  token: (name) => `socialweb.vmshell.token.${name}`,
+  transport: (name) => `socialweb.compute.transport.${name}`,
 };
+const sshTestPeer = new URLSearchParams(location.search).get("sshTestPeer");
+const feedWatchers = new Set();
+let lastFeedState = null;
 let computeBusy = false;
 let computeReleasing = false;
 let computeLastRender = "";
@@ -2118,30 +2138,27 @@ async function requestVM() {
     computeBusy = true;
     computeRequestEl.disabled = true;
     localStorage.setItem(computePrefs.bidders, computeBiddersEl.value.trim());
-    localStorage.setItem(computePrefs.shell, computeShellEl.checked ? "1" : "0");
+    localStorage.setItem(computePrefs.shell, computeShellEl.value);
     const bidders = vmshell.parseBidders(computeBiddersEl.value);
-    const shell = computeShellEl.checked;
+    const shell = computeShellEl.value;
     const ssh = computeSSHEl.value.trim();
+    const sshKeys = ssh ? [ssh] : [];
     const ttlSeconds = parseTTLSeconds(computeTTLEl.value);
     const name = vmshell.contractName();
-    addLog("info", `requesting ComputeContract ${name} from ${bidders.join(", ")}`);
-    if (shell) {
-      const token = vmshell.randomToken();
-      localStorage.setItem(computePrefs.token(name), token);
-      await socialwebCall("socialwebVaultPut", {
-        workspace: "root",
-        mount: vmshell.SECRETS_MOUNT,
-        path: vmshell.secretsPath(name),
-        bundle: vmshell.secretsBundle(token),
-      });
+    addLog("info", `requesting ComputeContract ${name} from ${bidders.join(", ")}${shell ? ` with a ${shell} shell` : ""}`);
+    if (shell === "webrtc") {
+      const key = await webrtcGuest.newSSHKey();
+      await webrtcGuest.saveSSHKey(name, key);
+      sshKeys.unshift(key.authorized);
+      localStorage.setItem(computePrefs.transport(name), "webrtc");
     }
     const identity = await kcpREST("GET", `${SOCIALWEB_API}/marketidentities/requester`).catch(() => null);
     const manifest = vmshell.contractManifest({
-      name, bidders, ownerDid: identity?.status?.did ?? "", shell, sshKeys: ssh ? [ssh] : [], ttlSeconds,
+      name, bidders, ownerDid: identity?.status?.did ?? "", shell, sshKeys, ttlSeconds,
     });
     await kcpREST("POST", `${SOCIALWEB_API}/computecontracts`, manifest);
     setAppStatus(computeStatusEl, `${name} requested from ${bidders.join(", ")}`, "ok");
-    addLog("ok", `ComputeContract ${name} requested from ${bidders.join(", ")}${shell ? " with a web shell" : ""}`);
+    addLog("ok", `ComputeContract ${name} requested from ${bidders.join(", ")}${shell !== "none" ? ` with a ${shell} shell` : ""}`);
   } catch (err) {
     addLog("error", `Request VM failed: ${err instanceof Error ? err.message : err}`);
     setAppStatus(computeStatusEl, String(err.message ?? err), "err");
@@ -2162,6 +2179,7 @@ async function releaseContract(name) {
     return;
   }
   addLog("info", `ComputeContract ${name} released`);
+  void webrtcGuest.deleteSSHKey(name).catch(() => {});
 }
 
 // The release runs in this tab's requester: closing the tab mid-release
@@ -2202,29 +2220,206 @@ function computeRow(contract) {
     contract.message ?? "",
   ].filter(Boolean).join(" · ");
   li.append(head, detail);
-  const token = localStorage.getItem(computePrefs.token(name)) ?? "";
-  if (token && vmshell.isActive(contract)) {
-    const link = vmshell.shellLink(contract, token);
-    const shellEl = document.createElement("div");
-    if (link) {
-      const a = document.createElement("a");
-      a.href = link;
-      a.target = "_blank";
-      a.rel = "noopener";
-      a.textContent = "Open shell";
-      shellEl.append(a);
-    } else if (phase === "Held" || contract.secretsFetchedAt) {
-      // The tunnel URL lands in status.contract.networks one to three minutes
-      // after Held, once opentunnel issues its TLS certificate.
-      shellEl.className = "detail";
-      shellEl.textContent = "Held; waiting for shell tunnel…";
-    }
-    li.append(shellEl);
+  if (localStorage.getItem(computePrefs.transport(name)) === "webrtc" && vmshell.isActive(contract)) {
+    li.append(webrtcShellAction(contract));
   }
   return li;
 }
 
+// "Connect" once the guest's publicKey, webrtc fingerprint and host keys are
+// in the feed; it runs `ssh <contract>` in the main terminal.
+function webrtcShellAction(contract) {
+  const el = document.createElement("div");
+  const ready = contract.phase === "Held" && webrtcGuest.guestFromState(lastFeedState, contract.name) !== null;
+  if (!ready) {
+    el.className = "detail";
+    if (contract.phase === "Held") el.textContent = "Held; waiting for the guest's WebRTC publicKey and host keys…";
+    return el;
+  }
+  const connect = document.createElement("button");
+  connect.type = "button";
+  connect.textContent = "Connect";
+  connect.addEventListener("click", () => runInTerminal(`ssh ${contract.name}`));
+  el.append(connect);
+  return el;
+}
+
+/** Resolves with fn's first truthy result over the current and later feed snapshots. */
+function watchFeed(fn) {
+  return new Promise((resolve, reject) => {
+    const watcher = (state) => {
+      try {
+        const value = fn(state);
+        if (value) {
+          feedWatchers.delete(watcher);
+          resolve(value);
+        }
+      } catch (err) {
+        feedWatchers.delete(watcher);
+        reject(err);
+      }
+    };
+    feedWatchers.add(watcher);
+    if (lastFeedState) watcher(lastFeedState);
+  });
+}
+
+async function kubectlCreate(manifest) {
+  const result = await runKubectl(withServer(["create", "-f", "-"]), JSON.stringify(manifest));
+  if (result.code !== 0) throw new Error(String(result.stderr || result.stdout || "create failed").trim());
+}
+
+// Runs a command line in the main terminal as if typed (the panel's Connect).
+function runInTerminal(command) {
+  term.focus();
+  if (!ready || busy || stdinMode) {
+    setAppStatus(computeStatusEl, `the terminal is busy; run: ${command}`, "warn");
+    return;
+  }
+  replaceLine(command);
+  submit();
+}
+
+// --- ssh -----------------------------------------------------------------------
+// The shell's `ssh` (ssh.wasm in ssh_worker.js): hosts are ComputeContract
+// names, ~/.ssh/config is seeded with "Host vmshell-* / ProxyCommand
+// kcp-webrtc %h %p", and kcp-webrtc is this page dialing the guest over a
+// WebRTC datachannel. Only public material is written to ~/.ssh (config,
+// known_hosts from status.contract.hostKeys, <contract>.pub); the private
+// key is the contract's non-extractable WebCrypto key in IndexedDB, and the
+// shell filesystem (persisted to localStorage) never sees it.
+
+const sshDir = `${homeDir}/.ssh`;
+// While an interactive ssh runs it owns the main terminal's input.
+let sshSession = null;
+let testPeerKey = null;
+
+function latin1Bytes(value) {
+  if (!value) return null;
+  if (typeof value !== "string") return value.length ? value : null;
+  const bytes = new Uint8Array(value.length);
+  for (let i = 0; i < value.length; i++) bytes[i] = value.charCodeAt(i) & 0xff;
+  return bytes.length ? bytes : null;
+}
+
+async function sshResolve(host) {
+  const target = sshCmd.resolveHost(lastFeedState, host, { testPeer: Boolean(sshTestPeer) });
+  let key;
+  let hostKeys;
+  if (target.kind === "testpeer") {
+    testPeerKey ??= await webrtcGuest.newSSHKey();
+    key = testPeerKey;
+    hostKeys = (await webrtcGuest.httpSignaling(sshTestPeer, key.authorized).guest()).hostKeys;
+  } else {
+    key = await webrtcGuest.loadSSHKey(host);
+    if (!key) throw new Error("this browser holds no SSH key for the contract (it was requested elsewhere)");
+    hostKeys = target.contract.hostKeys ?? [];
+    if (hostKeys.length === 0) throw new Error("the guest has not reported its host keys yet");
+  }
+  const khPath = `${sshDir}/known_hosts`;
+  let known = await bash.fs.readFile(khPath).catch(() => "");
+  // The test peer makes a new host key per run; real guests never get
+  // their lines rewritten.
+  if (target.kind === "testpeer") known = sshCmd.dropKnownHost(known, host);
+  const merged = sshCmd.mergeKnownHosts(known, host, hostKeys);
+  await bash.fs.writeFile(khPath, merged);
+  await bash.fs.writeFile(`${sshDir}/${host}.pub`, `${key.authorized}\n`);
+  return { publicKey: key.raw, knownHosts: merged, key: key.privateKey };
+}
+
+async function sshDial(host, port, status, onEof) {
+  if (port !== 22) throw new Error(`no webrtc tunnel for port ${port} (only ssh on 22)`);
+  const target = sshCmd.resolveHost(lastFeedState, host, { testPeer: Boolean(sshTestPeer) });
+  const signaling = target.kind === "testpeer"
+    ? webrtcGuest.httpSignaling(sshTestPeer, testPeerKey.authorized)
+    : webrtcGuest.contractEventSignaling({ contract: host, create: kubectlCreate, watch: watchFeed });
+  return await webrtcGuest.dialGuest({ signaling, tag: "ssh", status, onEof });
+}
+
+async function runSsh(args, ctx) {
+  await bash.fs.mkdir(sshDir, { recursive: true }).catch(() => {});
+  let config = await bash.fs.readFile(`${sshDir}/config`).catch(() => null);
+  if (config === null) {
+    config = sshCmd.DEFAULT_SSH_CONFIG;
+    await bash.fs.writeFile(`${sshDir}/config`, config);
+  }
+  // A terminal stdout (ssh last in its pipeline, not redirected) streams to
+  // the terminal; otherwise output is buffered for the pipeline.
+  const toTerminal = ttyTool === "ssh";
+  const stdin = latin1Bytes(ctx.stdin);
+  const interactive = toTerminal && !stdin;
+  const decoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
+  const buffered = { stdout: "", stderr: "" };
+  const write = (stream, u8) => {
+    if (toTerminal) term.write(u8);
+    else buffered[stream] += decoders[stream].decode(u8, { stream: true });
+  };
+  const verboseErr = (text) => write("stderr", new TextEncoder().encode(`debug1: kcp-webrtc: ${text}\n`));
+  const worker = new Worker(new URL("./ssh_worker.js", import.meta.url), { type: "module" });
+  let dialed = null;
+  return await new Promise((resolve) => {
+    let raw = false;
+    let done = false;
+    const finish = (code) => {
+      if (done) return;
+      done = true;
+      worker.terminate();
+      dialed?.close();
+      sshSession = null;
+      if (toTerminal && raw) term.write("\r\n");
+      resolve({ stdout: buffered.stdout, stderr: buffered.stderr, exitCode: code });
+    };
+    ctx.signal?.addEventListener("abort", () => finish(130));
+    if (interactive) {
+      sshSession = {
+        // With a pty every key goes to the guest (Ctrl-C included); without
+        // one, Ctrl-C ends ssh here and Ctrl-D closes its stdin.
+        key(data) {
+          if (!raw && data === "\u0003") return finish(130);
+          if (!raw && data === "\u0004") return worker.postMessage({ type: "stdinEOF" });
+          worker.postMessage({ type: "input", data: new TextEncoder().encode(data) });
+        },
+        resize: (cols, rows) => worker.postMessage({ type: "resize", cols, rows }),
+      };
+    }
+    const reply = (id, value, transfer = []) => worker.postMessage({ type: "reply", id, ...value }, transfer);
+    worker.onmessage = async (event) => {
+      const m = event.data ?? {};
+      if (m.type === "stdout" || m.type === "stderr") write(m.type, m.data);
+      else if (m.type === "raw") raw = m.on;
+      else if (m.type === "exit") finish(m.code);
+      else if (m.type === "addKnownHost") {
+        const path = `${sshDir}/known_hosts`;
+        const text = await bash.fs.readFile(path).catch(() => "");
+        await bash.fs.writeFile(path, `${text}${text && !text.endsWith("\n") ? "\n" : ""}${m.line}\n`);
+      } else if (m.type === "resolve") {
+        try {
+          reply(m.id, await sshResolve(m.host));
+        } catch (err) {
+          reply(m.id, { error: String(err.message ?? err) });
+        }
+      } else if (m.type === "dial") {
+        try {
+          dialed = await sshDial(m.host, m.port, m.verbose ? verboseErr : () => {},
+            () => worker.postMessage({ type: "eof" }));
+          reply(m.id, { port: dialed.port }, [dialed.port]);
+        } catch (err) {
+          reply(m.id, { error: String(err.message ?? err) });
+        }
+      }
+    };
+    worker.postMessage({
+      type: "run",
+      execUrl: new URL("/wasm_exec.js", location.href).href,
+      wasmUrl: new URL("/ssh.wasm", location.href).href,
+      cfg: { argv: args, config, interactive, stdin, cols: term.cols, rows: term.rows },
+    });
+  });
+}
+
 function applyComputeState(state) {
+  lastFeedState = state;
+  for (const watcher of [...feedWatchers]) watcher(state);
   const contracts = state.contracts ?? [];
   const active = contracts.filter(vmshell.isActive);
   if (computeBusy && active.length > 0) computeBusy = false;
@@ -2238,7 +2433,8 @@ function applyComputeState(state) {
         : "ready to request a VM",
       !ready ? "warn" : "ok");
   }
-  const render = JSON.stringify(contracts) + [...computeReleaseAsked].join();
+  const render = JSON.stringify(contracts) + [...computeReleaseAsked].join() +
+    JSON.stringify((state.contractEvents ?? []).map((e) => [e.name, e.phase]));
   if (render === computeLastRender) return;
   for (const c of contracts) {
     addLog("info", `ComputeContract ${c.name} ${c.phase ?? "Pending"}${c.release ? " (release asked)" : ""}${c.message ? `: ${c.message}` : ""}`);
@@ -2249,11 +2445,19 @@ function applyComputeState(state) {
 
 function initComputeUI() {
   computeBiddersEl.value = localStorage.getItem(computePrefs.bidders) ?? vmshell.DEFAULT_BIDDERS.join(", ");
-  computeShellEl.checked = localStorage.getItem(computePrefs.shell) !== "0";
+  // "0" is the old checkbox off; anything else that is not none is webrtc.
+  const shell = localStorage.getItem(computePrefs.shell);
+  computeShellEl.value = shell === "0" || shell === "none" ? "none" : "webrtc";
   computeRequestEl.addEventListener("click", () => {
     computeStatusEl.classList.remove("err");
     void requestVM();
   });
+}
+
+// The test peer needs no kcp, so it is wired before the page boots.
+if (sshTestPeer) {
+  computeTestPeerEl.hidden = false;
+  computeTestPeerEl.addEventListener("click", () => runInTerminal(`ssh ${sshCmd.TEST_PEER_HOST}`));
 }
 
 // --- ingress relay -------------------------------------------------------------
@@ -2388,7 +2592,13 @@ terminalPaneEl.addEventListener("drop", async (event) => {
 
 // --- input -----------------------------------------------------------------
 
+term.onResize(({ cols, rows }) => sshSession?.resize(cols, rows));
+
 term.onData((data) => {
+  if (sshSession) {
+    sshSession.key(data);
+    return;
+  }
   if (stdinMode) {
     if (data === "\u0003") {
       abortStdin();
@@ -2525,6 +2735,11 @@ document.getElementById("mobile-keys").addEventListener("click", (event) => {
   const action = event.target.closest("button")?.dataset.action;
   if (!action) return;
   term.focus();
+  if (sshSession) {
+    const keys = { "ctrl-c": "\u0003", "ctrl-d": "\u0004", enter: "\r", tab: "\t", up: "\u001b[A" };
+    if (keys[action]) sshSession.key(keys[action]);
+    return;
+  }
   if (action === "ctrl-c") {
     if (stdinMode) abortStdin();
     else cancelRunning();

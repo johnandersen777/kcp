@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-10.nodeclaims.socialweb.computer
+  name: v1alpha1-11.nodeclaims.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -200,6 +200,12 @@ spec:
                       properties:
                         tag:
                           type: string
+                        kind:
+                          type: string
+                          enum:
+                            - iroh
+                            - https
+                            - webrtc
                         address:
                           type: string
                         at:

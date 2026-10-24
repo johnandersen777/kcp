@@ -63,6 +63,9 @@ assets=(
   wasm_fetch.js
   ingress_ws.js
   vmshell.js
+  webrtc_guest.js
+  ssh_worker.js
+  ssh_cmd.js
   wasm_snapshot.js
   kcp_hibernate.js
 )
@@ -72,6 +75,7 @@ wasm_modules=(
   kubectl-slim.wasm
   goat.wasm
   yq.wasm
+  ssh.wasm
 )
 modules=(
   "${wasm_modules[@]}"
@@ -82,7 +86,7 @@ modules=(
 for file in "${modules[@]}"; do
   if [[ ! -f "${artifacts}/${file}" ]]; then
     echo "missing ${artifacts}/${file}" >&2
-    echo "run: make build-kcp-wasm build-kubectl-wasm build-goat-wasm build-yq-wasm" >&2
+    echo "run: make build-kcp-wasm build-kubectl-wasm build-goat-wasm build-yq-wasm build-sshclient-wasm" >&2
     exit 1
   fi
 done

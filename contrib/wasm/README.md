@@ -310,35 +310,32 @@ browser; files shared with goat/yq are UTF-8 text up to 1 MiB; two tabs share
 one localStorage snapshot. Goat's network calls require the remote service to
 allow CORS (Bluesky PDS, PLC and AppView do).
 
-### VM shell: rent a VM from the browser and open a shell on it
+### VM shell: rent a VM from the browser and ssh to it over WebRTC
 
 The combined real-kcp + socialweb module (`scripts/build-socialweb-kcp-wasm.sh`)
 runs a socialweb MarketRequester in the tab. After signing in with AT Protocol
-OAuth, the VM SHELL panel rents a firecracker VM from a market bidder and shows
-a link to a wootty web terminal on it:
+OAuth, the Compute panel rents a firecracker VM from a market bidder and opens
+an SSH session to it over a WebRTC datachannel (socialweb plan 0034):
 
-1. The page generates a 32-character wootty token and writes the secrets bundle
-   `[{path: /etc/wootty/wootty.env, value: "WOOTTY_AUTH_TOKEN=<token>"}]` into
-   the in-browser vault at `requester/contracts/<name>/secrets`, through a
-   page-only Go export (`socialwebVaultPut`); nothing reachable over HTTP can
-   call it.
-2. It applies a `ComputeContract` with `bidderDids`, `secretsRef` and
-   `tunnels: [{tag: wootty, port: 7681, shell: {envFile: /etc/wootty/wootty.env}}]`.
-   socialweb's cloud-init module installs opentunnel and wootty in the guest.
-3. The requester's ingress Exposure registers a per-Exposure did:key with the
+1. The page makes a non-extractable WebCrypto Ed25519 key for the contract
+   (kept in IndexedDB) and applies a `ComputeContract` with `bidderDids`,
+   `sshAuthorizedKeys: [<its public half>]` and
+   `tunnels: [{tag: ssh, port: 22, transport: webrtc}]`.
+2. The requester's ingress Exposure registers a per-Exposure did:key with the
    `xrpc.fedproxy.com` relay (`scripts/browser/ingress_ws.js`), so the tab has
-   a public `https://did-key-….xrpc.fedproxy.com` address. Bidders POST bids
-   and guest events to it, and the guest's `setup-secrets.service` fetches the
-   bundle from it.
-4. When the guest reports its tunnel, `status.contract.networks[tag=wootty]`
-   holds `https://<route>.<id>.opentunnel.xyz`. The panel links to
-   `<address>/#token=<token>`; the token stays in the URL fragment, so it never
-   reaches the tunnel or a server log. Release patches `spec.release=true`.
+   a public `https://did-key-….xrpc.fedproxy.com` address for bids and guest
+   events.
+3. The guest agent publishes its age publicKey and `onNetwork {kind webrtc,
+   address: <DTLS fingerprint>}`. Connect makes an in-memory age identity,
+   offers once (Cloudflare STUN only, all candidates) with the offer sealed to
+   the guest's key as an outbound `ContractEvent`, opens the sealed answer,
+   checks its `a=fingerprint`, and runs `golang.org/x/crypto/ssh` (`ssh.wasm`,
+   `contrib/wasm/sshclient`) over the datachannel with host keys pinned from
+   `status.contract.hostKeys`. Release patches `spec.release=true`.
 
-Measured against a production bidder: about 40 s from the click to Held, and the
-tunnel address about 70 s later. The OAuth client metadata scope is generated
-from socialweb's `RequesterOAuthScope` at build time (`requester-scope.txt`
-next to `kcp.wasm`) so it always matches what the requester asks for.
+The OAuth client metadata scope is generated from socialweb's
+`RequesterOAuthScope` at build time (`requester-scope.txt` next to `kcp.wasm`)
+so it always matches what the requester asks for.
 
 ## The `Fetch` CRD (written in Go)
 
