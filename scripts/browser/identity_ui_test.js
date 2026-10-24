@@ -26,6 +26,9 @@ Deno.test("signInURL refuses expired, opened, and other-handle URLs", () => {
   assertEquals(signInURL(awaiting, { typed: "bob.test", applied: "alice.test" }, now), "", "handle changed");
   assertEquals(signInURL(awaiting, { typed: "@Alice.test ", applied: "alice.test" }, now), URL1, "normalized");
   assertEquals(signInURL({ phase: "Ready" }, {}, now), "");
+  const hinted = { ...awaiting, pendingAction: { ...awaiting.pendingAction, url: `${URL1}&login_hint=alice.test` } };
+  assertEquals(signInURL(hinted, { typed: "alice.test", applied: "alice.test" }, now), hinted.pendingAction.url);
+  assertEquals(signInURL(hinted, { typed: "bob.test", applied: "bob.test" }, now), "", "issued for the old handle");
 });
 
 Deno.test("signInView walks signed out to signed in", () => {
@@ -57,12 +60,15 @@ Deno.test("signInView shows the session's account, not the typed handle", () => 
 
 Deno.test("signInView waits out the old status after a tap, then trusts it", () => {
   const failedStatus = { phase: "Failed", message: "oauthclient: the oauth callback state is unknown" };
+  assertEquals(at({}, failedStatus).state, "signedOut", "nobody tapped yet");
   assertEquals(at({ step: "preparing", since: now - 1000 }, failedStatus).state, "preparing");
   const late = at({ step: "preparing", since: now - GRACE_MS - 1 }, failedStatus);
   assertEquals([late.state, late.text, late.primary.action],
     ["failed", "Sign-in failed: that sign-in link was already used or has expired", "start"]);
   assertEquals(at({ step: "preparing", since: now - 1000 }, ready).state, "preparing", "switching away from Ready");
   assertEquals(at({ step: "completing", since: now - GRACE_MS - 1, used: [URL1] }).state, "failed");
+  assertEquals(at({ error: "access_denied" }).primary.action, "open", "a reissued URL opens on the retry tap");
+  assertEquals(at({ error: "access_denied", used: [URL1] }).primary.action, "start");
   assertEquals(at({ step: "signingOut", since: now }, ready).state, "signingOut");
   assertEquals(at({}, { ...awaiting, phase: "SessionExpired" }).primary.label, "Sign in again");
 });

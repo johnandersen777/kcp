@@ -22,6 +22,14 @@ export function signInURL(identity, local = {}, now = Date.now()) {
   const url = String(action.url ?? "");
   if (!url || (local.used ?? []).includes(url)) return "";
   if (action.expiresAt && Date.parse(action.expiresAt) <= now) return "";
+  // Builds before rc110 keep an unexpired URL after the handle changes.
+  let hint = null;
+  try {
+    hint = new URL(url).searchParams.get("login_hint");
+  } catch {
+    return "";
+  }
+  if (hint !== null && normalizeHandle(hint) !== normalizeHandle(local.applied)) return "";
   return url;
 }
 
@@ -32,6 +40,8 @@ export function friendlyError(message) {
     [/popup was blocked/i, "the browser blocked the sign-in tab; tap Try again"],
     [/popup timed out/i, "no answer from the sign-in tab within 5 minutes"],
     [/access_denied/i, "the sign-in was declined"],
+    // An entryway like bsky.social serves no PDS metadata; socialweb needs the handle.
+    [/oauth-protected-resource returned HTTP 404/i, "type your handle (e.g. alice.bsky.social) and tap Try again"],
   ];
   for (const [pattern, friendly] of known) if (pattern.test(text)) return friendly;
   return text.replace(/^(marketidentity|oauthclient|socialweb): /, "").replace(/ (marketidentity|oauthclient): /g, " ") ||
@@ -52,7 +62,7 @@ function hostOf(url) {
 // start (apply the identity), open (the popup), switch, signOut, cancel.
 export function signInView({ requester = true, identity, local = {}, now = Date.now() }) {
   const view = (state, tone, text, detail, primary, secondary = null) =>
-    ({ state, tone, text, detail: local.notice || detail || "", primary, secondary, busy: Boolean(primary.disabled) });
+    ({ state, tone, text, detail: (!primary.disabled && local.notice) || detail || "", primary, secondary, busy: Boolean(primary.disabled) });
   const wait = (label) => ({ label, action: "none", disabled: true });
   if (!requester) return view("starting", "warn", "Starting kcp…", "", wait("Sign in"));
   const phase = identity?.phase ?? "Pending";
@@ -86,8 +96,7 @@ export function signInView({ requester = true, identity, local = {}, now = Date.
     const signOut = { label: "Sign out", action: "signOut" };
     const detail = handle ? did : "";
     if (other && handle) {
-      return view("signedIn", "warn", `Signed in as ${handle}, not ${typed}.`,
-        `${did}\nTap ${primary.label} to sign in as ${typed}.`, primary, signOut);
+      return view("signedIn", "warn", `Signed in as ${handle}, not ${typed}.`, did, primary, signOut);
     }
     return view("signedIn", "ok", `Signed in as ${handle || did}`, detail, primary, signOut);
   }
@@ -102,11 +111,14 @@ export function signInView({ requester = true, identity, local = {}, now = Date.
     }
     return view("signedOut", "", "Not signed in.", `Sign in opens ${host} in a new tab.`, { label: "Sign in", action: "open" });
   }
-  if (phase === "Failed") return failed(identity?.message);
+  // A fresh page boots with no handle and the controller fails on it; that
+  // is not a failed sign-in until someone taps.
+  if (phase === "Failed" && step === "preparing") return failed(identity?.message);
   return view("signedOut", "", "Not signed in.", "", { label: "Sign in", action: "start" });
 
   function failed(message) {
-    return { ...view("failed", "err", `Sign-in failed: ${friendlyError(message)}`, "", { label: "Try again", action: "start" }),
-      error: String(message ?? "") };
+    // The controller reissues a URL after a failed callback; then one tap opens it.
+    const retry = { label: "Try again", action: url ? "open" : "start" };
+    return { ...view("failed", "err", `Sign-in failed: ${friendlyError(message)}`, "", retry), error: String(message ?? "") };
   }
 }

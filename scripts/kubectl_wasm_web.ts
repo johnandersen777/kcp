@@ -89,6 +89,7 @@ const assets = new Map<string, string>([
   ["/fs_shim.js", "fs_shim.js"],
   ["/oauth-callback.html", "oauth-callback.html"],
   ["/oauth.js", "oauth.js"],
+  ["/identity_ui.js", "identity_ui.js"],
   ["/state_store.js", "state_store.js"],
   ["/wasm_fetch.js", "wasm_fetch.js"],
   ["/ingress_ws.js", "ingress_ws.js"],
