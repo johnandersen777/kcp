@@ -31,6 +31,12 @@ rules:
     resources: ["marketidentities/status", "computecontracts/status"]
     verbs: ["get", "patch", "update"]
   - apiGroups: ["socialweb.computer"]
+    resources: ["contractevents"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["socialweb.computer"]
+    resources: ["contractevents/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["socialweb.computer"]
     resources: ["marketrequesters", "marketrequesters/status"]
     verbs: ["get", "patch"]
 ---

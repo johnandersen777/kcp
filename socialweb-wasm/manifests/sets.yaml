@@ -43,6 +43,7 @@ sets:
           - path: ephemeralinfra-apiresourceschema.yaml
           - path: infracollection-apiresourceschema.yaml
           - path: ephemeralinfracollection-apiresourceschema.yaml
+          - path: contractevent-apiresourceschema.yaml
           - path: computecontract-apiexport.yaml
           - path: computevm-apiresourceschema.yaml
           - path: firecrackervm-apiresourceschema.yaml
@@ -391,6 +392,7 @@ sets:
           - path: ephemeralinfra-apiresourceschema.yaml
           - path: infracollection-apiresourceschema.yaml
           - path: ephemeralinfracollection-apiresourceschema.yaml
+          - path: contractevent-apiresourceschema.yaml
           - path: computecontract-apiexport.yaml
         after:
           - kind: APIExport
@@ -427,6 +429,7 @@ sets:
           - path: ephemeralinfra-apiresourceschema.yaml
           - path: infracollection-apiresourceschema.yaml
           - path: ephemeralinfracollection-apiresourceschema.yaml
+          - path: contractevent-apiresourceschema.yaml
           - path: computecontract-apiexport.yaml
           - path: marketidentity-apiresourceschema.yaml
           - path: atprotorecord-apiresourceschema.yaml
