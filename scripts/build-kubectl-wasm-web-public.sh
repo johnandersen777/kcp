@@ -59,6 +59,7 @@ assets=(
   fs_shim.js
   oauth-callback.html
   oauth.js
+  identity_ui.js
   state_store.js
   wasm_fetch.js
   ingress_ws.js

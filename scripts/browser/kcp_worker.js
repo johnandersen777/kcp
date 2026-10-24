@@ -193,12 +193,12 @@ self.onmessage = (event) => {
     if (latestState) self.postMessage({ type: "state", state: latestState });
     return;
   }
-  // Page-only Go exports (vault writes, relay signing and request frames).
+  // Page-only Go exports (vault writes, sign-out, relay signing and frames).
   // Answered like "request" through __kcpResolve.
   if (type === "socialweb-call" && typeof id === "number") {
     const { fn, payload } = event.data;
     const allowed = ["socialwebVaultPut", "socialwebIngressSign",
-      "socialwebIngressToken", "socialwebIngressRequest"];
+      "socialwebIngressToken", "socialwebIngressRequest", "socialwebSignOut"];
     if (!allowed.includes(fn) || typeof globalThis[fn] !== "function") {
       self.postMessage({ type: "response", id, error: `${fn} is not available` });
       return;

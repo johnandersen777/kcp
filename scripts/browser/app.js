@@ -28,7 +28,8 @@ import {
   getCommandNames,
 } from "https://esm.sh/just-bash@3.6.0/browser";
 import { buildDiagram, nodeID } from "./diagram.js";
-import { OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
+import { cancelOAuthPopup, OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
+import { GRACE_MS, normalizeHandle, signInURL, signInView } from "./identity_ui.js";
 import { assembleSnapshot, openBestBackend, snapshotRecords } from "./state_store.js";
 import { decodeBase64, encodeBase64, register as registerIngress } from "./ingress_ws.js";
 import * as vmshell from "./vmshell.js";
@@ -70,6 +71,7 @@ const identityModeEl = document.getElementById("identity-mode");
 const identityHandleEl = document.getElementById("identity-handle");
 const identitySignInEl = document.getElementById("identity-signin");
 const identityStatusEl = document.getElementById("identity-status");
+const identitySecondaryEl = document.getElementById("identity-secondary");
 
 serverEl.textContent = apiServer;
 
@@ -1896,9 +1898,8 @@ const identityPrefs = {
   handle: "socialweb.handle",
   pdsUrl: "socialweb.pdsUrl",
 };
-
-let pendingSignInURL = "";
-let signInWaiting = false;
+// Earlier pages stored a cleared handle as the string "undefined".
+if (localStorage.getItem(identityPrefs.handle) === "undefined") localStorage.removeItem(identityPrefs.handle);
 
 function setAppStatus(el, text, className = "") {
   el.textContent = text;
@@ -1920,7 +1921,7 @@ function requesterIdentity() {
 async function patchRequesterIdentity() {
   const identity = requesterIdentity();
   localStorage.setItem(identityPrefs.mode, identity.mode);
-  localStorage.setItem(identityPrefs.handle, identity.handle);
+  localStorage.setItem(identityPrefs.handle, identity.handle ?? "");
   // A merge patch: unset fields are dropped, so a cleared handle must be null.
   const patch = { spec: { identity: { handle: null, pdsUrl: null, ...identity } } };
   await kcpREST("PATCH", `${SOCIALWEB_API}/marketrequesters/app`, patch, "application/merge-patch+json");
@@ -1933,59 +1934,122 @@ async function completeOAuth(message) {
     const value = message?.[key];
     if (value) query.set(key, String(value));
   }
-  // socialweb only says "names no code"; show what the authorization server said.
-  if (!message?.code) {
-    const reason = [message?.error, message?.error_description].filter(Boolean).join(": ");
-    throw new Error(`the authorization server returned no code${reason ? ` (${reason})` : " and no error"}`);
-  }
-  setAppStatus(identityStatusEl, "completing sign-in…", "warn");
+  // An error goes to socialweb too: the callback spends the URL's state, so
+  // the controller issues a new one. socialweb only says "names no code";
+  // show what the authorization server said.
   const response = await kcpPageRequest({
     method: "GET",
     path: `/oauth/callback/requester?${query.toString()}`,
     headers: { Host: location.host, Accept: "text/plain" },
   });
+  if (!message?.code) {
+    const reason = [message?.error, message?.error_description].filter(Boolean).join(": ");
+    throw new Error(`the authorization server returned no code${reason ? ` (${reason})` : " and no error"}`);
+  }
   if (response.status >= 400) {
     throw new Error(String(response.body ?? `callback returned ${response.status}`));
   }
   addLog("ok", "OAuth callback accepted");
-  setAppStatus(identityStatusEl, "signed in; waiting for MarketIdentity", "ok");
 }
 
-let lastIdentityAction = null;
+// The page's half of the sign-in state; signInView (identity_ui.js) combines
+// it with the MarketIdentity status into what the panel shows.
+const USED_URLS_KEY = "socialweb.signin.used";
+const signIn = { step: "idle", since: 0, error: "", notice: "", url: "", account: null, used: [] };
+try {
+  signIn.used = JSON.parse(localStorage.getItem(USED_URLS_KEY) ?? "[]");
+} catch {
+  // unreadable; every URL counts as new
+}
+let identityState = null;
+let requesterSeen = false;
+let identityView = null;
+let identityTimer = 0;
 let lastIdentitySummary = "";
-const SIGN_IN_LABEL = identitySignInEl.textContent;
 
-// iOS Safari opens a popup only inside the tap, and pauses this tab while the
-// popup is in front, so a popup opened early cannot be pointed at the URL
-// later. With the URL ready, the tap opens it; otherwise the tap starts the
-// sign-in and the button asks for a second tap once the PDS has answered.
-async function beginSignIn() {
+function signInLocal() {
+  return { ...signIn, typed: identityHandleEl.value, applied: localStorage.getItem(identityPrefs.handle) ?? "" };
+}
+
+function setSignIn(patch) {
+  if ("step" in patch) {
+    patch.since = Date.now();
+    if (!("notice" in patch)) patch.notice = "";
+  }
+  Object.assign(signIn, patch);
+  renderIdentity();
+}
+
+// A callback spends the URL's state even when it fails; kept across reloads
+// so a page iOS reloaded behind the popup does not reopen it.
+function markUsed(url) {
+  signIn.used = [...signIn.used.filter((u) => u !== url), url].slice(-5);
+  localStorage.setItem(USED_URLS_KEY, JSON.stringify(signIn.used));
+}
+
+function renderIdentity() {
+  const view = signInView({ requester: requesterSeen, identity: identityState, local: signInLocal() });
+  if (view.state === "failed" && signIn.step !== "idle") Object.assign(signIn, { step: "idle", error: view.error });
+  if (view.state === "signedIn") signIn.step = "idle";
+  identityView = view;
+  identitySignInEl.textContent = view.primary.label;
+  identitySignInEl.disabled = Boolean(view.primary.disabled);
+  identitySecondaryEl.hidden = !view.secondary;
+  identitySecondaryEl.textContent = view.secondary?.label ?? "";
+  identityHandleEl.disabled = view.busy;
+  setAppStatus(identityStatusEl, view.detail ? `${view.text}\n${view.detail}` : view.text, view.tone);
+  clearTimeout(identityTimer);
+  if (view.busy && signIn.step !== "idle" && signIn.step !== "authorizing") {
+    identityTimer = setTimeout(renderIdentity, Math.max(50, GRACE_MS - (Date.now() - signIn.since) + 50));
+  }
+  const did = identityState?.phase === "Ready" ? identityState.did : "";
+  if (did && signIn.account?.did !== did) void resolveAccount(did);
+}
+
+// status.handle is the spec's handle in builds before rc110, so the panel
+// names the session's DID by the handle the AppView verified for it.
+async function resolveAccount(did) {
+  signIn.account = { did, handle: "" };
   try {
-    identitySignInEl.disabled = true;
-    if (pendingSignInURL) {
-      await openSignInPopup();
-      return;
-    }
-    await patchRequesterIdentity();
-    signInWaiting = true;
-    setAppStatus(identityStatusEl, "starting OAuth… waiting for the PDS", "warn");
+    const res = await fetch(`https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=${encodeURIComponent(did)}`);
+    const handle = res.ok ? String((await res.json()).handle ?? "") : "";
+    if (signIn.account?.did === did && handle && handle !== "handle.invalid") signIn.account = { did, handle };
   } catch (err) {
-    signInFailed(err);
+    addLog("warn", `could not resolve the handle of ${did}: ${err instanceof Error ? err.message : err}`);
+  }
+  renderIdentity();
+}
+
+// Runs inside the tap: iOS Safari opens a popup only there, and pauses this
+// tab while the popup is in front, so a popup opened early cannot be pointed
+// at the URL later. With a URL ready the tap opens it; otherwise it asks for
+// one and the button becomes Continue sign-in once the PDS has answered.
+function identityAction(action) {
+  const run = { start: startSignIn, open: openSignInPopup, switch: switchAccount, signOut: signOutIdentity,
+    cancel: cancelOAuthPopup }[action];
+  if (!run) return;
+  const fail = (err) => {
+    const message = err instanceof Error ? err.message : String(err);
+    addLog("error", `sign-in: ${message}`);
+    setSignIn({ step: "idle", error: message });
+  };
+  try {
+    void Promise.resolve(run()).catch(fail);
+  } catch (err) {
+    fail(err);
   }
 }
 
-function signInFailed(err) {
-  signInWaiting = false;
-  addLog("error", `sign-in failed: ${err instanceof Error ? err.message : err}`);
-  setAppStatus(identityStatusEl, String(err.message ?? err), "err");
-  identitySignInEl.disabled = false;
+// A changed spec makes the controller issue a URL for it; an unchanged one
+// keeps the URL it has, which a callback spends.
+async function startSignIn() {
+  setSignIn({ step: "preparing", error: "" });
+  await patchRequesterIdentity();
 }
 
-// A callback consumes its PAR state even when it fails, but the identity keeps
-// showing the same URL until it expires. Clear it so the controller starts a
-// fresh authorization, and offer it with the next tap.
+// Builds before rc110 can reissue a spent URL after a failed callback; clear
+// it before the reconcile that callback queued.
 async function restartSignIn() {
-  pendingSignInURL = "";
   try {
     await kcpREST("PATCH", `${SOCIALWEB_API}/marketidentities/requester/status`,
       { status: { pendingAction: null } }, "application/merge-patch+json");
@@ -1995,26 +2059,62 @@ async function restartSignIn() {
   }
 }
 
+// No await before openOAuthPopup: window.open has to run inside the tap.
 async function openSignInPopup() {
-  const url = pendingSignInURL;
-  if (!url) throw new Error("the identity has no pending sign-in URL yet");
-  signInWaiting = false;
-  identitySignInEl.textContent = SIGN_IN_LABEL;
+  const url = signInURL(identityState, signInLocal());
+  if (!url) throw new Error("the sign-in link is gone; tap Try again for a new one");
+  const parsed = new URL(url);
+  const expires = identityState?.pendingAction?.expiresAt || "unset";
+  addLog("info", `authorize at ${parsed.origin} client_id=${parsed.searchParams.get("client_id")} expires=${expires}`);
+  const popup = openOAuthPopup(url);
+  setSignIn({ step: "authorizing", url, error: "" });
+  let message;
   try {
-    const parsed = new URL(url);
-    const expires = lastIdentityAction?.expiresAt || "unset";
-    addLog("info", `authorize at ${parsed.origin} client_id=${parsed.searchParams.get("client_id")} expires=${expires}`);
-  } catch {
-    addLog("warn", "the sign-in URL does not parse");
+    message = await popup;
+  } catch (err) {
+    if (/cancelled/.test(err.message)) {
+      setSignIn({ step: "idle" });
+      return;
+    }
+    throw err;
   }
-  setAppStatus(identityStatusEl, "waiting for the AT Protocol popup…", "warn");
-  const message = await openOAuthPopup(url);
   if (message.type !== OAUTH_CALLBACK_MESSAGE) return;
+  // A cancelled or timed-out tab spent nothing; this URL still opens.
+  markUsed(url);
+  setSignIn({ step: "completing" });
   try {
     await completeOAuth(message);
   } catch (err) {
     await restartSignIn();
     throw err;
+  }
+}
+
+// The stored session lives in the socialweb vault, which only Go reaches:
+// socialwebSignOut (a page-only export) deletes it and drops the held
+// session, so the controller starts a fresh authorization. Builds without the
+// export can still switch to a named account.
+async function signOutIdentity() {
+  setSignIn({ step: "signingOut", error: "" });
+  try {
+    await socialwebCall("socialwebSignOut", { workspace: "root", name: "requester" });
+  } catch (err) {
+    if (!/not available/.test(err.message)) throw err;
+    setSignIn({ step: "idle", notice: "This kcp build cannot sign out yet. To use another account, type its handle and tap Switch account." });
+    return false;
+  }
+  addLog("ok", "signed out; the stored session is removed");
+  return true;
+}
+
+async function switchAccount() {
+  const typed = normalizeHandle(identityHandleEl.value);
+  const current = signIn.account?.did === identityState?.did ? normalizeHandle(signIn.account?.handle) : "";
+  if (typed && typed !== current && typed !== identityState?.did) return startSignIn();
+  if (await signOutIdentity()) {
+    setSignIn({ notice: "Signed out. Type the other account's handle, then tap Sign in." });
+  } else {
+    identityHandleEl.focus();
   }
 }
 
@@ -2030,15 +2130,15 @@ function parseTTLSeconds(value) {
 function applyState(state) {
   if (!state) return;
   applyComputeState(state);
-  if (!state.marketRequester) {
-    setAppStatus(identityStatusEl, "waiting for the MarketRequester app…", "warn");
+  requesterSeen = Boolean(state.marketRequester);
+  identityState = state.marketIdentity ?? null;
+  if (!requesterSeen) {
+    renderIdentity();
     return;
   }
-  identitySignInEl.disabled = false;
-  const identity = state.marketIdentity;
+  const identity = identityState;
   const phase = identity?.phase ?? "Pending";
   const action = identity?.pendingAction;
-  lastIdentityAction = action ?? null;
   const summary = `MarketIdentity ${phase}${identity?.handle ? ` ${identity.handle}` : ""}` +
     `${identity?.did ? ` did=${identity.did}` : ""}` +
     `${action ? ` action=${action.kind} expires=${action.expiresAt || "unset"}` : ""}` +
@@ -2047,26 +2147,7 @@ function applyState(state) {
     lastIdentitySummary = summary;
     addLog("info", summary);
   }
-  pendingSignInURL = action && (action.kind === "visitUrl" || action.kind === "signInAgain")
-    ? String(action.url ?? "")
-    : "";
-  // A URL restored from an earlier session can outlive its PAR request.
-  if (pendingSignInURL && action.expiresAt && Date.parse(action.expiresAt) <= Date.now()) {
-    pendingSignInURL = "";
-  }
-  if (pendingSignInURL && signInWaiting) {
-    signInWaiting = false;
-    identitySignInEl.textContent = "Continue sign-in";
-    addLog("info", "the PDS is ready; tap Continue sign-in");
-  }
-  if (phase === "Ready") {
-    const label = identity?.handle || identity?.did || "ready";
-    setAppStatus(identityStatusEl, `MarketIdentity ready: ${label}`, "ok");
-  } else if (pendingSignInURL) {
-    setAppStatus(identityStatusEl, `sign-in required (${action.kind})\ntap ${identitySignInEl.textContent} to continue`, "warn");
-  } else {
-    setAppStatus(identityStatusEl, `MarketIdentity ${phase}`, "warn");
-  }
+  renderIdentity();
 
   if (diagramVisible && Array.isArray(state.crds)) {
     const crds = state.crds.map((name) => ({
@@ -2089,19 +2170,12 @@ function initSocialwebUI() {
     localStorage.setItem(identityPrefs.mode, "oauthBrowser");
   }
   identityHandleEl.value = localStorage.getItem(identityPrefs.handle) ?? "";
-  identityModeEl.addEventListener("change", () => {
-    localStorage.setItem(identityPrefs.mode, identityModeEl.value);
-    setAppStatus(identityStatusEl, "mode saved; click Sign in to apply", "warn");
-  });
-  identityHandleEl.addEventListener("change", () => {
-    localStorage.setItem(identityPrefs.handle, identityHandleEl.value.trim());
-    setAppStatus(identityStatusEl, "handle saved; click Sign in to apply", "warn");
-  });
-  identitySignInEl.addEventListener("click", () => {
-    void beginSignIn().catch((err) => {
-      setAppStatus(identityStatusEl, String(err.message ?? err), "err");
-    });
-  });
+  // Typing a handle only relabels the button; Sign in applies it, so a URL
+  // issued for the applied handle is never opened for another one.
+  identityHandleEl.addEventListener("input", renderIdentity);
+  identitySignInEl.addEventListener("click", () => identityAction(identityView?.primary.action));
+  identitySecondaryEl.addEventListener("click", () => identityAction(identityView?.secondary?.action));
+  renderIdentity();
   initComputeUI();
 }
 

@@ -21,6 +21,30 @@ export function isOAuthCallbackMessage(data) {
 
 /** @type {Window | null} */
 let currentPopup = null;
+let cancelCurrent = null;
+
+/** Reject the pending openOAuthPopup, e.g. when its tab was left open. */
+export function cancelOAuthPopup() {
+  cancelCurrent?.(new Error("OAuth popup was cancelled"));
+}
+
+/**
+ * A callback answers this URL only when it carries the URL's state: the
+ * popup window is reused by name, so a late answer to an earlier URL can
+ * arrive while this one waits.
+ *
+ * @param {Record<string, unknown>} data
+ * @param {string} url
+ */
+export function callbackMatchesURL(data, url) {
+  let state = null;
+  try {
+    state = new URL(url).searchParams.get("state");
+  } catch {
+    // Not a URL; nothing to match.
+  }
+  return !state || data?.state === state;
+}
 
 /**
  * @param {string} url
@@ -83,7 +107,7 @@ export function openOAuthPopup(url, options = {}) {
       timeoutMs,
     );
     const onMessage = (event) => {
-      if (isValidOAuthCallback(event, popup, location.origin)) {
+      if (isValidOAuthCallback(event, popup, location.origin) && callbackMatchesURL(event.data, url)) {
         succeed(event.data);
       }
     };
@@ -91,7 +115,7 @@ export function openOAuthPopup(url, options = {}) {
     try {
       channel = new BroadcastChannel(OAUTH_CHANNEL);
       channel.onmessage = (event) => {
-        if (isOAuthCallbackMessage(event.data)) succeed(event.data);
+        if (isOAuthCallbackMessage(event.data) && callbackMatchesURL(event.data, url)) succeed(event.data);
       };
     } catch {
       channel = null;
@@ -103,6 +127,7 @@ export function openOAuthPopup(url, options = {}) {
       channel?.close();
       if (currentPopup === popup) {
         currentPopup = null;
+        cancelCurrent = null;
       }
     }
 
@@ -129,6 +154,7 @@ export function openOAuthPopup(url, options = {}) {
     }
 
     window.addEventListener("message", onMessage);
+    cancelCurrent = fail;
   });
 }
 

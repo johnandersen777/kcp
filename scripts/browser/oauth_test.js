@@ -9,9 +9,17 @@ import {
 } from "../serve-public.ts";
 import {
   OAUTH_CALLBACK_MESSAGE,
+  callbackMatchesURL,
   isOAuthCallbackMessage,
   isValidOAuthCallback,
 } from "./oauth.js";
+
+Deno.test("callbackMatchesURL drops a late answer to an earlier URL", () => {
+  const url = "https://bsky.social/oauth/authorize?client_id=x&state=new";
+  assert(callbackMatchesURL({ state: "new", code: "c" }, url), "the URL's own state");
+  assert(!callbackMatchesURL({ state: "old", code: "c" }, url), "another state rejected");
+  assert(callbackMatchesURL({ state: "any" }, "https://bsky.social/oauth/authorize?request_uri=urn:x"), "a PAR URL has no state");
+});
 
 function assertEquals(actual, expected, label = "value") {
   const a = JSON.stringify(actual);
