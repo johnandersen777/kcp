@@ -23,16 +23,11 @@ export function isOAuthCallbackMessage(data) {
 let currentPopup = null;
 
 /**
- * Open the popup window, blank unless a URL is given. Browsers (iOS Safari
- * above all) block window.open outside a click handler, so the page reserves
- * the popup on the click and points it at the authorization URL once the PDS
- * has produced one.
- *
- * @param {string} [url]
+ * @param {string} url
  * @param {{ width?: number, height?: number }} [options]
  * @returns {Window | null}
  */
-export function reserveOAuthPopup(url = "", options = {}) {
+function openPopupWindow(url, options = {}) {
   const width = options.width ?? 520;
   const height = options.height ?? 720;
   const left = Math.round(window.screenX + (window.outerWidth - width) / 2);
@@ -74,12 +69,7 @@ export function isValidOAuthCallback(event, popup, origin) {
  */
 export function openOAuthPopup(url, options = {}) {
   const timeoutMs = options.timeoutMs ?? OAUTH_POPUP_TIMEOUT_MS;
-  let popup = options.popup && !options.popup.closed ? options.popup : null;
-  if (popup) {
-    popup.location.href = url;
-  } else {
-    popup = reserveOAuthPopup(url, options);
-  }
+  const popup = openPopupWindow(url, options);
   if (!popup) {
     return Promise.reject(new Error("OAuth popup was blocked"));
   }

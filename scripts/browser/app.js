@@ -28,7 +28,7 @@ import {
   getCommandNames,
 } from "https://esm.sh/just-bash@3.6.0/browser";
 import { buildDiagram, nodeID } from "./diagram.js";
-import { OAUTH_CALLBACK_MESSAGE, openOAuthPopup, reserveOAuthPopup } from "./oauth.js";
+import { OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
 import { assembleSnapshot, openBestBackend, snapshotRecords } from "./state_store.js";
 import { decodeBase64, encodeBase64, register as registerIngress } from "./ingress_ws.js";
 import * as vmshell from "./vmshell.js";
@@ -1914,21 +1914,23 @@ async function completeOAuth(message) {
   setAppStatus(identityStatusEl, "signed in; waiting for MarketIdentity", "ok");
 }
 
-// The popup opened on the Sign in click, waiting for the authorization URL.
-let reservedPopup = null;
 let lastIdentityAction = null;
+const SIGN_IN_LABEL = identitySignInEl.textContent;
 
+// iOS Safari opens a popup only inside the tap, and pauses this tab while the
+// popup is in front, so a popup opened early cannot be pointed at the URL
+// later. With the URL ready, the tap opens it; otherwise the tap starts the
+// sign-in and the button asks for a second tap once the PDS has answered.
 async function beginSignIn() {
   try {
     identitySignInEl.disabled = true;
-    reservedPopup = reserveOAuthPopup();
-    await patchRequesterIdentity();
     if (pendingSignInURL) {
       await openSignInPopup();
-    } else {
-      signInWaiting = true;
-      setAppStatus(identityStatusEl, "starting OAuth… waiting for the PDS", "warn");
+      return;
     }
+    await patchRequesterIdentity();
+    signInWaiting = true;
+    setAppStatus(identityStatusEl, "starting OAuth… waiting for the PDS", "warn");
   } catch (err) {
     signInFailed(err);
   }
@@ -1936,12 +1938,6 @@ async function beginSignIn() {
 
 function signInFailed(err) {
   signInWaiting = false;
-  try {
-    reservedPopup?.close();
-  } catch {
-    // Already closed.
-  }
-  reservedPopup = null;
   addLog("error", `sign-in failed: ${err instanceof Error ? err.message : err}`);
   setAppStatus(identityStatusEl, String(err.message ?? err), "err");
   identitySignInEl.disabled = false;
@@ -1951,6 +1947,7 @@ async function openSignInPopup() {
   const url = pendingSignInURL;
   if (!url) throw new Error("the identity has no pending sign-in URL yet");
   signInWaiting = false;
+  identitySignInEl.textContent = SIGN_IN_LABEL;
   try {
     const parsed = new URL(url);
     const expires = lastIdentityAction?.expiresAt || "unset";
@@ -1959,9 +1956,7 @@ async function openSignInPopup() {
     addLog("warn", "the sign-in URL does not parse");
   }
   setAppStatus(identityStatusEl, "waiting for the AT Protocol popup…", "warn");
-  const popup = reservedPopup;
-  reservedPopup = null;
-  const message = await openOAuthPopup(url, { popup });
+  const message = await openOAuthPopup(url);
   if (message.type !== OAUTH_CALLBACK_MESSAGE) return;
   await completeOAuth(message);
 }
@@ -1995,13 +1990,15 @@ function applyState(state) {
     pendingSignInURL = "";
   }
   if (pendingSignInURL && signInWaiting) {
-    void openSignInPopup().catch(signInFailed);
+    signInWaiting = false;
+    identitySignInEl.textContent = "Continue sign-in";
+    addLog("info", "the PDS is ready; tap Continue sign-in");
   }
   if (phase === "Ready") {
     const label = identity?.handle || identity?.did || "ready";
     setAppStatus(identityStatusEl, `MarketIdentity ready: ${label}`, "ok");
   } else if (pendingSignInURL) {
-    setAppStatus(identityStatusEl, `sign-in required (${action.kind})\nclick Sign in to continue`, "warn");
+    setAppStatus(identityStatusEl, `sign-in required (${action.kind})\ntap ${identitySignInEl.textContent} to continue`, "warn");
   } else {
     setAppStatus(identityStatusEl, `MarketIdentity ${phase}`, "warn");
   }
