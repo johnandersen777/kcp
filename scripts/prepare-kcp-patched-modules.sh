@@ -121,6 +121,12 @@ if [[ "${mode}" == "js" ]]; then
     "${work}/apiserver/pkg/server/options/serving_unix.go"
   cp "${overlay}/apiserver/serving_with_loopback.go" \
     "${work}/apiserver/pkg/server/options/serving_with_loopback.go"
+  # Admission plugins hold each write up to 10s while their informers sync,
+  # then reject it as not ready. During browser bootstrap that stalls RBAC
+  # and kube-system creation for the full timeout per request; fail fast and
+  # let the bootstrap retry loops come back once the caches are warm.
+  replace_in "${work}/apiserver/pkg/admission/handler.go" \
+    'timeToWaitForReady = 10 * time.Second' 'timeToWaitForReady = 1 * time.Second'
 fi
 
 if [[ "${mode}" == "js" ]]; then

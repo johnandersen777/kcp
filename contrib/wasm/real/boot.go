@@ -38,6 +38,9 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/kcp-dev/kcp/contrib/wasm/storage"
+	kcpmutatingadmissionpolicy "github.com/kcp-dev/kcp/pkg/admission/mutatingadmissionpolicy"
+	kcpmutatingwebhook "github.com/kcp-dev/kcp/pkg/admission/mutatingwebhook"
+	kcpvalidatingwebhook "github.com/kcp-dev/kcp/pkg/admission/validatingwebhook"
 	"github.com/kcp-dev/kcp/pkg/server"
 	serveroptions "github.com/kcp-dev/kcp/pkg/server/options"
 )
@@ -134,10 +137,16 @@ func Boot(parent context.Context, cfg Config) (*Server, error) {
 	opts.GenericControlPlane.Etcd.StorageConfig.Transport.ServerList = []string{"memory://main"}
 	// The resource-quota admission evaluator walks informers that are not
 	// ready during browser bootstrap and can block namespace creation and
-	// /readyz for minutes. The browser shard does not need it.
+	// /readyz for minutes. The browser shard does not need it. Webhooks
+	// cannot be reached from the browser, and mutating admission policies are
+	// unused; both wait for their informers on every write during bootstrap.
+	// ValidatingAdmissionPolicy stays on: socialweb's tenant grants use it.
 	opts.GenericControlPlane.Admission.GenericAdmission.DisablePlugins = append(
 		opts.GenericControlPlane.Admission.GenericAdmission.DisablePlugins,
 		"KCPKubeResourceQuota",
+		kcpmutatingwebhook.PluginName,
+		kcpvalidatingwebhook.PluginName,
+		kcpmutatingadmissionpolicy.PluginName,
 	)
 	opts.GenericControlPlane.SecureServing.Listener = listener
 	opts.GenericControlPlane.SecureServing.BindAddress = net.ParseIP("127.0.0.1")
