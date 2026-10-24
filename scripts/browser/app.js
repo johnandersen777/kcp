@@ -103,7 +103,8 @@ const debugSession = Math.random().toString(36).slice(2, 8);
 let debugQueue = [];
 function debugSend(level, message) {
   if (!debugLog) return;
-  debugQueue.push({ t: new Date().toISOString(), level, message: String(message).slice(0, 2000) });
+  const limit = level === "result" ? 60_000 : 4000;
+  debugQueue.push({ t: new Date().toISOString(), level, message: String(message).slice(0, limit) });
 }
 function debugFlush() {
   if (!debugLog || debugQueue.length === 0) return;
@@ -122,6 +123,35 @@ if (debugLog) {
   addEventListener("pagehide", debugFlush);
   debugSend("info", `debug log on; lowMemory=${lowMemory} isIOS=${isIOS} ` +
     `hardwareConcurrency=${navigator.hardwareConcurrency} screen=${screen.width}x${screen.height}`);
+}
+
+// With the debug log on, everything the page and its workers print also goes
+// to /debug/log: console output, worker errors, and the terminal (below).
+if (debugLog) {
+  for (const level of ["log", "info", "warn", "error", "debug"]) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => {
+      original(...args);
+      debugSend(`console.${level}`, args.map((a) => {
+        if (a instanceof Error) return `${a.message}\n${a.stack ?? ""}`;
+        if (typeof a === "string") return a;
+        try {
+          return JSON.stringify(a);
+        } catch {
+          return String(a);
+        }
+      }).join(" "));
+    };
+  }
+  const NativeWorker = globalThis.Worker;
+  globalThis.Worker = class extends NativeWorker {
+    constructor(url, options) {
+      super(url, options);
+      const name = String(url).split("/").pop();
+      this.addEventListener("error", (e) => debugSend("error", `worker ${name}: ${e.message ?? "error"} ${e.filename ?? ""}:${e.lineno ?? ""}`));
+      this.addEventListener("messageerror", () => debugSend("error", `worker ${name}: messageerror`));
+    }
+  };
 }
 
 // --- activity log ----------------------------------------------------------
@@ -182,6 +212,31 @@ const fitAddon = new FitAddon();
 term.loadAddon(fitAddon);
 term.loadAddon(new WebLinksAddon());
 term.open(document.getElementById("terminal"));
+if (debugLog) {
+  // Tee the terminal to the debug log, a line at a time, without ANSI codes.
+  let termLine = "";
+  const tee = (data) => {
+    const text = typeof data === "string" ? data : new TextDecoder().decode(data);
+    termLine += text.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07]*\x07/g, "").replace(/\r(?!\n)/g, "");
+    const lines = termLine.split("\n");
+    termLine = lines.pop() ?? "";
+    for (const line of lines) debugSend("term", line);
+    if (termLine.length > 1000) {
+      debugSend("term", termLine);
+      termLine = "";
+    }
+  };
+  const write = term.write.bind(term);
+  term.write = (data, cb) => {
+    tee(data);
+    return write(data, cb);
+  };
+  const writeln = term.writeln.bind(term);
+  term.writeln = (data, cb) => {
+    tee(`${typeof data === "string" ? data : new TextDecoder().decode(data)}\n`);
+    return writeln.call(term, data, cb);
+  };
+}
 const isNarrow = () => window.innerWidth < 700;
 
 fitAddon.fit();
@@ -2786,6 +2841,7 @@ function startIngress(entry) {
 // --- startup ---------------------------------------------------------------
 
 async function start() {
+  startDebugControl();
   term.writeln(cyan("kcp-wasm") + dim(" loading real kcp.wasm…"));
   term.writeln(cyan("kubectl-wasm") + dim(lowMemory ? " loads on first use (low-memory mode)" : " loading kubectl.wasm…"));
   setStatus("loading kcp + kubectl…", "running");
@@ -2842,7 +2898,9 @@ terminalPaneEl.addEventListener("drop", async (event) => {
 
 term.onResize(({ cols, rows }) => sshSession?.resize(cols, rows));
 
-term.onData((data) => {
+term.onData((data) => handleTermData(data));
+
+function handleTermData(data) {
   if (sshSession) {
     sshSession.key(data);
     return;
@@ -2975,7 +3033,80 @@ term.onData((data) => {
     if (ch >= " ") text += ch;
   }
   insertText(text);
-});
+}
+
+// --- remote debug control (dev server only) ---------------------------------
+// The dev server started with --debug-control streams operator commands for
+// this session (debugSession) at /debug/control. Each is {id, js}: the body of
+// an async function run with `d` (the handle below) in scope; its result or
+// error goes to the debug log as "result <id> …". A static host answers 404
+// and the page never connects again.
+const debugHandle = {
+  session: debugSession,
+  type: (text) => handleTermData(text),
+  run: (line) => handleTermData(`${line}\r`),
+  state: () => lastFeedState,
+  rest: (method, path, body, contentType) => kcpREST(method, path, body, contentType),
+  call: (fn, payload, timeoutMs) => socialwebCall(fn, payload, timeoutMs),
+  click: (selector) => {
+    const el = document.querySelector(selector);
+    if (!el) throw new Error(`no element ${selector}`);
+    el.click();
+    return el.textContent?.trim() ?? "";
+  },
+  text: (selector = "body") => document.querySelector(selector)?.innerText ?? null,
+  set: (selector, value) => {
+    const el = document.querySelector(selector);
+    if (!el) throw new Error(`no element ${selector}`);
+    el.value = value;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+  },
+  screen: () => {
+    const buf = term.buffer.active;
+    const out = [];
+    for (let i = Math.max(0, buf.length - term.rows); i < buf.length; i++) out.push(buf.getLine(i)?.translateToString(true) ?? "");
+    return out.join("\n");
+  },
+  log: (message) => addLog("info", `debug: ${message}`),
+};
+
+function startDebugControl() {
+  if (!debugLog || typeof EventSource !== "function") return;
+  const source = new EventSource(`/debug/control?session=${encodeURIComponent(debugSession)}`);
+  let opened = false;
+  source.onopen = () => {
+    opened = true;
+    debugSend("info", `debug control connected for session ${debugSession}`);
+  };
+  source.onerror = () => {
+    if (!opened) source.close();
+  };
+  source.onmessage = async (event) => {
+    let cmd;
+    try {
+      cmd = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    const id = cmd.id ?? "?";
+    try {
+      const fn = new Function("d", `return (async () => { ${cmd.js} })();`);
+      const value = await fn(debugHandle);
+      let text;
+      try {
+        text = typeof value === "string" ? value : JSON.stringify(value);
+      } catch {
+        text = String(value);
+      }
+      debugSend("result", `${id} ok ${text ?? "undefined"}`);
+    } catch (err) {
+      debugSend("result", `${id} error ${err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : err}`);
+    }
+    debugFlush();
+  };
+}
 
 // Touch devices have no Ctrl key: expose the control actions the terminal
 // needs on a small toolbar.

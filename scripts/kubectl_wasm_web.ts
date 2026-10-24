@@ -67,6 +67,88 @@ const hostname = options.get("host") ?? "127.0.0.1";
 // at POST /debug/log and appends it to <file>. Off by default; bodies are
 // capped so the public origin cannot be used to fill the disk.
 const debugLogPath = options.get("debug-log");
+// --debug-control=<file> lets the operator drive a page: every JSON line
+// appended to <file> ({"session": "<id>" | "*", "id", "js"}) is streamed to the
+// matching page at GET /debug/control?session=<id> (server-sent events); the
+// page runs it and posts the result to /debug/log. Commands come only from the
+// local file, never from a request. Off by default.
+const debugControlPath = options.get("debug-control");
+
+async function* controlLines(signal: AbortSignal): AsyncGenerator<string> {
+  let offset = 0;
+  try {
+    offset = (await Deno.stat(debugControlPath!)).size;
+  } catch {
+    await Deno.writeTextFile(debugControlPath!, "", { append: true });
+  }
+  let partial = "";
+  while (!signal.aborted) {
+    const size = (await Deno.stat(debugControlPath!)).size;
+    if (size < offset) offset = 0;
+    if (size > offset) {
+      const file = await Deno.open(debugControlPath!);
+      await file.seek(offset, Deno.SeekMode.Start);
+      const buf = new Uint8Array(size - offset);
+      let read = 0;
+      while (read < buf.length) {
+        const n = await file.read(buf.subarray(read));
+        if (n === null) break;
+        read += n;
+      }
+      file.close();
+      offset += read;
+      const lines = (partial + new TextDecoder().decode(buf.subarray(0, read))).split("\n");
+      partial = lines.pop() ?? "";
+      for (const line of lines) if (line.trim()) yield line;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+function controlStream(request: Request, session: string): Response {
+  const abort = new AbortController();
+  request.signal.addEventListener("abort", () => abort.abort());
+  const enc = new TextEncoder();
+  const body = new ReadableStream({
+    async start(controller) {
+      controller.enqueue(enc.encode(`: control for ${session}\n\n`));
+      const ping = setInterval(() => {
+        try {
+          controller.enqueue(enc.encode(": ping\n\n"));
+        } catch {
+          abort.abort();
+        }
+      }, 15_000);
+      try {
+        for await (const line of controlLines(abort.signal)) {
+          let cmd: { session?: string };
+          try {
+            cmd = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (cmd.session !== "*" && cmd.session !== session) continue;
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(cmd)}\n\n`));
+        }
+      } catch {
+        // client went away
+      } finally {
+        clearInterval(ping);
+        try {
+          controller.close();
+        } catch {
+          // already closed
+        }
+      }
+    },
+    cancel() {
+      abort.abort();
+    },
+  });
+  return new Response(body, {
+    headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
+  });
+}
 const debugLogMax = 256 * 1024;
 const scope = await loadScope(
   options.get("scope-file") ?? kcpWasmPath.replace(/[^/]*$/, SCOPE_FILE),
@@ -212,6 +294,11 @@ Deno.serve({ hostname, port }, async (request) => {
   const canonical = canonicalRedirect(request, url);
   if (canonical) return canonical;
 
+  if (url.pathname === "/debug/control" && request.method === "GET") {
+    if (!debugControlPath) return new Response("debug control disabled", { status: 404, headers });
+    return controlStream(request, url.searchParams.get("session") ?? "");
+  }
+
   if (url.pathname === "/debug/log" && request.method === "POST") {
     if (!debugLogPath) return new Response("debug log disabled", { status: 404, headers });
     const text = await request.text();
@@ -220,7 +307,7 @@ Deno.serve({ hostname, port }, async (request) => {
       const { session, ua, lines } = JSON.parse(text);
       const tag = `${String(session).slice(0, 12)} ${String(ua).replace(/^.*?\(([^;)]+).*$/, "$1").slice(0, 40)}`;
       const out = (Array.isArray(lines) ? lines : []).slice(0, 500).map((l) =>
-        `${l.t} [${tag}] ${String(l.level).slice(0, 8)} ${String(l.message).replace(/\s+/g, " ").slice(0, 2000)}`
+        `${l.t} [${tag}] ${String(l.level).slice(0, 8)} ${String(l.message).replace(/\r?\n/g, "\\n").replace(/[\t ]+/g, " ").slice(0, 60_000)}`
       ).join("\n");
       if (out) await Deno.writeTextFile(debugLogPath, out + "\n", { append: true });
     } catch {
