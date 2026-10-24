@@ -34,6 +34,7 @@ import {
   snapshotFiles,
   writeMemoryFile,
 } from "./fs_shim.js";
+import { fetchWasm, mib } from "./wasm_fetch.js";
 
 const init = await new Promise((resolve) => {
   const listener = (event) => {
@@ -71,17 +72,17 @@ globalThis.fetch = async (input, options = {}) => {
 
 const compiled = new Map();
 const unavailable = new Map();
-for (const [tool, url] of Object.entries(init.modules ?? {})) {
+await Promise.all(Object.entries(init.modules ?? {}).map(async ([tool, url]) => {
   try {
-    const bytes = await (await nativeFetch(url)).arrayBuffer();
-    compiled.set(tool, await WebAssembly.compile(bytes));
-    log("info", `${tool}.wasm ${(bytes.byteLength / 1048576).toFixed(1)} MiB compiled`);
+    const [response, bytes] = await fetchWasm(url, nativeFetch);
+    compiled.set(tool, await WebAssembly.compileStreaming(response));
+    log("info", `${tool}.wasm ${mib(bytes)} MiB compiled`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     unavailable.set(tool, message);
     log("error", `${tool}.wasm unavailable: ${message}`);
   }
-}
+}));
 
 self.onmessage = (event) => {
   const { type, id, request } = event.data ?? {};

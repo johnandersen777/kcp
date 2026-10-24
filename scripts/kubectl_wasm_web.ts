@@ -78,6 +78,7 @@ const assets = new Map<string, string>([
   ["/oauth-callback.html", "oauth-callback.html"],
   ["/oauth.js", "oauth.js"],
   ["/state_store.js", "state_store.js"],
+  ["/wasm_fetch.js", "wasm_fetch.js"],
 ]);
 
 const headers = {

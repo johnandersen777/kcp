@@ -68,10 +68,11 @@ try {
 installFsShim();
 for (const dir of ["/kcp", "/tmp", "/home", "/home/user"]) makeMemoryDir(dir);
 
-const bytes = await (await fetch(init.wasmUrl)).arrayBuffer();
-log("info", `kcp.wasm ${(bytes.byteLength / 1048576).toFixed(1)} MiB downloaded`);
+const { fetchWasm, mib } = await import("./wasm_fetch.js");
+const [wasmResponse, wasmBytes] = await fetchWasm(init.wasmUrl);
 const go = new globalThis.Go();
-const { instance } = await WebAssembly.instantiate(bytes, go.importObject);
+const { instance } = await WebAssembly.instantiateStreaming(wasmResponse, go.importObject);
+log("info", `kcp.wasm ${mib(wasmBytes)} MiB downloaded + compiled`);
 
 // run() only settles when the Go program exits; the shard blocks forever.
 go.run(instance).catch((err) => console.error("kcp-wasm exited:", err));

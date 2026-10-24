@@ -27,6 +27,7 @@ limitations under the License.
 // globalThis.fs (discovery cache, probed kubeconfig paths, stdin).
 
 import { installFsShim, setStdin } from "./fs_shim.js";
+import { fetchWasm, mib } from "./wasm_fetch.js";
 
 const init = await new Promise((resolve) => {
   const listener = (event) => {
@@ -106,8 +107,7 @@ globalThis.fetch = async (input, options = {}) => {
 };
 
 const wasmStarted = performance.now();
-const bytes = await (await nativeFetch(init.wasmUrl)).arrayBuffer();
-log("info", `kubectl.wasm ${(bytes.byteLength / 1048576).toFixed(1)} MiB downloaded`);
+const [wasmResponse, wasmBytes] = await fetchWasm(init.wasmUrl, nativeFetch);
 const go = new globalThis.Go();
 // Override the default (console.warn) so the page can restart the worker:
 // the kubectl entrypoint blocks forever, so this only fires on os.Exit.
@@ -115,7 +115,8 @@ go.exit = (code) => {
   log("error", `kubectl Go runtime exited (code ${code})`);
   self.postMessage({ type: "exit", code });
 };
-const { instance } = await WebAssembly.instantiate(bytes, go.importObject);
+const { instance } = await WebAssembly.instantiateStreaming(wasmResponse, go.importObject);
+log("info", `kubectl.wasm ${mib(wasmBytes)} MiB downloaded + compiled`);
 
 go.run(instance).catch((err) => console.error("kubectl-wasm exited:", err));
 

@@ -55,6 +55,7 @@ assets=(
   oauth-callback.html
   oauth.js
   state_store.js
+  wasm_fetch.js
 )
 modules=(
   kcp.wasm
