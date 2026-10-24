@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-26.gateways.socialweb.computer
+  name: v1alpha1-27.gateways.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -180,6 +180,7 @@ spec:
                       - pdsAccount
                       - localRepo
                       - oauthDelegated
+                      - oauthSessionProxy
                   handle:
                     type: string
                   did:
