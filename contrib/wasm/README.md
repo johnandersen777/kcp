@@ -315,12 +315,18 @@ allow CORS (Bluesky PDS, PLC and AppView do).
 The combined real-kcp + socialweb module (`scripts/build-socialweb-kcp-wasm.sh`)
 runs a socialweb MarketRequester in the tab. After signing in with AT Protocol
 OAuth, the Compute panel rents a firecracker VM from a market bidder and opens
-an SSH session to it over a WebRTC datachannel (socialweb plan 0034):
+an SSH session to it over a WebRTC datachannel (socialweb plan 0034), with
+the wootty web terminal behind opentunnel (plan 0032) as the fallback:
 
 1. The page makes a non-extractable WebCrypto Ed25519 key for the contract
    (kept in IndexedDB) and applies a `ComputeContract` with `bidderDids`,
    `sshAuthorizedKeys: [<its public half>]` and
-   `tunnels: [{tag: ssh, port: 22, transport: webrtc}]`.
+   `tunnels: [{tag: ssh, port: 22, transport: webrtc}]`. When the served
+   schema has `spec.tunnels[].shell`, it also writes a 32-character wootty
+   token into the in-browser vault at `requester/contracts/<name>/secrets`
+   (`socialwebVaultPut`, a page-only Go export) and adds `secretsRef` and
+   `{tag: wootty, port: 7681, transport: opentunnel, shell: {envFile:
+   /etc/wootty/wootty.env}}`.
 2. The requester's ingress Exposure registers a per-Exposure did:key with the
    `xrpc.fedproxy.com` relay (`scripts/browser/ingress_ws.js`), so the tab has
    a public `https://did-key-….xrpc.fedproxy.com` address for bids and guest
@@ -332,6 +338,14 @@ an SSH session to it over a WebRTC datachannel (socialweb plan 0034):
    checks its `a=fingerprint`, and runs `golang.org/x/crypto/ssh` (`ssh.wasm`,
    `contrib/wasm/sshclient`) over the datachannel with host keys pinned from
    `status.contract.hostKeys`. Release patches `spec.release=true`.
+4. A toast says when the first shell is usable (the webrtc half about 2 s
+   after Held; the opentunnel address 70-165 s later). Shell runs
+   `ssh <contract>` in the main terminal; if WebRTC cannot connect it opens
+   `<wootty address>/#token=<token>` instead (the token stays in the
+   fragment), or waits for that address while the web shell is starting.
+
+The shell path uses `kcpREST` (the page bridge straight to kcp), never
+kubectl, so low-memory mode opens a shell without loading kubectl.
 
 The OAuth client metadata scope is generated from socialweb's
 `RequesterOAuthScope` at build time (`requester-scope.txt` next to `kcp.wasm`)
