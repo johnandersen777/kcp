@@ -23,11 +23,9 @@ import (
 	"path"
 	"strings"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	kstorage "k8s.io/apiserver/pkg/storage"
-	"k8s.io/klog/v2"
 )
 
 // prefixedStore mirrors the etcd3 store's key layout: the registry passes
@@ -138,24 +136,53 @@ func (p *prefixedStore) key(key string, recursive bool) (string, error) {
 
 func (p *prefixedStore) Versioner() kstorage.Versioner { return p.store.Versioner() }
 
+// decoded is the reader's view of a stored object: the codec round-trip of
+// applyDefaults. It depends only on the stored object and this reader's codec
+// and target type (readers of different served versions share keys), so it
+// is computed once per stored object and reader and then copied, instead of
+// running the codec on every read and for every watcher. The result is
+// shared and must not be modified.
+func (p *prefixedStore) decoded(key string, stored runtime.Object) (runtime.Object, error) {
+	if p.codec == nil {
+		return stored, nil
+	}
+	return p.store.derive(p, key, stored, p.decode)
+}
+
+func (p *prefixedStore) decode(stored runtime.Object) (runtime.Object, error) {
+	// Encoding may touch its input (the versioning codec sets and restores
+	// the GVK), so never hand it the shared stored object.
+	return p.applyDefaults(stored.DeepCopyObject())
+}
+
+// into copies the reader's view of a stored object into dst.
+func (p *prefixedStore) into(key string, stored runtime.Object, m objectMeta, dst runtime.Object) error {
+	obj, err := p.decoded(key, stored)
+	if err != nil {
+		return err
+	}
+	return intoAnnotated(obj, m, dst)
+}
+
+// view returns a caller-owned copy of the reader's view of a stored object.
+func (p *prefixedStore) view(ref *storedRef) (runtime.Object, error) {
+	obj, err := p.decoded(ref.key, ref.Object)
+	if err != nil {
+		return nil, err
+	}
+	return annotatedCopy(obj, ref.meta), nil
+}
+
 func (p *prefixedStore) Create(ctx context.Context, key string, obj, out runtime.Object, ttl uint64) error {
 	full, err := p.key(key, false)
 	if err != nil {
 		return err
 	}
-	if err := p.store.Create(ctx, full, obj, out, ttl); err != nil {
+	stored, m, err := p.store.create(ctx, full, obj, ttl)
+	if err != nil || out == nil {
 		return err
 	}
-	if out != nil {
-		decoded, err := p.applyDefaults(out)
-		if err != nil {
-			return err
-		}
-		if decoded != out {
-			return copyObject(decoded, out)
-		}
-	}
-	return nil
+	return p.into(full, stored, m, out)
 }
 
 func (p *prefixedStore) Delete(
@@ -171,15 +198,11 @@ func (p *prefixedStore) Delete(
 	if err != nil {
 		return err
 	}
-	if err := p.store.Delete(ctx, full, out, preconditions, validateDeletion, cachedExistingObject, opts); err != nil {
+	obj, m, err := p.store.delete(ctx, full, preconditions, validateDeletion)
+	if err != nil || out == nil {
 		return err
 	}
-	if out != nil {
-		if _, err := p.applyDefaults(out); err != nil {
-			return err
-		}
-	}
-	return nil
+	return p.into(full, obj, m, out)
 }
 
 func (p *prefixedStore) Watch(ctx context.Context, key string, opts kstorage.ListOptions) (watch.Interface, error) {
@@ -187,27 +210,7 @@ func (p *prefixedStore) Watch(ctx context.Context, key string, opts kstorage.Lis
 	if err != nil {
 		return nil, err
 	}
-	w, err := p.store.watch(ctx, full, opts, p.newFunc)
-	if err != nil {
-		return nil, err
-	}
-	return watch.Filter(w, func(in watch.Event) (watch.Event, bool) {
-		// Bookmarks and errors are not resource objects (bookmarks are built
-		// from newFunc() and have no kind), so there is nothing to default.
-		if in.Type == watch.Bookmark || in.Type == watch.Error || in.Object == nil {
-			return in, true
-		}
-		decoded, err := p.applyDefaults(in.Object)
-		if err != nil {
-			// The object came out of the codec ourselves, so a failure here
-			// means the codec rejects its own encoding; surfacing the event
-			// undecoded is better than silently dropping a watch update.
-			klog.FromContext(ctx).Error(err, "failed to apply defaults to watch event", "type", in.Type)
-			return in, true
-		}
-		in.Object = decoded
-		return in, true
-	}), nil
+	return p.store.watch(ctx, full, opts, p.newFunc, p.view)
 }
 
 func (p *prefixedStore) Get(ctx context.Context, key string, opts kstorage.GetOptions, objPtr runtime.Object) error {
@@ -215,17 +218,11 @@ func (p *prefixedStore) Get(ctx context.Context, key string, opts kstorage.GetOp
 	if err != nil {
 		return err
 	}
-	if err := p.store.Get(ctx, full, opts, objPtr); err != nil {
+	obj, m, err := p.store.get(full, opts)
+	if err != nil || obj == nil {
 		return err
 	}
-	decoded, err := p.applyDefaults(objPtr)
-	if err != nil {
-		return err
-	}
-	if decoded != objPtr {
-		return copyObject(decoded, objPtr)
-	}
-	return nil
+	return p.into(full, obj, m, objPtr)
 }
 
 func (p *prefixedStore) GetList(ctx context.Context, key string, opts kstorage.ListOptions, listObj runtime.Object) error {
@@ -233,21 +230,9 @@ func (p *prefixedStore) GetList(ctx context.Context, key string, opts kstorage.L
 	if err != nil {
 		return err
 	}
-	if err := p.store.GetList(ctx, full, opts, listObj); err != nil {
-		return err
-	}
-	items, err := meta.ExtractList(listObj)
-	if err != nil {
-		return err
-	}
-	for i, item := range items {
-		decoded, err := p.applyDefaults(item)
-		if err != nil {
-			return err
-		}
-		items[i] = decoded
-	}
-	return meta.SetList(listObj, items)
+	return p.store.getList(full, opts, listObj, func(ref storedRef) (runtime.Object, error) {
+		return p.view(&ref)
+	})
 }
 
 func (p *prefixedStore) GuaranteedUpdate(
@@ -263,20 +248,20 @@ func (p *prefixedStore) GuaranteedUpdate(
 	if err != nil {
 		return err
 	}
-	// Re-apply defaults to the object handed to the update function, exactly
-	// as the etcd3 store does when it decodes the stored value.
+	// Hand the update function the decoded, defaulted object, exactly as the
+	// etcd3 store does when it decodes the stored value. prepare runs under
+	// the store lock, hence the locked lookup.
 	prepare := func(stored runtime.Object) (runtime.Object, error) {
-		return p.applyDefaults(stored.DeepCopyObject())
+		if p.codec == nil {
+			return stored, nil
+		}
+		return p.store.derivedEntryLocked(p, full, stored).get(p.decode)
 	}
-	if err := p.store.guaranteedUpdate(ctx, full, destination, ignoreNotFound, preconditions, tryUpdate, prepare); err != nil {
+	stored, m, err := p.store.guaranteedUpdate(ctx, full, destination, ignoreNotFound, preconditions, tryUpdate, prepare)
+	if err != nil || destination == nil {
 		return err
 	}
-	if destination != nil {
-		if _, err := p.applyDefaults(destination); err != nil {
-			return err
-		}
-	}
-	return nil
+	return p.into(full, stored, m, destination)
 }
 
 func (p *prefixedStore) Stats(ctx context.Context) (kstorage.Stats, error) {

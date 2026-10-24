@@ -264,3 +264,65 @@ func TestNoCodecKeepsStoredObjects(t *testing.T) {
 		t.Error("status.phase was defaulted even though no codec is configured")
 	}
 }
+
+// countingCodec counts decodes, i.e. applyDefaults round-trips.
+type countingCodec struct {
+	runtime.Codec
+	decodes int
+}
+
+func (c *countingCodec) Decode(data []byte, gvk *schema.GroupVersionKind, into runtime.Object) (runtime.Object, *schema.GroupVersionKind, error) {
+	c.decodes++
+	return c.Codec.Decode(data, gvk, into)
+}
+
+// TestDefaultsMemoizedPerStoredObject checks that reads reuse one decode per
+// stored object, that the shared view cannot be modified through a result,
+// and that a write invalidates it.
+func TestDefaultsMemoizedPerStoredObject(t *testing.T) {
+	ctx := context.Background()
+	codec := &countingCodec{Codec: testCodec()}
+	store := newStore(t, codec)
+	if err := store.Create(ctx, "/workspaces/ws", newWorkspace("ws"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		got := &unstructured.Unstructured{}
+		if err := store.Get(ctx, "/workspaces/ws", kstorage.GetOptions{}, got); err != nil {
+			t.Fatal(err)
+		}
+		if phase := phaseOf(t, got); phase != "Scheduling" {
+			t.Fatalf("get %d status.phase = %q", i, phase)
+		}
+		_ = unstructured.SetNestedField(got.Object, "Mutated", "status", "phase")
+	}
+	list := &unstructured.UnstructuredList{}
+	if err := store.GetList(ctx, "/workspaces", kstorage.ListOptions{Recursive: true}, list); err != nil {
+		t.Fatal(err)
+	}
+	if phase := phaseOf(t, &list.Items[0]); phase != "Scheduling" {
+		t.Fatalf("list status.phase = %q after mutating get results", phase)
+	}
+	if codec.decodes != 1 {
+		t.Fatalf("decodes after 3 gets and a list = %d, want 1", codec.decodes)
+	}
+
+	if err := store.GuaranteedUpdate(ctx, "/workspaces/ws", &unstructured.Unstructured{}, false, nil, func(existing runtime.Object, _ kstorage.ResponseMeta) (runtime.Object, *uint64, error) {
+		u := existing.(*unstructured.Unstructured)
+		u.SetLabels(map[string]string{"updated": "true"})
+		return u, nil, nil
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := &unstructured.Unstructured{}
+	if err := store.Get(ctx, "/workspaces/ws", kstorage.GetOptions{}, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.GetLabels()["updated"] != "true" || phaseOf(t, got) != "Scheduling" {
+		t.Fatalf("get after update = %v", got.Object)
+	}
+	// The update's destination decode is the one the next Get reuses.
+	if codec.decodes != 2 {
+		t.Fatalf("decodes after update and get = %d, want 2", codec.decodes)
+	}
+}

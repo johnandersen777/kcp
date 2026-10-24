@@ -42,6 +42,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	kstorage "k8s.io/apiserver/pkg/storage"
+	"k8s.io/klog/v2"
 
 	"github.com/kcp-dev/logicalcluster/v3"
 )
@@ -78,6 +79,13 @@ type Store struct {
 	// newest revision that has been dropped from the history.
 	events      []storedEvent
 	compactedRV uint64
+
+	// derived memoizes per-reader views of stored objects (prefixedStore's
+	// codec-defaulted decode), keyed by storage key and then by reader. An
+	// entry is valid only for the stored object it was computed from; writes
+	// drop the key's entries. Lock order: mu, then derivedMu.
+	derivedMu sync.Mutex
+	derived   map[string]map[any]*derivedEntry
 
 	onChange  func([]byte)
 	persistCh chan []byte
@@ -130,6 +138,7 @@ func New() *Store {
 		rv:         1, // like etcd, the first write is revision 2; lists never report 0
 		versioner:  kstorage.APIObjectVersioner{},
 		watchers:   map[*bufferWatcher]*watchRegistration{},
+		derived:    map[string]map[any]*derivedEntry{},
 		persistCh:  make(chan []byte, 1),
 		stopCh:     make(chan struct{}),
 	}
@@ -209,6 +218,9 @@ func (s *Store) RestoreWith(data []byte, decode func(key string, raw []byte) (ru
 	s.objectMeta = metas
 	s.rv = maxRV
 	s.events = nil
+	s.derivedMu.Lock()
+	s.derived = map[string]map[any]*derivedEntry{}
+	s.derivedMu.Unlock()
 	// Restored objects are the current state; any watch older than the
 	// snapshot gets a fresh ADDED view rather than replaying nothing.
 	s.compactedRV = maxRV
@@ -230,29 +242,41 @@ func (s *Store) Versioner() kstorage.Versioner { return s.versioner }
 
 // Create implements storage.Interface.
 func (s *Store) Create(ctx context.Context, key string, obj, out runtime.Object, ttl uint64) error {
+	stored, m, err := s.create(ctx, key, obj, ttl)
+	if err != nil || out == nil {
+		return err
+	}
+	return intoAnnotated(stored, m, out)
+}
+
+// create stores a copy of obj and returns the stored object, which callers
+// must not modify.
+func (s *Store) create(ctx context.Context, key string, obj runtime.Object, ttl uint64) (runtime.Object, objectMeta, error) {
 	if ttl != 0 {
-		return fmt.Errorf("in-memory store does not support TTL")
+		return nil, objectMeta{}, fmt.Errorf("in-memory store does not support TTL")
 	}
 	if obj == nil {
-		return fmt.Errorf("cannot create a nil object")
+		return nil, objectMeta{}, fmt.Errorf("cannot create a nil object")
 	}
 
 	stored := obj.DeepCopyObject()
+	m := metaFromContext(ctx)
 
 	s.mu.Lock()
 	if _, exists := s.objects[key]; exists {
 		rv := s.rv
 		s.mu.Unlock()
-		return kstorage.NewKeyExistsError(key, int64(rv))
+		return nil, objectMeta{}, kstorage.NewKeyExistsError(key, int64(rv))
 	}
 	s.rv++
 	if err := s.versioner.UpdateObject(stored, s.rv); err != nil {
 		s.rv--
 		s.mu.Unlock()
-		return err
+		return nil, objectMeta{}, err
 	}
 	s.objects[key] = stored
-	s.objectMeta[key] = metaFromContext(ctx)
+	s.objectMeta[key] = m
+	s.forgetDerivedLocked(key)
 	s.recordEventLocked(key, watch.Added, stored)
 	s.broadcastLocked(key, watch.Added, stored)
 	noteMutation()
@@ -260,25 +284,22 @@ func (s *Store) Create(ctx context.Context, key string, obj, out runtime.Object,
 	s.mu.Unlock()
 
 	s.persist(snap)
-	if out != nil {
-		if err := copyObject(stored, out); err != nil {
-			return err
-		}
-		annotateObject(out, s.metaFor(key))
-	}
-	return nil
-}
-
-func (s *Store) metaFor(key string) objectMeta {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.objectMeta[key]
+	return stored, m, nil
 }
 
 // Get implements storage.Interface.
 func (s *Store) Get(ctx context.Context, key string, opts kstorage.GetOptions, objPtr runtime.Object) error {
-	// Stored objects are never mutated in place (writes replace them), so
-	// the single copy below can happen outside the lock.
+	obj, m, err := s.get(key, opts)
+	if err != nil || obj == nil {
+		return err
+	}
+	return intoAnnotated(obj, m, objPtr)
+}
+
+// get returns the stored object (nil if absent and opts.IgnoreNotFound).
+// Stored objects are never mutated in place (writes replace them), so callers
+// copy them outside the lock.
+func (s *Store) get(key string, opts kstorage.GetOptions) (runtime.Object, objectMeta, error) {
 	s.mu.RLock()
 	obj, exists := s.objects[key]
 	m := s.objectMeta[key]
@@ -287,27 +308,25 @@ func (s *Store) Get(ctx context.Context, key string, opts kstorage.GetOptions, o
 
 	if !exists {
 		if opts.IgnoreNotFound {
-			return nil
+			return nil, objectMeta{}, nil
 		}
-		return kstorage.NewKeyNotFoundError(key, int64(rv))
+		return nil, objectMeta{}, kstorage.NewKeyNotFoundError(key, int64(rv))
 	}
-	if err := copyObject(obj, objPtr); err != nil {
-		return err
-	}
-	annotateObject(objPtr, m)
-	return nil
+	return obj, m, nil
 }
 
 // GetList implements storage.Interface.
 func (s *Store) GetList(ctx context.Context, key string, opts kstorage.ListOptions, listObj runtime.Object) error {
-	type entry struct {
-		key  string
-		obj  runtime.Object
-		meta objectMeta
-	}
+	return s.getList(key, opts, listObj, func(e storedRef) (runtime.Object, error) {
+		return annotatedCopy(e.Object, e.meta), nil
+	})
+}
 
+// getList lists the stored objects under key and fills listObj with view(e)
+// of each, in key order.
+func (s *Store) getList(key string, opts kstorage.ListOptions, listObj runtime.Object, view func(storedRef) (runtime.Object, error)) error {
 	s.mu.RLock()
-	entries := make([]entry, 0, len(s.objects))
+	entries := make([]storedRef, 0, len(s.objects))
 	for k, obj := range s.objects {
 		if !matchesKey(k, key, opts.Recursive) {
 			continue
@@ -315,7 +334,7 @@ func (s *Store) GetList(ctx context.Context, key string, opts kstorage.ListOptio
 		if !predicateMatches(opts.Predicate, obj) {
 			continue
 		}
-		entries = append(entries, entry{key: k, obj: obj.DeepCopyObject(), meta: s.objectMeta[k]})
+		entries = append(entries, storedRef{Object: obj, key: k, meta: s.objectMeta[k]})
 	}
 	rv := s.rv
 	s.mu.RUnlock()
@@ -344,8 +363,11 @@ func (s *Store) GetList(ctx context.Context, key string, opts kstorage.ListOptio
 
 	items := make([]runtime.Object, 0, len(entries))
 	for _, e := range entries {
-		annotateObject(e.obj, e.meta)
-		items = append(items, e.obj)
+		item, err := view(e)
+		if err != nil {
+			return err
+		}
+		items = append(items, item)
 	}
 
 	if err := meta.SetList(listObj, items); err != nil {
@@ -364,12 +386,18 @@ func (s *Store) GuaranteedUpdate(
 	tryUpdate kstorage.UpdateFunc,
 	cachedExistingObject runtime.Object,
 ) error {
-	return s.guaranteedUpdate(ctx, key, destination, ignoreNotFound, preconditions, tryUpdate, nil)
+	stored, m, err := s.guaranteedUpdate(ctx, key, destination, ignoreNotFound, preconditions, tryUpdate, nil)
+	if err != nil {
+		return err
+	}
+	return intoAnnotated(stored, m, destination)
 }
 
 // guaranteedUpdate is GuaranteedUpdate with an optional prepare hook that
 // turns the stored object into the caller's view of it (prefixedStore
-// re-applies codec defaults there). prepare must not modify its argument.
+// re-applies codec defaults there). prepare runs under the store lock and
+// must not modify its argument. It returns the stored object after the
+// update (the existing one for a no-op), which callers must not modify.
 func (s *Store) guaranteedUpdate(
 	ctx context.Context,
 	key string,
@@ -378,9 +406,9 @@ func (s *Store) guaranteedUpdate(
 	preconditions *kstorage.Preconditions,
 	tryUpdate kstorage.UpdateFunc,
 	prepare func(stored runtime.Object) (runtime.Object, error),
-) error {
+) (runtime.Object, objectMeta, error) {
 	if tryUpdate == nil {
-		return fmt.Errorf("tryUpdate is required")
+		return nil, objectMeta{}, fmt.Errorf("tryUpdate is required")
 	}
 
 	s.mu.Lock()
@@ -397,20 +425,20 @@ func (s *Store) guaranteedUpdate(
 		rv, err := s.versioner.ObjectResourceVersion(existing)
 		if err != nil {
 			s.mu.Unlock()
-			return err
+			return nil, objectMeta{}, err
 		}
 		responseMeta.ResourceVersion = rv
 		if preconditions != nil {
 			if err := preconditions.Check(key, existing); err != nil {
 				s.mu.Unlock()
-				return err
+				return nil, objectMeta{}, err
 			}
 		}
 		orig = existing
 		if prepare != nil {
 			if orig, err = prepare(existing); err != nil {
 				s.mu.Unlock()
-				return err
+				return nil, objectMeta{}, err
 			}
 		}
 		input = orig.DeepCopyObject()
@@ -418,7 +446,7 @@ func (s *Store) guaranteedUpdate(
 		if !ignoreNotFound {
 			rv := s.rv
 			s.mu.Unlock()
-			return kstorage.NewKeyNotFoundError(key, int64(rv))
+			return nil, objectMeta{}, kstorage.NewKeyNotFoundError(key, int64(rv))
 		}
 		// Create-on-update semantics: hand the caller a zero object.
 		input = destination.DeepCopyObject()
@@ -427,7 +455,7 @@ func (s *Store) guaranteedUpdate(
 	output, _, err := tryUpdate(input, responseMeta)
 	if err != nil {
 		s.mu.Unlock()
-		return err
+		return nil, objectMeta{}, err
 	}
 	if output == nil {
 		output = input
@@ -435,22 +463,20 @@ func (s *Store) guaranteedUpdate(
 
 	if exists && objectsEqual(orig, output) {
 		s.mu.Unlock()
-		if err := copyObject(output, destination); err != nil {
-			return err
-		}
-		annotateObject(destination, m)
-		return nil
+		return existing, m, nil
 	}
 
 	s.rv++
 	if err := s.versioner.UpdateObject(output, s.rv); err != nil {
 		s.rv--
 		s.mu.Unlock()
-		return err
+		return nil, objectMeta{}, err
 	}
 	stored := output.DeepCopyObject()
+	m = metaFromContext(ctx)
 	s.objects[key] = stored
-	s.objectMeta[key] = metaFromContext(ctx)
+	s.objectMeta[key] = m
+	s.forgetDerivedLocked(key)
 
 	eventType := watch.Added
 	if exists {
@@ -463,11 +489,7 @@ func (s *Store) guaranteedUpdate(
 	s.mu.Unlock()
 
 	s.persist(snap)
-	if err := copyObject(stored, destination); err != nil {
-		return err
-	}
-	annotateObject(destination, s.metaFor(key))
-	return nil
+	return stored, m, nil
 }
 
 // Delete implements storage.Interface.
@@ -480,28 +502,38 @@ func (s *Store) Delete(
 	cachedExistingObject runtime.Object,
 	opts kstorage.DeleteOptions,
 ) error {
+	obj, m, err := s.delete(ctx, key, preconditions, validateDeletion)
+	if err != nil || out == nil {
+		return err
+	}
+	return intoAnnotated(obj, m, out)
+}
+
+// delete removes key and returns the object it held.
+func (s *Store) delete(ctx context.Context, key string, preconditions *kstorage.Preconditions, validateDeletion kstorage.ValidateObjectFunc) (runtime.Object, objectMeta, error) {
 	s.mu.Lock()
 	obj, exists := s.objects[key]
 	if !exists {
 		rv := s.rv
 		s.mu.Unlock()
-		return kstorage.NewKeyNotFoundError(key, int64(rv))
+		return nil, objectMeta{}, kstorage.NewKeyNotFoundError(key, int64(rv))
 	}
 	if preconditions != nil {
 		if err := preconditions.Check(key, obj); err != nil {
 			s.mu.Unlock()
-			return err
+			return nil, objectMeta{}, err
 		}
 	}
 	if validateDeletion != nil {
 		if err := validateDeletion(ctx, obj.DeepCopyObject()); err != nil {
 			s.mu.Unlock()
-			return err
+			return nil, objectMeta{}, err
 		}
 	}
 
 	s.rv++
 	delete(s.objects, key)
+	s.forgetDerivedLocked(key)
 	s.recordEventLocked(key, watch.Deleted, obj)
 	s.broadcastLocked(key, watch.Deleted, obj)
 	m := s.objectMeta[key]
@@ -511,25 +543,23 @@ func (s *Store) Delete(
 	s.mu.Unlock()
 
 	s.persist(snap)
-	if out != nil {
-		if err := copyObject(obj, out); err != nil {
-			return err
-		}
-		annotateObject(out, m)
-	}
-	return nil
+	return obj, m, nil
 }
 
 // Watch implements storage.Interface.
 func (s *Store) Watch(ctx context.Context, key string, opts kstorage.ListOptions) (watch.Interface, error) {
-	return s.watch(ctx, key, opts, nil)
+	return s.watch(ctx, key, opts, nil, func(ref *storedRef) (runtime.Object, error) {
+		return annotatedCopy(ref.Object, ref.meta), nil
+	})
 }
 
 // watch is Watch with an optional prototype constructor used to emit the
-// initial-events-end BOOKMARK required by the WatchList protocol. The raw
+// initial-events-end BOOKMARK required by the WatchList protocol (the raw
 // etcd3 store does the same; without it, informers using sendInitialEvents
-// never finish initializing.
-func (s *Store) watch(ctx context.Context, key string, opts kstorage.ListOptions, bookmark func() runtime.Object) (watch.Interface, error) {
+// never finish initializing), and with view turning each stored object into
+// the caller-owned object the event carries. view runs on the watcher's
+// goroutine, outside the store lock.
+func (s *Store) watch(ctx context.Context, key string, opts kstorage.ListOptions, bookmark func() runtime.Object, view func(*storedRef) (runtime.Object, error)) (watch.Interface, error) {
 	w := newBufferWatcher()
 	w.onStop = func() {
 		s.mu.Lock()
@@ -573,7 +603,7 @@ func (s *Store) watch(ctx context.Context, key string, opts kstorage.ListOptions
 		for _, k := range keys {
 			obj := s.objects[k]
 			if predicateMatches(opts.Predicate, obj) {
-				w.send(watch.Event{Type: watch.Added, Object: annotatedCopy(obj, s.objectMeta[k])})
+				w.send(watch.Event{Type: watch.Added, Object: &storedRef{Object: obj, key: k, meta: s.objectMeta[k]}})
 			}
 		}
 		if bookmark != nil && opts.SendInitialEvents != nil && *opts.SendInitialEvents && opts.Predicate.AllowWatchBookmarks {
@@ -595,7 +625,7 @@ func (s *Store) watch(ctx context.Context, key string, opts kstorage.ListOptions
 			if !predicateMatches(opts.Predicate, ev.obj) {
 				continue
 			}
-			w.send(watch.Event{Type: ev.typ, Object: annotatedCopy(ev.obj, ev.meta)})
+			w.send(watch.Event{Type: ev.typ, Object: &storedRef{Object: ev.obj, key: ev.key, meta: ev.meta}})
 		}
 	}
 	s.mu.Unlock()
@@ -608,7 +638,21 @@ func (s *Store) watch(ctx context.Context, key string, opts kstorage.ListOptions
 		}
 	}()
 
-	return w, nil
+	return watch.Filter(w, func(in watch.Event) (watch.Event, bool) {
+		ref, ok := in.Object.(*storedRef)
+		if !ok {
+			return in, true // bookmarks
+		}
+		obj, err := view(ref)
+		if err != nil {
+			// Surfacing the event undecoded is better than silently dropping a
+			// watch update.
+			klog.FromContext(ctx).Error(err, "failed to prepare watch event", "type", in.Type, "key", ref.key)
+			obj = annotatedCopy(ref.Object, ref.meta)
+		}
+		in.Object = obj
+		return in, true
+	}), nil
 }
 
 // Stats implements storage.Interface.
@@ -665,7 +709,7 @@ func (s *Store) broadcastLocked(key string, typ watch.EventType, obj runtime.Obj
 		if !predicateMatches(reg.predicate, obj) {
 			continue
 		}
-		if !w.send(watch.Event{Type: typ, Object: annotatedCopy(obj, s.objectMeta[key])}) {
+		if !w.send(watch.Event{Type: typ, Object: &storedRef{Object: obj, key: key, meta: s.objectMeta[key]}}) {
 			// Slow consumer: drop it rather than blocking storage. The
 			// callback is deliberately not invoked here because we already
 			// hold the store lock.
@@ -860,6 +904,75 @@ func annotateObject(obj runtime.Object, m objectMeta) {
 		annotations[genericapirequest.ShardAnnotationKey] = m.shard.String()
 	}
 	accessor.SetAnnotations(annotations)
+}
+
+// intoAnnotated copies src into dst and adds the kcp identity annotations.
+func intoAnnotated(src runtime.Object, m objectMeta, dst runtime.Object) error {
+	if err := copyObject(src, dst); err != nil {
+		return err
+	}
+	annotateObject(dst, m)
+	return nil
+}
+
+// storedRef is a stored object (shared, never to be modified) with its key
+// and kcp identity. Watch events carry it until the watcher's view turns it
+// into a caller-owned object.
+type storedRef struct {
+	runtime.Object
+	key  string
+	meta objectMeta
+}
+
+type derivedEntry struct {
+	src  runtime.Object
+	once sync.Once
+	obj  runtime.Object
+	err  error
+}
+
+// forgetDerivedLocked drops the derived views of key; the caller holds mu
+// for writing.
+func (s *Store) forgetDerivedLocked(key string) {
+	s.derivedMu.Lock()
+	delete(s.derived, key)
+	s.derivedMu.Unlock()
+}
+
+// derive returns fn(src) for the stored object src at key, computed once per
+// owner while src is the current object at key. The result is shared and
+// must not be modified. Objects that are no longer current (deleted, or
+// replayed from the watch history) are computed but not memoized.
+func (s *Store) derive(owner any, key string, src runtime.Object, fn func(runtime.Object) (runtime.Object, error)) (runtime.Object, error) {
+	s.mu.RLock()
+	e := s.derivedEntryLocked(owner, key, src)
+	s.mu.RUnlock()
+	return e.get(fn)
+}
+
+// derivedEntryLocked is derive's lookup; the caller holds mu (either way).
+func (s *Store) derivedEntryLocked(owner any, key string, src runtime.Object) *derivedEntry {
+	if s.objects[key] != src {
+		return &derivedEntry{src: src}
+	}
+	s.derivedMu.Lock()
+	defer s.derivedMu.Unlock()
+	byOwner := s.derived[key]
+	if byOwner == nil {
+		byOwner = map[any]*derivedEntry{}
+		s.derived[key] = byOwner
+	}
+	e := byOwner[owner]
+	if e == nil || e.src != src {
+		e = &derivedEntry{src: src}
+		byOwner[owner] = e
+	}
+	return e
+}
+
+func (e *derivedEntry) get(fn func(runtime.Object) (runtime.Object, error)) (runtime.Object, error) {
+	e.once.Do(func() { e.obj, e.err = fn(e.src) })
+	return e.obj, e.err
 }
 
 func annotatedCopy(obj runtime.Object, m objectMeta) runtime.Object {

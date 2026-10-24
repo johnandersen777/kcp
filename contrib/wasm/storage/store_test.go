@@ -361,7 +361,7 @@ func TestWatchInitialEventsBookmark(t *testing.T) {
 		Recursive:         true,
 		SendInitialEvents: &sendInitial,
 		Predicate:         kstorage.SelectionPredicate{AllowWatchBookmarks: true},
-	}, func() runtime.Object { return newFetch("") })
+	}, func() runtime.Object { return newFetch("") }, func(ref *storedRef) (runtime.Object, error) { return annotatedCopy(ref.Object, ref.meta), nil })
 	if err != nil {
 		t.Fatalf("watch: %v", err)
 	}
