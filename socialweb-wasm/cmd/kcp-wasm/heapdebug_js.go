@@ -15,7 +15,7 @@ import (
 )
 
 // startHeapDebug is debug-only: with KCP_HEAP_PROFILE=<seconds> in the Go env
-// it hands the host __kcpHeapDump(memStatsJSON, heapProfileBase64) on that
+// it hands the host __kcpHeapDump(memStatsJSON, heapProfileBase64, goroutineProfileBase64) on that
 // period. The default (unset) keeps allocation profiling off.
 func startHeapDebug() {
 	period, _ := strconv.Atoi(os.Getenv("KCP_HEAP_PROFILE"))
@@ -33,8 +33,11 @@ func startHeapDebug() {
 			stats, _ := json.Marshal(ms)
 			var buf bytes.Buffer
 			_ = pprof.WriteHeapProfile(&buf)
+			var goroutines bytes.Buffer
+			_ = pprof.Lookup("goroutine").WriteTo(&goroutines, 0)
 			if fn := js.Global().Get("__kcpHeapDump"); fn.Type() == js.TypeFunction {
-				fn.Invoke(string(stats), base64.StdEncoding.EncodeToString(buf.Bytes()))
+				fn.Invoke(string(stats), base64.StdEncoding.EncodeToString(buf.Bytes()),
+					base64.StdEncoding.EncodeToString(goroutines.Bytes()))
 			}
 		}
 	}()
