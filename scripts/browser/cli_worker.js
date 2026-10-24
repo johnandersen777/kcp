@@ -20,8 +20,9 @@ limitations under the License.
 // fd 0, and fd 1/2 are captured by the fs shim. Upstream sources are
 // unmodified.
 //
-// The worker compiles all modules once and instantiates per run. HTTP goes
-// through the page origin's /proxy so cross-origin APIs work without CORS.
+// The worker compiles all modules once and instantiates per run. goat's HTTP
+// runs through the browser's normal fetch (PDS/PLC/AppView enable CORS,
+// including preflight for Authorization).
 
 import {
   clearMemoryFs,
@@ -60,20 +61,12 @@ globalThis.process.chdir = (path) => {
 setCwd(processCwd);
 
 const nativeFetch = globalThis.fetch.bind(globalThis);
-const origin = self.location.origin;
-
 globalThis.fetch = async (input, options = {}) => {
   const url = typeof input === "string" ? input : String(input?.url ?? input);
-  if (!/^https?:/i.test(url) || url.startsWith(origin)) {
-    return nativeFetch(input, options);
+  if (/^https?:/i.test(url)) {
+    log("info", `${options.method ?? "GET"} ${url}`);
   }
-  const method = options.method ?? "GET";
-  log("info", `${method} ${url}`);
-  return nativeFetch(`/proxy?url=${encodeURIComponent(url)}`, {
-    method,
-    headers: options.headers,
-    body: options.body,
-  });
+  return nativeFetch(input, options);
 };
 
 const compiled = new Map();

@@ -119,65 +119,6 @@ Deno.serve({ hostname, port }, async (request) => {
     );
   }
 
-  if (url.pathname === "/proxy") {
-    const target = url.searchParams.get("url") ?? "";
-    let upstreamURL: URL;
-    try {
-      upstreamURL = new URL(target);
-    } catch {
-      return new Response("invalid url\n", { status: 400, headers });
-    }
-    if (upstreamURL.protocol !== "http:" && upstreamURL.protocol !== "https:") {
-      return new Response("unsupported scheme\n", { status: 400, headers });
-    }
-
-    const forwarded = new Headers();
-    const skip = new Set([
-      "host",
-      "origin",
-      "referer",
-      "connection",
-      "accept-encoding",
-      "content-length",
-    ]);
-    request.headers.forEach((value, key) => {
-      if (!skip.has(key.toLowerCase())) forwarded.set(key, value);
-    });
-
-    const body = request.method === "GET" || request.method === "HEAD"
-      ? undefined
-      : await request.arrayBuffer();
-
-    try {
-      const upstream = await fetch(upstreamURL, {
-        method: request.method,
-        headers: forwarded,
-        body,
-        redirect: "follow",
-      });
-      const headersOut = new Headers();
-      for (const [key, value] of upstream.headers) {
-        const name = key.toLowerCase();
-        if (
-          name === "content-encoding" || name === "content-length" ||
-          name === "transfer-encoding" || name === "connection"
-        ) {
-          continue;
-        }
-        headersOut.set(key, value);
-      }
-      return new Response(upstream.body, {
-        status: upstream.status,
-        headers: headersOut,
-      });
-    } catch (err) {
-      return new Response(
-        `proxy error: ${err instanceof Error ? err.message : err}\n`,
-        { status: 502, headers },
-      );
-    }
-  }
-
   if (url.pathname === "/demo.yaml") {
     const body = [
       "apiVersion: fetch.kcp.io/v1alpha1",
@@ -228,5 +169,5 @@ Deno.serve({ hostname, port }, async (request) => {
 });
 
 console.error(
-  `browser demo: http://${hostname}:${port} (all WASM in the browser; virtual API ${apiServer}; goat/yq egress via /proxy)`,
+  `browser demo: http://${hostname}:${port} (all WASM in the browser; virtual API ${apiServer}; CLIs fetch directly)`,
 );

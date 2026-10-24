@@ -235,10 +235,10 @@ custom commands bridge to WebAssembly workers; real shell parsing gives pipes,
 redirection, heredocs, `&&`, variables and the built-in unix commands.
 
 ```
-just-bash (page)                        Deno static server
-  kubectl ─╮                              /proxy ← cross-origin CLI HTTP
-  goat ────┼──> WASM workers                  ▲
-  yq ──────╯    kcp / kubectl / cli ──fetch()─┘
+just-bash (page)
+  kubectl ─╮
+  goat ────┼──> WASM workers ──fetch()──> PDS / PLC / AppView (CORS)
+  yq ──────╯    kcp / kubectl / cli
 ```
 
 * `kubectl` — the upstream kubectl WASM worker; requests for the virtual API
@@ -282,16 +282,18 @@ platform adaptation is an indigo copy for js/wasm: Go's wasm port has no DNS
 and net/http only uses `fetch` without a custom `DialContext`, so the copy
 skips DNS, keeps a fetch-capable transport, and falls back to the public
 AppView for handle resolution. It is built through a generated `-modfile`;
-the goat checkout and module cache stay untouched. goat's HTTP (and yq's)
-goes through the page origin's `/proxy` to avoid CORS.
+the goat checkout and module cache stay untouched. goat calls PDS, PLC and
+AppView directly from the browser; those services send
+`Access-Control-Allow-Origin: *` (and allow Authorization in preflight), so no
+proxy is involved.
 
 xterm.js, Pele and just-bash load from jsDelivr/esm.sh, so the browser needs
 network access. There is no build step for the page.
 
-Limitations: websocket-based commands (`goat firehose`) cannot upgrade through
-`/proxy`; files shared with goat/yq are UTF-8 text up to 1 MiB; two tabs share
-one localStorage snapshot. `/proxy` is an unrestricted egress endpoint, so
-keep the server bound to localhost.
+Limitations: websocket-based commands (`goat firehose`) do not work in the
+browser; files shared with goat/yq are UTF-8 text up to 1 MiB; two tabs share
+one localStorage snapshot. Goat's network calls require the remote service to
+allow CORS (Bluesky PDS, PLC and AppView do).
 
 ## The `Fetch` CRD (written in Go)
 
@@ -466,8 +468,7 @@ real-server entrypoint does not yet.
 * `scripts/kubectl_wasm_fs.ts` — synchronous `globalThis.fs` shim: Deno-backed
   reads of kubeconfig/`-f` files, run-scoped stdin, in-memory writes.
 * `scripts/kubectl_wasm_web.ts` — static server for the browser demo: page,
-  worker scripts, all `.wasm` files, `/config`, `/echo`, `/demo.yaml`, and the
-  `/proxy` egress endpoint for goat/yq.
+  worker scripts, all `.wasm` files, `/config`, `/echo` and `/demo.yaml`.
 * `scripts/browser/` — the browser side. `app.html` (layout), `app.js`
   (just-bash shell, worker orchestration, polling), `kcp_worker.js` (kcp.wasm),
   `kubectl_worker.js` (kubectl.wasm + fetch bridge), `cli_worker.js` (fresh
