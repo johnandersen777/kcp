@@ -2003,6 +2003,7 @@ function applyState(state) {
   const action = identity?.pendingAction;
   lastIdentityAction = action ?? null;
   const summary = `MarketIdentity ${phase}${identity?.handle ? ` ${identity.handle}` : ""}` +
+    `${identity?.did ? ` did=${identity.did}` : ""}` +
     `${action ? ` action=${action.kind} expires=${action.expiresAt || "unset"}` : ""}` +
     `${identity?.message ? `: ${identity.message}` : ""}`;
   if (summary !== lastIdentitySummary) {
