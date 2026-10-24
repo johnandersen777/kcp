@@ -139,7 +139,11 @@ const go = hibernate.instrument(new globalThis.Go());
 // Low-memory mode (iOS): collect four times as often to keep the heap small. No
 // GOMEMLIMIT: kcp's live heap is near 400 MiB, and a soft limit below it makes
 // the single-threaded runtime collect continuously and never yield to JS.
-if (init.lowMemory) go.env = { ...go.env, GOGC: "25" };
+// KCP_LOW_MEMORY turns off the apiserver watch cache and shortens the storage
+// watch history (contrib/wasm/real). KCP_GOGC_READY collects harder once kcp is
+// up, while socialweb composes: settled memory ~417 -> ~395 MiB in Deno, at
+// the cost of a slower compose (~38 -> ~56 s).
+if (init.lowMemory) go.env = { ...go.env, GOGC: "25", KCP_LOW_MEMORY: "1", KCP_GOGC_READY: "10" };
 const fetchStarted = performance.now();
 // The module hash only keys the snapshot; skip it (and its buffered copy)
 // when hibernation is off.

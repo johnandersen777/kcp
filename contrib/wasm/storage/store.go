@@ -35,6 +35,7 @@ import (
 	"time"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
@@ -107,9 +108,14 @@ type Store struct {
 	keysFunc  kstorage.KeysFunc
 }
 
-// maxWatchHistory bounds the replayed event history. When a watch starts
-// older than the history, it receives the current state as ADDED events.
-const maxWatchHistory = 4096
+// maxWatchHistory bounds the replayed event history per store. A watch that
+// starts older than the history gets 410 Expired and relists. Each retained
+// event pins a superseded object version.
+var maxWatchHistory = 4096
+
+// SetWatchHistory bounds the replayed event history of every store. Call it
+// before the stores take writes.
+func SetWatchHistory(events int) { maxWatchHistory = events }
 
 // mutationSeq counts writes across all stores. Coalescing snapshotters (see
 // OnSnapshot) poll it instead of receiving a serialized snapshot after every
@@ -610,13 +616,21 @@ func (s *Store) watch(ctx context.Context, key string, opts kstorage.ListOptions
 		s.mu.Unlock()
 		return nil, kstorage.NewTooLargeResourceVersionError(requestedRV, rv, 1)
 	}
+	// Like a compacted etcd: a watch older than the history must relist.
+	// Replaying the current state as ADDED events would never deliver the
+	// deletions in the gap, leaving informers with stale objects.
+	if fromRV && !sendInitial && requestedRV < s.compactedRV {
+		compacted := s.compactedRV
+		s.mu.Unlock()
+		return nil, apierrors.NewResourceExpired(fmt.Sprintf("too old resource version: %d (%d)", requestedRV, compacted))
+	}
 
 	reg := &watchRegistration{key: key, recursive: opts.Recursive, predicate: opts.Predicate}
 	s.watchers[w] = reg
 
 	switch {
-	case sendInitial || (fromRV && requestedRV < s.compactedRV):
-		// No usable history: send the current state as ADDED events.
+	case sendInitial:
+		// Send the current state as ADDED events.
 		keys := make([]string, 0, len(s.objects))
 		for k := range s.objects {
 			if matchesKey(k, key, opts.Recursive) {

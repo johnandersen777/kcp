@@ -19,6 +19,7 @@ package apiserver
 import (
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/emicklei/go-restful/v3"
@@ -32,6 +33,7 @@ import (
 	openapinamer "k8s.io/apiserver/pkg/endpoints/openapi"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/apiserver/pkg/util/openapi"
+	"k8s.io/kube-openapi/pkg/common"
 	generatedopenapi "k8s.io/kubernetes/pkg/generated/openapi"
 
 	virtualcontext "github.com/kcp-dev/virtual-workspace-framework/pkg/context"
@@ -181,12 +183,7 @@ func (c completedConfig) New(virtualWorkspaceName string, delegationTarget gener
 	s.GenericAPIServer.Handler.GoRestfulContainer.Add(discovery.NewLegacyRootAPIHandler(c.GenericConfig.DiscoveryAddresses, s.GenericAPIServer.Serializer, "/api").WebService())
 
 	if !c.GenericConfig.SkipOpenAPIInstallation {
-		getOpenAPIDefinitions := openapi.GetOpenAPIDefinitionsWithoutDisabledFeatures(generatedopenapi.GetOpenAPIDefinitions)
-		namer := openapinamer.NewDefinitionNamer(scheme)
-		openapiv3Config := genericapiserver.DefaultOpenAPIV3Config(getOpenAPIDefinitions, namer)
-		openapiv3Config.Info.Title = "Kubernetes"
-
-		openAPIHandler := newOpenAPIHandler(s.APISetRetriever, s.GenericAPIServer.Handler.GoRestfulContainer, openapiv3Config, DefaultServiceCacheSize, delegateHandler)
+		openAPIHandler := newOpenAPIHandler(s.APISetRetriever, s.GenericAPIServer.Handler.GoRestfulContainer, sharedOpenAPIV3Config(), DefaultServiceCacheSize, delegateHandler)
 
 		s.GenericAPIServer.Handler.NonGoRestfulMux.Handle("/openapi", openAPIHandler)
 		s.GenericAPIServer.Handler.NonGoRestfulMux.HandlePrefix("/openapi/", openAPIHandler)
@@ -198,3 +195,18 @@ func (c completedConfig) New(virtualWorkspaceName string, delegationTarget gener
 	s.GenericAPIServer.Handler.NonGoRestfulMux.HandlePrefix("/api/v1/", crdHandler)
 	return s, nil
 }
+
+// sharedOpenAPIV3Config is built once per process; it depends only on the
+// package scheme. Definitions is cleared: DefaultOpenAPIV3Config materializes
+// every generated Kubernetes definition (several MiB) per server, and
+// builder3 mutates that map while building, so concurrent builds sharing it
+// race (kcp's openapiv3 ServiceCache clears it for the same reason). With it
+// nil, each build calls GetDefinitions for a private map.
+var sharedOpenAPIV3Config = sync.OnceValue(func() *common.OpenAPIV3Config {
+	getOpenAPIDefinitions := openapi.GetOpenAPIDefinitionsWithoutDisabledFeatures(generatedopenapi.GetOpenAPIDefinitions)
+	namer := openapinamer.NewDefinitionNamer(scheme)
+	config := genericapiserver.DefaultOpenAPIV3Config(getOpenAPIDefinitions, namer)
+	config.Info.Title = "Kubernetes"
+	config.Definitions = nil
+	return config
+})

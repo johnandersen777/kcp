@@ -172,6 +172,37 @@ if [[ "${mode}" == "js" ]]; then
     '\tif err := pem.Encode(&keyBuffer, &pem.Block{Type: keyutil.RSAPrivateKeyBlockType, Bytes: x509.MarshalPKCS1PrivateKey(priv)}); err != nil {' \
     '\tkeyDER, err := x509.MarshalECPrivateKey(priv)\n\tif err != nil {\n\t\treturn nil, nil, err\n\t}\n\tif err := pem.Encode(&keyBuffer, &pem.Block{Type: keyutil.ECPrivateKeyBlockType, Bytes: keyDER}); err != nil {'
 
+  # rest.Config wraps a custom Dial in a fresh DialHolder per client, so the
+  # transport cache never hits and every client opens its own TLS + HTTP/2
+  # connection over the in-process pipe: ~250 connections, ~1500 goroutines
+  # and their buffers in the browser shard. Share one holder per dial func
+  # value; rest.CopyConfig copies the same value, so equal configs share a
+  # connection as they do without a custom Dial.
+  replace_in "${work}/client-go/rest/transport.go" \
+    'conf.DialHolder = &transport.DialHolder{Dial: c.Dial}' 'conf.DialHolder = sharedDialHolder(c.Dial)'
+  cat > "${work}/client-go/rest/dialholder_shared.go" <<'GO'
+package rest
+
+import (
+	"context"
+	"net"
+	"sync"
+	"unsafe"
+
+	"k8s.io/client-go/transport"
+)
+
+// dialHolders maps a dial func value (its funcval pointer) to one
+// DialHolder. Holders keep their func alive, so a pointer is never reused.
+var dialHolders sync.Map
+
+func sharedDialHolder(dial func(ctx context.Context, network, address string) (net.Conn, error)) *transport.DialHolder {
+	key := *(*unsafe.Pointer)(unsafe.Pointer(&dial))
+	h, _ := dialHolders.LoadOrStore(key, &transport.DialHolder{Dial: dial})
+	return h.(*transport.DialHolder)
+}
+GO
+
   # Informers start before their CRDs exist and their reflectors back off
   # 800ms doubling to 30s, so a resource that appears a moment later is only
   # listed tens of seconds after. A single in-process apiserver has no
@@ -185,6 +216,47 @@ if [[ "${mode}" == "js" ]]; then
     replace_in "${reflector}" 'defaultBackoffInit = 800 * time.Millisecond' 'defaultBackoffInit = 100 * time.Millisecond'
     replace_in "${reflector}" 'defaultBackoffMax  = 30 * time.Second' 'defaultBackoffMax  = 1 * time.Second'
   done
+
+  # Every informer event handler preallocates a 1024-slot notification ring
+  # (16 KiB); the browser shard registers ~650 of them (~17 MiB). Start at 16
+  # slots: the ring doubles on demand.
+  for informer in "${work}/client-go/tools/cache/shared_informer.go" \
+    "${work}/kcp-apimachinery/third_party/informers/shared_informer.go"; do
+    replace_in "${informer}" 's.clock.Now(), initialBufferSize, s.HasSyncedChecker())' 's.clock.Now(), 16, s.HasSyncedChecker())'
+  done
+
+  # The CRD handler builds a fresh scale scheme (autoscaling, extensions and
+  # apps conversions) for every served CRD version: ~10 MiB of heap in the
+  # browser shard. The scheme is read-only once built; share one.
+  rm -rf "${work}/apiextensions-apiserver"
+  copy_module k8s.io/apiextensions-apiserver "${work}/apiextensions-apiserver"
+  replace_in "${work}/apiextensions-apiserver/pkg/apiserver/customresource_handler.go" \
+    'scaleConverter := scale.NewScaleConverter()' 'scaleConverter := sharedScaleConverter(scale.NewScaleConverter)'
+  # The proto models (ToProtoModelsV3, MiBs per CRD) only serve strategic
+  # merge patch, which CRDs accept only for client-go scheme groups. Skip
+  # them for every other CRD; the SSA type converter does not use them.
+  replace_in "${work}/apiextensions-apiserver/pkg/apiserver/customresource_handler.go" \
+    '} else if openAPIModels != nil {' \
+    '} else if openAPIModels != nil && clientgoscheme.Scheme.IsGroupRegistered(crd.Spec.Group) {'
+  cat > "${work}/apiextensions-apiserver/pkg/apiserver/scale_shared.go" <<'GO'
+package apiserver
+
+import (
+	"sync"
+
+	"k8s.io/client-go/scale"
+)
+
+var (
+	scaleConverterOnce sync.Once
+	scaleConverter     *scale.ScaleConverter
+)
+
+func sharedScaleConverter(newConverter func() *scale.ScaleConverter) *scale.ScaleConverter {
+	scaleConverterOnce.Do(func() { scaleConverter = newConverter() })
+	return scaleConverter
+}
+GO
 fi
 
 echo "prepared ${modfile} (mode=${mode})"

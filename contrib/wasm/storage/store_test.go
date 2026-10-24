@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -404,6 +405,22 @@ func TestWatchTooLargeResourceVersion(t *testing.T) {
 	})
 	if !kstorage.IsTooLargeResourceVersion(err) {
 		t.Fatalf("Watch error = %v, want TooLargeResourceVersion", err)
+	}
+}
+
+func TestWatchOlderThanHistoryExpires(t *testing.T) {
+	ctx := context.Background()
+	s := New()
+	defer s.Close()
+
+	for i := 0; i < maxWatchHistory+maxWatchHistory/4+1; i++ {
+		if err := s.Create(ctx, key(fmt.Sprintf("o%d", i)), newFetch(fmt.Sprintf("o%d", i)), nil, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := s.Watch(ctx, prefix, kstorage.ListOptions{Recursive: true, ResourceVersion: "1"})
+	if !apierrors.IsResourceExpired(err) {
+		t.Fatalf("Watch error = %v, want ResourceExpired", err)
 	}
 }
 

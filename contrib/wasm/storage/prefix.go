@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"reflect"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -152,7 +153,17 @@ func (p *prefixedStore) decoded(key string, stored runtime.Object) (runtime.Obje
 func (p *prefixedStore) decode(stored runtime.Object) (runtime.Object, error) {
 	// Encoding may touch its input (the versioning codec sets and restores
 	// the GVK), so never hand it the shared stored object.
-	return p.applyDefaults(stored.DeepCopyObject())
+	decoded, err := p.applyDefaults(stored.DeepCopyObject())
+	if err != nil {
+		return nil, err
+	}
+	// Most reads decode to an object equal to the stored one (same type, no
+	// new defaults). Keep the stored object then: the memoized view would
+	// otherwise be a second full copy of the store.
+	if reflect.TypeOf(decoded) == reflect.TypeOf(stored) && reflect.DeepEqual(decoded, stored) {
+		return stored, nil
+	}
+	return decoded, nil
 }
 
 // into copies the reader's view of a stored object into dst.
