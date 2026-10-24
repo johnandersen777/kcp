@@ -63,6 +63,8 @@ assets=(
   wasm_fetch.js
   ingress_ws.js
   vmshell.js
+  wasm_snapshot.js
+  kcp_hibernate.js
 )
 wasm_modules=(
   kcp.wasm
