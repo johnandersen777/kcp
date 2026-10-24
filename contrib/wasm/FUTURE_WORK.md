@@ -22,6 +22,9 @@ Open options:
 
 1. Per-user hibernate first: boot cold once in the visitor's browser, snapshot
    to OPFS, restore from there on later visits. No shared secrets.
+   Implemented by `scripts/browser/kcp_hibernate.js`; the snapshot stays in
+   the visitor's OPFS (or IndexedDB), unencrypted, next to the JSON state that
+   already holds the same keys.
 2. If a build-time image is shipped, rotate after restore before serving any
    request: regenerate the CA/serving keys, the service-account key and all
    bearer tokens, and invalidate tokens signed with the baked key.
