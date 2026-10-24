@@ -80,6 +80,8 @@ type Composer struct {
 
 	applied map[string]int64
 
+	forgotten map[string]bool
+
 	samples samples
 
 	roots rootIndex
@@ -107,7 +109,7 @@ func New(cfg Config) (*Composer, error) {
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &Composer{cfg: cfg, restCfg: restCfg, log: log.With("component", "app-compose"), clients: map[string]*kube.Client{},
-		applied: map[string]int64{}, roots: rootIndex{byCluster: map[string]map[string]map[string]bool{}}}, nil
+		applied: map[string]int64{}, forgotten: map[string]bool{}, roots: rootIndex{byCluster: map[string]map[string]map[string]bool{}}}, nil
 }
 
 func (c *Composer) Config() Config { return c.cfg }
@@ -175,12 +177,21 @@ func (c *Composer) MarkApplied(r Root) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.applied[string(r.UID)] = r.Generation
+	delete(c.forgotten, string(r.UID))
+}
+
+func (c *Composer) AppliedBefore(r Root, recorded *v1alpha1.AppliedSet, digest string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.forgotten[string(r.UID)] && recorded != nil && digest != "" &&
+		recorded.Generation == r.Generation && recorded.Digest == digest
 }
 
 func (c *Composer) Forget(r Root) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.applied, string(r.UID))
+	c.forgotten[string(r.UID)] = true
 }
 
 func ComponentStateDir(instanceState, component string) string {
