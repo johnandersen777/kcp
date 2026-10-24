@@ -33,6 +33,20 @@ KCP_SOURCE_MODFILE="${module_dir}/go.mod" \
   go mod edit -modfile="${modfile}" -replace="github.com/johnandersen777/socialweb-computer-kcp=${mirror}"
 )
 
+# indigo's atproto/syntax validators overflow Safari's worker stack at init;
+# build against a patched copy (see scripts/patch-indigo-syntax-js.py).
+indigo_dir="$(cd "${module_dir}" && go list -modfile="${modfile}" -m -f '{{.Dir}}' github.com/bluesky-social/indigo)"
+if [[ "${indigo_dir}" != "${work}/indigo" ]]; then
+  rm -rf "${work}/indigo"
+  cp -a "${indigo_dir}" "${work}/indigo"
+  chmod -R u+w "${work}/indigo"
+fi
+python3 "${repo_root}/scripts/patch-indigo-syntax-js.py" "${work}/indigo"
+(
+  cd "${module_dir}"
+  go mod edit -modfile="${modfile}" -replace="github.com/bluesky-social/indigo=${work}/indigo"
+)
+
 SOCIALWEB_KCP="${mirror}" "${repo_root}/scripts/prepare-socialweb-wasm-overlay.sh"
 
 echo "building combined kcp + socialweb wasm..."
