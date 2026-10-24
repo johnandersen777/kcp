@@ -41,6 +41,7 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	utilopenapi "k8s.io/apiserver/pkg/util/openapi"
+	kubernetesscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog/v2"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
@@ -110,20 +111,26 @@ func CreateServingInfoFor(genericConfig genericapiserver.CompletedConfig, apiRes
 	}
 
 	var modelsByGKV openapi.ModelsByGKV
+	modelsOK := true
 
-	openAPIModels, err := utilopenapi.ToProtoModels(s)
-	if err != nil {
-		utilruntime.HandleError(fmt.Errorf("error building openapi models for %s: %w", gvk.String(), err))
-		openAPIModels = nil
-	} else {
-		modelsByGKV, err = openapi.GetModelsByGKV(openAPIModels)
+	// Only strategic merge patch reads the proto models, and it is served
+	// only for groups of the client-go scheme (see handler.go). Parsing them
+	// for every other schema cost MiBs of heap per served version.
+	if kubernetesscheme.Scheme.IsGroupRegistered(gvk.Group) {
+		openAPIModels, err := utilopenapi.ToProtoModels(s)
 		if err != nil {
-			utilruntime.HandleError(fmt.Errorf("error gathering openapi models by GKV for %s: %w", gvk.String(), err))
-			modelsByGKV = nil
+			utilruntime.HandleError(fmt.Errorf("error building openapi models for %s: %w", gvk.String(), err))
+			modelsOK = false
+		} else {
+			modelsByGKV, err = openapi.GetModelsByGKV(openAPIModels)
+			if err != nil {
+				utilruntime.HandleError(fmt.Errorf("error gathering openapi models by GKV for %s: %w", gvk.String(), err))
+				modelsByGKV = nil
+			}
 		}
 	}
 	typeConverter := managedfields.NewDeducedTypeConverter()
-	if openAPIModels != nil {
+	if modelsOK {
 		schemas := make(map[string]*spec.Schema, len(s.Definitions))
 		for k, v := range s.Definitions {
 			schemas[k] = &v

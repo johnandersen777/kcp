@@ -193,6 +193,12 @@ if [[ "${mode}" == "js" ]]; then
   copy_module k8s.io/apiextensions-apiserver "${work}/apiextensions-apiserver"
   replace_in "${work}/apiextensions-apiserver/pkg/apiserver/customresource_handler.go" \
     'scaleConverter := scale.NewScaleConverter()' 'scaleConverter := sharedScaleConverter(scale.NewScaleConverter)'
+  # The proto models (ToProtoModelsV3, MiBs per CRD) only serve strategic
+  # merge patch, which CRDs accept only for client-go scheme groups. Skip
+  # them for every other CRD; the SSA type converter does not use them.
+  replace_in "${work}/apiextensions-apiserver/pkg/apiserver/customresource_handler.go" \
+    '} else if openAPIModels != nil {' \
+    '} else if openAPIModels != nil && clientgoscheme.Scheme.IsGroupRegistered(crd.Spec.Group) {'
   cat > "${work}/apiextensions-apiserver/pkg/apiserver/scale_shared.go" <<'GO'
 package apiserver
 
