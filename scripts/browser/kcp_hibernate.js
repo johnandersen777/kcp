@@ -363,7 +363,7 @@ export function startHibernation({ go, key, ready, seqs, extra, captured = null,
     },
     async discard() {
       disabled = true;
-      await store.discard();
+      await discardSnapshot();
     },
   };
 }

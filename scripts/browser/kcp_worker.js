@@ -271,7 +271,7 @@ async function finishRestore() {
 async function restartCold(err) {
   console.error("kcp-wasm: snapshot restore failed", err);
   log("warn", `snapshot restore failed, cold booting: ${err?.message ?? err}`);
-  await hibernate.pickStore(init.hibernate?.store).discard().catch(() => {});
+  await hibernate.discardSnapshot().catch(() => {});
   self.postMessage({ type: "ready", restart: String(err?.message ?? err) });
   await new Promise(() => {}); // the page terminates this worker
 }
@@ -297,7 +297,7 @@ function handleHibernateMessage(type) {
     return true;
   }
   if (type === "snapshot-discard") {
-    (hibernation?.discard() ?? hibernate.pickStore(init.hibernate?.store).discard())
+    (hibernation?.discard() ?? hibernate.discardSnapshot())
       .then(() => log("info", "snapshot discarded; capture is off until reload"))
       .catch((err) => log("warn", `snapshot discard failed: ${err?.message ?? err}`));
     return true;
