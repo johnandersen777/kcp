@@ -106,6 +106,8 @@ if needle not in src:
 src = src.replace(needle, addition, 1)
 open(handle_path, "w").write(src)
 GOATPY
+# Safari workers overflow on atproto/syntax regexes at init (see the script).
+python3 "${repo_root}/scripts/patch-indigo-syntax-js.py" "${indigo_dir}"
 
 isatty_dir="$("${repo_root}/scripts/prepare-cli-isatty.sh" "${work}/go-isatty" \
   "$(cd "${work}" && GOTOOLCHAIN="${cli_toolchain}" go list -m -f '{{.Dir}}' github.com/mattn/go-isatty)")"
