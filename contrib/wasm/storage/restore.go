@@ -72,8 +72,8 @@ type All struct {
 
 const allVersion = 1
 
-// debugTimings turns on per-class timing lines for every SnapshotAll call.
-// SnapshotAll runs on the coalescing ticker, so the lines are noisy and
+// debugTimings turns on a timing line for every persistence message. They
+// are produced on the coalescing ticker, so the lines are noisy and
 // opt-in; RestoreAll logs its summary once per boot unconditionally.
 var debugTimings = debugTimingsEnabled()
 
@@ -128,52 +128,64 @@ func formatClassStats(stats map[string]*classStats) string {
 	return b.String()
 }
 
-func classStatsOfSnapshot(raw []byte) map[string]*classStats {
-	var snap Snapshot
-	stats := map[string]*classStats{}
-	if err := json.Unmarshal(raw, &snap); err != nil {
-		return stats
-	}
-	for key, item := range snap.Items {
-		addClassStat(stats, key, len(item), 0)
-	}
-	return stats
+// message is one persistence message. A full message has the All shape that
+// RestoreAll reads; a delta (Delta set) carries per store only the keys
+// written since the previous message plus Snapshot.Deletes. Consumers fold
+// deltas into the full form (scripts/browser/state_store.js). Another
+// top-level section added here must be carried verbatim by those consumers,
+// which they do for any field besides version, delta and stores.
+type message struct {
+	Version int                  `json:"version"`
+	Delta   bool                 `json:"delta,omitempty"`
+	Stores  map[string]*Snapshot `json:"stores"`
 }
 
-// SnapshotAll captures every shared store in one JSON envelope.
-func SnapshotAll() ([]byte, error) {
+// persistMessage builds the next persistence message across all shared
+// stores. It is full when full is set or any store asks for it (new store,
+// restore), and a delta otherwise; nil means nothing persisted changed (for
+// example only skipped keys such as leases were written). Each call resets
+// the stores' dirty sets, so messages must be delivered in order.
+func persistMessage(full bool) (data []byte, isFull bool, err error) {
 	start := time.Now()
 	stores := SharedStores()
-	names := make([]string, 0, len(stores))
-	for name := range stores {
-		names = append(names, name)
+	for _, store := range stores {
+		store.encMu.Lock()
+		full = full || store.needFull
+		store.encMu.Unlock()
 	}
-	sort.Strings(names)
-	out := All{Version: allVersion, Stores: map[string]json.RawMessage{}}
-	var details strings.Builder
-	for _, name := range names {
-		storeStart := time.Now()
-		raw, err := stores[name].Snapshot()
+	out := message{Version: allVersion, Delta: !full, Stores: map[string]*Snapshot{}}
+	changed := false
+	for name, store := range stores {
+		part, partChanged, err := store.persistPart(full, skipSnapshotKey)
 		if err != nil {
-			return nil, fmt.Errorf("snapshotting store %q: %w", name, err)
+			return nil, false, fmt.Errorf("snapshotting store %q: %w", name, err)
 		}
-		stats := map[string]*classStats{}
-		if debugTimings {
-			stats = classStatsOfSnapshot(raw)
-		}
-		out.Stores[name] = raw
-		if debugTimings {
-			fmt.Fprintf(&details, " %q: %d bytes, %s;%s", name, len(raw), time.Since(storeStart).Round(time.Millisecond), formatClassStats(stats))
+		if partChanged {
+			out.Stores[name] = part
+			changed = true
 		}
 	}
-	data, err := json.Marshal(out)
+	if !changed {
+		return nil, full, nil
+	}
+	data, err = json.Marshal(out)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if debugTimings {
-		fmt.Fprintf(os.Stderr, "snapshot: %d store(s), %d bytes, total %s;%s\n", len(out.Stores), len(data), time.Since(start).Round(time.Millisecond), details.String())
+		fmt.Fprintf(os.Stderr, "snapshot: delta=%t, %d store(s), %d bytes, %s\n", out.Delta, len(out.Stores), len(data), time.Since(start).Round(time.Millisecond))
 	}
-	return data, nil
+	return data, full, nil
+}
+
+// SnapshotAll captures every shared store in one full JSON envelope, as
+// RestoreAll reads it. Keys that RestoreAll would drop are left out.
+func SnapshotAll() ([]byte, error) {
+	data, _, err := persistMessage(true)
+	if data == nil && err == nil {
+		data, err = json.Marshal(message{Version: allVersion, Stores: map[string]*Snapshot{}})
+	}
+	return data, err
 }
 
 // skipSnapshotKey drops kcp's own bootstrap state: the cache store rebuilds
@@ -301,9 +313,15 @@ func OnSnapshot(fn func([]byte)) func() {
 	// counter instead and persist once writes have been quiet for
 	// snapshotQuiet, with snapshotMaxAge as the worst-case staleness while
 	// controllers stream changes.
+	//
+	// fn receives a full snapshot first (and after a restore), then deltas of
+	// the keys written since (see persistMessage), so it must apply every
+	// message in order. A full snapshot every snapshotCompact lets a consumer
+	// that lost a delta converge again.
 	const (
-		snapshotQuiet  = 750 * time.Millisecond
-		snapshotMaxAge = 10 * time.Second
+		snapshotQuiet   = 750 * time.Millisecond
+		snapshotMaxAge  = 10 * time.Second
+		snapshotCompact = 10 * time.Minute
 	)
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -313,6 +331,7 @@ func OnSnapshot(fn func([]byte)) func() {
 		defer ticker.Stop()
 		last := mutationSeq.Load()
 		lastSnapshot := time.Now()
+		lastFull := time.Time{}
 		for {
 			select {
 			case <-stop:
@@ -327,8 +346,15 @@ func OnSnapshot(fn func([]byte)) func() {
 					continue
 				}
 				last = current
-				if raw, err := SnapshotAll(); err == nil {
+				full := now.Sub(lastFull) >= snapshotCompact
+				raw, wasFull, err := persistMessage(full)
+				if err != nil {
+					lastFull = time.Time{} // dirty keys were consumed; resync
+				} else if raw != nil {
 					fn(raw)
+					if wasFull {
+						lastFull = time.Now()
+					}
 				}
 				lastSnapshot = time.Now()
 			}

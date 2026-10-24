@@ -656,3 +656,123 @@ func TestReturnedObjectsAreCopies(t *testing.T) {
 		t.Fatalf("unstructured Get = %v", u.Object)
 	}
 }
+
+// applyDelta folds a delta store part into a full one, as the JavaScript
+// hosts do (scripts/browser/state_store.js applySnapshot).
+func applyDelta(full, delta *Snapshot) {
+	full.ResourceVersion = delta.ResourceVersion
+	for k, raw := range delta.Items {
+		full.Items[k] = raw
+		delete(full.Clusters, k)
+		delete(full.Shards, k)
+		if c, ok := delta.Clusters[k]; ok {
+			full.Clusters[k] = c
+		}
+		if sh, ok := delta.Shards[k]; ok {
+			full.Shards[k] = sh
+		}
+	}
+	for _, k := range delta.Deletes {
+		delete(full.Items, k)
+		delete(full.Clusters, k)
+		delete(full.Shards, k)
+	}
+}
+
+func decodeMessage(t *testing.T, raw []byte, store string) (message, *Snapshot) {
+	t.Helper()
+	var msg message
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		t.Fatalf("decoding persistence message: %v", err)
+	}
+	return msg, msg.Stores[store]
+}
+
+// TestDeltaSnapshotRoundTrip checks that the first message is full, later
+// ones carry only changed keys, skipped keys never appear, and full plus
+// deltas restores to the live state.
+func TestDeltaSnapshotRoundTrip(t *testing.T) {
+	const name = "delta-round-trip"
+	s := Shared(name)
+	ctx := genericapirequest.WithCluster(context.Background(), genericapirequest.Cluster{Name: "root:org"})
+	for _, n := range []string{"a", "b", "c"} {
+		if err := s.Create(ctx, key(n), newFetch(n), nil, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	raw, isFull, err := persistMessage(false)
+	if err != nil || !isFull {
+		t.Fatalf("first message: full=%t err=%v, want a full message", isFull, err)
+	}
+	msg, full := decodeMessage(t, raw, name)
+	if msg.Delta || full == nil || len(full.Items) != 3 || full.Clusters[key("a")] != "root:org" {
+		t.Fatalf("first message = delta %t, store %+v", msg.Delta, full)
+	}
+
+	if raw, _, err := persistMessage(false); err != nil || raw != nil {
+		t.Fatalf("message without writes = %s, %v; want none", raw, err)
+	}
+	// Leases are bootstrap state and never persisted.
+	if err := s.Create(ctx, "/registry/coordination.k8s.io/leases/root/l", newFetch("l"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _, err := persistMessage(false); err != nil || raw != nil {
+		t.Fatalf("message after a lease write = %s, %v; want none", raw, err)
+	}
+
+	var out fetchv1alpha1.Fetch
+	if err := s.GuaranteedUpdate(ctx, key("a"), &out, false, nil, func(in runtime.Object, _ kstorage.ResponseMeta) (runtime.Object, *uint64, error) {
+		f := in.(*fetchv1alpha1.Fetch).DeepCopy()
+		f.Status.Phase = fetchv1alpha1.FetchPhaseFetching
+		return f, nil, nil
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, key("b"), nil, nil, nil, nil, kstorage.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Create(ctx, key("d"), newFetch("d"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	raw, isFull, err = persistMessage(false)
+	if err != nil || isFull {
+		t.Fatalf("second message: full=%t err=%v, want a delta", isFull, err)
+	}
+	msg, delta := decodeMessage(t, raw, name)
+	if !msg.Delta || len(delta.Items) != 2 || delta.Items[key("a")] == nil || delta.Items[key("d")] == nil ||
+		len(delta.Deletes) != 1 || delta.Deletes[0] != key("b") {
+		t.Fatalf("delta = %+v", delta)
+	}
+
+	applyDelta(full, delta)
+	merged, err := json.Marshal(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := New()
+	defer restored.Close()
+	if err := restored.Restore(merged, decodeFetch); err != nil {
+		t.Fatal(err)
+	}
+	var list fetchv1alpha1.FetchList
+	if err := restored.GetList(ctx, prefix, kstorage.ListOptions{Recursive: true}, &list); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range list.Items {
+		got = append(got, f.Name+"="+string(f.Status.Phase)+"@"+f.Annotations[logicalcluster.AnnotationKey])
+	}
+	want := fmt.Sprint([]string{"a=Fetching@root:org", "c=Unresolved@root:org", "d=Unresolved@root:org"})
+	if fmt.Sprint(got) != want {
+		t.Fatalf("restored from full+delta = %v, want %v", got, want)
+	}
+
+	// A restore makes the next message full again.
+	if err := s.Restore(merged, decodeFetch); err != nil {
+		t.Fatal(err)
+	}
+	if _, isFull, err := persistMessage(false); err != nil || !isFull {
+		t.Fatalf("message after restore: full=%t err=%v, want full", isFull, err)
+	}
+}

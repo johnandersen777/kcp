@@ -56,6 +56,9 @@ type Snapshot struct {
 	Items           map[string]json.RawMessage `json:"items"`
 	Clusters        map[string]string          `json:"clusters,omitempty"`
 	Shards          map[string]string          `json:"shards,omitempty"`
+	// Deletes is set only in a delta (see persistMessage): keys removed since
+	// the previous message. Items then holds only the keys written since.
+	Deletes []string `json:"deletes,omitempty"`
 }
 
 // objectMeta is the kcp identity of an object, derived from the request
@@ -86,6 +89,16 @@ type Store struct {
 	// drop the key's entries. Lock order: mu, then derivedMu.
 	derivedMu sync.Mutex
 	derived   map[string]map[any]*derivedEntry
+
+	// Persistence bookkeeping, guarded by encMu (taken after mu). encoded
+	// caches the JSON of objects[key], filled lazily by snapshots so a key
+	// written many times between snapshots is encoded once; dirty holds the
+	// keys written since the previous persistence message; needFull asks for
+	// a full message (new store, or restored contents).
+	encMu    sync.Mutex
+	encoded  map[string]json.RawMessage
+	dirty    map[string]struct{}
+	needFull bool
 
 	onChange  func([]byte)
 	persistCh chan []byte
@@ -139,6 +152,9 @@ func New() *Store {
 		versioner:  kstorage.APIObjectVersioner{},
 		watchers:   map[*bufferWatcher]*watchRegistration{},
 		derived:    map[string]map[any]*derivedEntry{},
+		encoded:    map[string]json.RawMessage{},
+		dirty:      map[string]struct{}{},
+		needFull:   true,
 		persistCh:  make(chan []byte, 1),
 		stopCh:     make(chan struct{}),
 	}
@@ -221,6 +237,14 @@ func (s *Store) RestoreWith(data []byte, decode func(key string, raw []byte) (ru
 	s.derivedMu.Lock()
 	s.derived = map[string]map[any]*derivedEntry{}
 	s.derivedMu.Unlock()
+	s.encMu.Lock()
+	s.encoded = make(map[string]json.RawMessage, len(snap.Items))
+	for key, raw := range snap.Items {
+		s.encoded[key] = raw // restorable as-is: it was just restored from
+	}
+	s.dirty = map[string]struct{}{}
+	s.needFull = true
+	s.encMu.Unlock()
 	// Restored objects are the current state; any watch older than the
 	// snapshot gets a fresh ADDED view rather than replaying nothing.
 	s.compactedRV = maxRV
@@ -276,7 +300,7 @@ func (s *Store) create(ctx context.Context, key string, obj runtime.Object, ttl 
 	}
 	s.objects[key] = stored
 	s.objectMeta[key] = m
-	s.forgetDerivedLocked(key)
+	s.changedLocked(key)
 	s.recordEventLocked(key, watch.Added, stored)
 	s.broadcastLocked(key, watch.Added, stored)
 	noteMutation()
@@ -476,7 +500,7 @@ func (s *Store) guaranteedUpdate(
 	m = metaFromContext(ctx)
 	s.objects[key] = stored
 	s.objectMeta[key] = m
-	s.forgetDerivedLocked(key)
+	s.changedLocked(key)
 
 	eventType := watch.Added
 	if exists {
@@ -533,7 +557,7 @@ func (s *Store) delete(ctx context.Context, key string, preconditions *kstorage.
 
 	s.rv++
 	delete(s.objects, key)
-	s.forgetDerivedLocked(key)
+	s.changedLocked(key)
 	s.recordEventLocked(key, watch.Deleted, obj)
 	s.broadcastLocked(key, watch.Deleted, obj)
 	m := s.objectMeta[key]
@@ -726,13 +750,16 @@ func (s *Store) snapshotLocked() ([]byte, error) {
 		Clusters:        make(map[string]string, len(s.objectMeta)),
 		Shards:          make(map[string]string, len(s.objectMeta)),
 	}
+	s.encMu.Lock()
 	for key, obj := range s.objects {
-		raw, err := json.Marshal(obj)
+		raw, err := s.encodedLocked(key, obj)
 		if err != nil {
-			return nil, fmt.Errorf("encoding %q: %w", key, err)
+			s.encMu.Unlock()
+			return nil, err
 		}
 		snap.Items[key] = raw
 	}
+	s.encMu.Unlock()
 	for key, m := range s.objectMeta {
 		if !m.cluster.Empty() {
 			snap.Clusters[key] = m.cluster.String()
@@ -931,12 +958,84 @@ type derivedEntry struct {
 	err  error
 }
 
-// forgetDerivedLocked drops the derived views of key; the caller holds mu
-// for writing.
-func (s *Store) forgetDerivedLocked(key string) {
+// changedLocked records a write of key: it drops the key's derived views and
+// cached encoding and marks it for the next delta. The caller holds mu for
+// writing.
+func (s *Store) changedLocked(key string) {
 	s.derivedMu.Lock()
 	delete(s.derived, key)
 	s.derivedMu.Unlock()
+	s.encMu.Lock()
+	delete(s.encoded, key)
+	s.dirty[key] = struct{}{}
+	s.encMu.Unlock()
+}
+
+// encodedLocked returns the cached JSON of obj, the current object at key.
+// The caller holds mu (either way) and encMu.
+func (s *Store) encodedLocked(key string, obj runtime.Object) (json.RawMessage, error) {
+	if raw, ok := s.encoded[key]; ok {
+		return raw, nil
+	}
+	raw, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("encoding %q: %w", key, err)
+	}
+	s.encoded[key] = raw
+	return raw, nil
+}
+
+// persistPart returns this store's part of the next persistence message: all
+// kept keys when full, else the kept keys written since the previous call.
+// skip drops keys that are not persisted. changed reports whether the part
+// carries any item or delete.
+func (s *Store) persistPart(full bool, skip func(string) bool) (part *Snapshot, changed bool, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	s.encMu.Lock()
+	defer s.encMu.Unlock()
+
+	part = &Snapshot{ResourceVersion: s.rv, Items: map[string]json.RawMessage{}, Clusters: map[string]string{}, Shards: map[string]string{}}
+	add := func(key string, obj runtime.Object) error {
+		raw, err := s.encodedLocked(key, obj)
+		if err != nil {
+			return err
+		}
+		part.Items[key] = raw
+		if m := s.objectMeta[key]; !m.cluster.Empty() {
+			part.Clusters[key] = m.cluster.String()
+		}
+		if m := s.objectMeta[key]; !m.shard.Empty() {
+			part.Shards[key] = m.shard.String()
+		}
+		return nil
+	}
+	if full {
+		for key, obj := range s.objects {
+			if !skip(key) {
+				if err := add(key, obj); err != nil {
+					return nil, false, err
+				}
+			}
+		}
+	} else {
+		for key := range s.dirty {
+			if skip(key) {
+				continue
+			}
+			if obj, ok := s.objects[key]; ok {
+				if err := add(key, obj); err != nil {
+					return nil, false, err
+				}
+			} else {
+				part.Deletes = append(part.Deletes, key)
+			}
+		}
+		sort.Strings(part.Deletes)
+	}
+	s.dirty = map[string]struct{}{}
+	s.needFull = false
+	return part, full || len(part.Items) > 0 || len(part.Deletes) > 0, nil
 }
 
 // derive returns fn(src) for the stored object src at key, computed once per

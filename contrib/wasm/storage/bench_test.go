@@ -217,6 +217,31 @@ func BenchmarkSnapshotTick(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+		if _, _, err := persistMessage(false); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkSnapshotFull is a full snapshot (the first tick after boot, or a
+// compaction) over roughly 6 MB of state, after one write.
+func BenchmarkSnapshotFull(b *testing.B) {
+	crds := benchCRDs(b, 300)
+	p := crdStore(b, Shared("bench-snapshot-full"), crds)
+	if _, err := SnapshotAll(); err != nil {
+		b.Fatal(err)
+	}
+	i := 0
+	for b.Loop() {
+		i++
+		err := p.GuaranteedUpdate(benchCtx(), crdPrefix+"/"+crds[0].Name, &apiextensions.CustomResourceDefinition{}, false, nil, func(in runtime.Object, _ kstorage.ResponseMeta) (runtime.Object, *uint64, error) {
+			crd := in.(*apiextensions.CustomResourceDefinition).DeepCopy()
+			crd.Labels = map[string]string{"tick": fmt.Sprint(i)}
+			return crd, nil, nil
+		}, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
 		if _, err := SnapshotAll(); err != nil {
 			b.Fatal(err)
 		}
