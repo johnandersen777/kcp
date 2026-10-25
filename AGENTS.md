@@ -3,7 +3,7 @@
 This fork (`origin` https://github.com/johnandersen777/kcp, branch
 `kcp-wasm-memory-storage`, tag `iphone-working-v0`) runs real kcp and the
 socialweb control plane compiled to js/wasm in a browser tab. The page
-requests a VM from the socialweb market (bidders run by the linux-kcp lead),
+requests a VM from the socialweb market (bidders run by the lead),
 waits for it to be Held, and opens a shell on it: `ssh` over WebRTC from the
 page's terminal (primary), or the wootty web shell over opentunnel (fallback).
 
@@ -18,10 +18,12 @@ EventStreams (~900 no-op applies/min); the lead is fixing it.
 
 | Path | What |
 | --- | --- |
-| `~/src/kcp/wasm` | main checkout, branch `kcp-wasm-memory-storage`; the dev server serves this tree (page JS from `scripts/browser/`, wasm from `bin/wasm/`) |
-| `~/src/kcp/wasm/.claude/worktrees/integration` | worktree, branch `kcp-wasm-integration`: edit and build here, then fast-forward the main checkout |
-| `~/src/linux-kcp/socialweb-computer-kcp` | socialweb source (the lead's; read only for us; `git -c safe.directory='*'`) |
-| `scripts/browser/` | the page: `app.js`, `kcp_worker.js`, `oauth_refresh_worker.js`, `vmshell.js`, `webrtc_guest.js`, `ssh_cmd.js`, `identity_ui.js` |
+| `~/src/kcp/kcp-wasm` | main checkout on the lead's host (hat-8, Fedora, user johnandersen777), branch `kcp-wasm-memory-storage`; the dev server serves this tree (page JS from `scripts/browser/`, wasm from `bin/wasm/`) |
+| `~/src/kcp/kcp-wasm/.claude/worktrees/<name>` | worktrees (agents get one each): edit and build here, then fast-forward the main checkout |
+| `bin/wasm/` | built wasm, not in git; a fresh worktree copies it from the main checkout (`cp -a ~/src/kcp/kcp-wasm/bin/wasm/. bin/wasm/`) |
+| `~/src/kcp/socialweb-computer-kcp` | socialweb source (the lead's; read only for agents; `git -c safe.directory='*'`) |
+| `~/.tmp/claude-kcpwasm` | dev-server debug files (`debug.log`, `control.ndjson`, profiles) and the lead's helpers: `takeover.sh`, `tunnel-watchdog.sh`, `page-hold.ts`, `boot-smoke.ts` |
+| `scripts/browser/` | the page: `app.js`, `kcp_worker.js`, `oauth_refresh_worker.js`, `vmshell.js`, `webrtc_guest.js`, `ssh_cmd.js`, `identity_ui.js`, `debug_link.js` (debug log + control stream) |
 | `socialweb-wasm/` | Go glue: `cmd/kcp-wasm` (wasm main, refresher bridge, memstats), `internal/socialweb/orchestrator.go` (MarketRequester `app`, comms mode, events.Register), `overlays/compose/compose.go` (Config.Rest) |
 | `contrib/wasm/storage` | kcp's in-memory storage for wasm (per-resource update counters live here) |
 | `scripts/prepare-kcp-patched-modules.sh` | patches k8s modules for wasm (incl. the JSON fast path for apply bodies) |
@@ -33,14 +35,19 @@ EventStreams (~900 no-op applies/min); the lead is fixing it.
 ## Build and deploy
 
 ```sh
-cd ~/src/kcp/wasm/.claude/worktrees/integration
+export TMPDIR=~/.tmp                                                        # never /tmp
+cd ~/src/kcp/kcp-wasm/.claude/worktrees/<name>
 REV=<socialweb commit, e.g. main> DEPLOY=1 scripts/browser-dev/build-page.sh   # ~1 min incremental
 git add ...; git commit                                                     # commit in the worktree
-git -C ~/src/kcp/wasm merge --ff-only kcp-wasm-integration                   # page JS is live now
-git -C ~/src/kcp/wasm push origin kcp-wasm-memory-storage
+git -C ~/src/kcp/kcp-wasm merge --ff-only <worktree branch>                 # page JS is live now
+git -C ~/src/kcp/kcp-wasm push origin kcp-wasm-memory-storage
+# helper modules (kubectl, kubectl-slim, goat, yq, ssh) into bin/wasm, rarely needed:
+make build-kubectl-wasm build-goat-wasm build-yq-wasm build-sshclient-wasm  # goat/yq: GO_CLI_TOOLCHAIN=go1.27.3 (the default)
 ```
 
 Notes:
+- `build-page.sh` defaults: `SOCIALWEB_SRC=~/src/kcp/socialweb-computer-kcp`,
+  `MAIN_CHECKOUT=~/src/kcp/kcp-wasm` (DEPLOY target), `TMPDIR=~/.tmp`.
 - The build mirrors socialweb at REV into `.work/socialweb-mirror`, 3-way merges
   the compose.go overlay onto it and syncs `socialweb-wasm/manifests`
   (commit those). A new socialweb schema needs that sync or the page logs
@@ -57,23 +64,31 @@ Notes:
 
 ## Dev server, public URL, phone
 
+The lead runs the :8090 server and the tunnel; agents do not touch them and
+start their own server on a free port for tests (no `--origin`, page at
+`http://127.0.0.1:<port>/?debuglog=1`, debug files under `~/.tmp/<own dir>`).
+
 ```sh
-mkdir -p /tmp/claude-kcpwasm
-cd ~/src/kcp/wasm && deno run --allow-read --allow-net --allow-write=/tmp/claude-kcpwasm \
+D=~/.tmp/claude-kcpwasm; mkdir -p $D
+cd ~/src/kcp/kcp-wasm && deno run --allow-read --allow-net --allow-write=$D \
   scripts/kubectl_wasm_web.ts --port=8090 \
   --origin=https://kcpwasm--johnandersen777-bsky-social.fedproxy.com \
-  --debug-log=/tmp/claude-kcpwasm/debug.log --debug-control=/tmp/claude-kcpwasm/control.ndjson \
-  2>&1 | tee /tmp/claude-kcpwasm/server8090.log            # run in the background
+  --debug-log=$D/debug.log --debug-control=$D/control.ndjson \
+  2>&1 | tee $D/server8090.log                              # run in the background
 
-while true; do ssh -NnT -p 2222 -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
-  -o ServerAliveCountMax=3 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
-  -o PasswordAuthentication=no -i ~/.ssh/id_ed25519 \
-  -R kcpwasm:80:127.0.0.1:8090 johnandersen777.bsky.social@fedproxy.com; sleep 3; done \
-  2>&1 | tee -a /tmp/claude-kcpwasm/tunnel.log               # public tunnel, background
+bash $D/takeover.sh 2>&1 | tee -a $D/tunnel.log             # public tunnel, background
+bash $D/tunnel-watchdog.sh 2>&1 | tee -a $D/watchdog.log    # background
 ```
 
+- `takeover.sh` waits until the public URL fails twice (60 s apart), then
+  loops `ssh -NnT -p 2222 ... -R kcpwasm:80:127.0.0.1:8090
+  johnandersen777.bsky.social@fedproxy.com`.
+- The fedproxy legacy ssh relay drops the whole forward after one failed
+  forwarded-tcpip channel open while ssh stays connected, so
+  `tunnel-watchdog.sh` kills that ssh when the public URL fails twice (checked
+  every 60 s) and the takeover loop reconnects it.
 - Phone/desktop URL: https://kcpwasm--johnandersen777-bsky-social.fedproxy.com
-  ("no route configured for host" from fedproxy = the tunnel is down).
+  ("no route configured for host", a 404, from fedproxy = the tunnel is down).
 - Production is static files; the `/debug/*` hooks exist only on this dev
   server. Profiles turn on only when `HEAD /debug/control` answers 204.
 - iOS gets low-memory mode automatically (no snapshot, lazy kubectl, GOGC 25,
@@ -83,7 +98,7 @@ while true; do ssh -NnT -p 2222 -o ExitOnForwardFailure=yes -o ServerAliveInterv
 
 - Every page served by the dev server streams its console, worker logs, Go
   logs (`kcp: go:` lines), terminal output (`term`) and command results to
-  `/tmp/claude-kcpwasm/debug.log`, one line each:
+  `~/.tmp/claude-kcpwasm/debug.log`, one line each:
   `<time> [<session> <ua>] <level> <message>`. The session id is per tab
   (sessionStorage); the iPhone tab was `l5ti1s`.
 - Commands: `scripts/browser-dev/phone.sh <session> '<js body using d>' [timeout]`
@@ -107,7 +122,7 @@ while true; do ssh -NnT -p 2222 -o ExitOnForwardFailure=yes -o ServerAliveInterv
   server's 15 s `ping` event, and right after the log reconnects.
 - localStorage switches (set with `d`, take effect on reload):
   `kcp.heapProfile=<s>` (Go heap+goroutine profiles uploaded to
-  `/tmp/claude-kcpwasm/{heap,goroutine}-<session>-<t>.pb.gz`; adds memory, iOS
+  `~/.tmp/claude-kcpwasm/{heap,goroutine}-<session>-<t>.pb.gz`; adds memory, iOS
   may kill the tab), `kcp.gogcReady=<n>`, `socialweb.commsMode=Firehose|Both`
   (also the Compute panel's Comms select), `kcp.debugGo=0` (Go logs off).
 - Memory/churn: with debugGo on, Go logs every 60 s a `memstats:` line
@@ -118,11 +133,21 @@ while true; do ssh -NnT -p 2222 -o ExitOnForwardFailure=yes -o ServerAliveInterv
 ## Running the VM test
 
 ```sh
-cd ~/src/kcp/wasm && deno run --allow-read=/tmp/claude-kcpwasm \
-  --allow-write=/tmp/claude-kcpwasm,$PWD/demos scripts/browser-demo.ts \
-  --log=/tmp/claude-kcpwasm/debug.log --control=/tmp/claude-kcpwasm/control.ndjson \
-  --out=demos --session=l5ti1s            # or --ua=iPhone to wait for the next page load
+D=~/.tmp/claude-kcpwasm
+cd ~/src/kcp/kcp-wasm && deno run --allow-read=$D --allow-write=$D,$PWD/demos scripts/browser-demo.ts \
+  --log=$D/debug.log --control=$D/control.ndjson \
+  --out=demos --session=<id>              # or --ua=iPhone / --ua=X11 to wait for the next page load
 ```
+
+Headless (no phone): start `browser-demo.ts --ua=X11` first, then
+`deno run -A $D/page-hold.ts ~/.aliceoa_bsky_social_source <page URL>`: a
+puppeteer-core headless Chrome (`/usr/bin/google-chrome --no-sandbox`) that
+loads the page, signs in alice with the two-tap flow (first tap on
+`#identity-signin` prepares the link, the second, "Continue sign-in", opens
+the PDS popup; it fills the handle and accepts consent) and holds the tab
+until `$D/page-hold.stop` exists. Its UA tag in the debug log is `X11`.
+`$D/boot-smoke.ts [url] [secs]` loads a page and reports `kcp ready in` and
+the first memstats line.
 
 It waits for kcp and a signed-in MarketIdentity, releases leftovers, taps
 Request VM (the tab's EphemeralInfra gets a contract; its ComputeContract is
@@ -152,36 +177,22 @@ without a reason.
   invalid_grant` means sign in again.
 - A new scope in socialweb (`requester-scope.txt`) needs a fresh sign-in.
 
-## Talking to the linux-kcp lead (and other agents)
+## The lead (and other agents)
 
-NDJSON over netcat. The lead runs the bidders (local = hat-8 192.168.0.20,
-hat-9, hat-7), the relay and the socialweb repo, and decides socialweb design;
-the user directs it.
-
-```sh
-# inbox: everything sent to this Mac on :7721 lands in /tmp/agent-7721.log
-mkfifo /tmp/agent-7721.fifo 2>/dev/null; while true; do nc -l 7721 < /tmp/agent-7721.fifo | tee -a /tmp/agent-7721.log; done
-# outbox to the lead (192.168.0.20:7720): a sender loop reads a FIFO
-mkfifo /tmp/agent-7720.fifo 2>/dev/null; while true; do nc -v 192.168.0.20 7720 < /tmp/agent-7720.fifo | tee -a /tmp/agent-7720.log; sleep 2; done
-# send one message
-jq -cn --arg text "[kcp-wasm] ..." '{from:"kcp-wasm", ts:(now|todate), kind:"info", text:$text}' > /tmp/agent-7720.fifo
-# read
-tail -n 5 /tmp/agent-7721.log | jq -r '.ts + " " + .from + ": " + .text'
-```
-
-Watch the inbox with a monitor (`tail -n0 -F /tmp/agent-7721.log`). The lead
-reaches this Mac by LAN IP (it moved .69 -> .94 once; tell the lead if it
-changes). Rules agreed with the user:
+The peer Mac is gone. The lead runs everything on its Fedora host (hat-8,
+192.168.0.20, user johnandersen777): the dev server and tunnel, the bidders
+(local = hat-8, plus hat-9, hat-7), the relay and the socialweb repo, and
+decides socialweb design; the user directs it. Agents work in worktrees and
+report back to the lead. Rules agreed with the user:
 - Networking decisions (TURN, candidates, NAT, relays, which streams) are the
   user's: report observations, do not pick fixes.
-- Coordinate conflicts with the other agent directly; one owner per file area.
-- Commit and push as you go; ask the lead before relying on an unreleased commit.
+- One owner per file area; coordinate conflicts through the lead.
+- Agents commit in their worktree; the lead merges and pushes. Ask the lead
+  before relying on an unreleased commit.
 - Test peers never get a real shell; never type into a terminal you did not start.
-- `ssh hat-8` (local bidder) works for read-only checks; it prints a host-key
-  warning because the host dual-boots; that is expected.
+- Use `~/.tmp` (set `TMPDIR`), never `/tmp`.
 
 ## Monitors worth keeping
 
-- lead inbox: `tail -n0 -F /tmp/agent-7721.log`
-- phone milestones: `tail -n0 -F /tmp/claude-kcpwasm/debug.log | grep l5ti1s | grep -E "debug log on|kcp ready in|MarketIdentity|ComputeContract .* (Held|Failed)|over WebRTC|uncaught"`
+- page milestones: `tail -n0 -F ~/.tmp/claude-kcpwasm/debug.log | command grep --line-buffered <session> | command grep --line-buffered -E "debug log (on|reconnected)|kcp ready in|MarketIdentity|ComputeContract .* (Held|Failed)|over WebRTC|uncaught"` (`command grep`: the tool grep ignores `--line-buffered`)
 - per-minute allocation: memstats `totalAlloc` deltas (see above).

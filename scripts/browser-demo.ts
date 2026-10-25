@@ -21,7 +21,7 @@
  * written to --out/<time>-<session>.{log,timeline.txt,term.txt}.
  *
  *   deno run --allow-read --allow-write scripts/browser-demo.ts \
- *     --log=/tmp/claude-kcpwasm/debug.log --control=/tmp/claude-kcpwasm/control.ndjson \
+ *     --log=$HOME/.tmp/claude-kcpwasm/debug.log --control=$HOME/.tmp/claude-kcpwasm/control.ndjson \
  *     --out=demos [--ua=iPhone] [--session=<id>] [--cmd='uname -a' ...]
  */
 
@@ -31,8 +31,10 @@ for (const a of Deno.args) {
   if (m) args.set(m[1], [...(args.get(m[1]) ?? []), m[2]]);
 }
 const opt = (k: string, d = "") => args.get(k)?.[0] ?? d;
-const logPath = opt("log", "/tmp/claude-kcpwasm/debug.log");
-const controlPath = opt("control", "/tmp/claude-kcpwasm/control.ndjson");
+// Defaults read HOME only when the path is not given (needs --allow-env=HOME).
+const debugDir = () => `${Deno.env.get("HOME")}/.tmp/claude-kcpwasm`;
+const logPath = opt("log") || `${debugDir()}/debug.log`;
+const controlPath = opt("control") || `${debugDir()}/control.ndjson`;
 const outDir = opt("out", "demos");
 const uaFilter = opt("ua", "");
 const fixedSession = opt("session", "");

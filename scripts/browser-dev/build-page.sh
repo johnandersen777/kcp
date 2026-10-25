@@ -5,8 +5,10 @@
 #   REV=<socialweb commit> [DEPLOY=1] scripts/browser-dev/build-page.sh
 set -euo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
-SRC=${SOCIALWEB_SRC:-$HOME/src/linux-kcp/socialweb-computer-kcp}
-MAIN=${MAIN_CHECKOUT:-$HOME/src/kcp/wasm}
+SRC=${SOCIALWEB_SRC:-$HOME/src/kcp/socialweb-computer-kcp}
+MAIN=${MAIN_CHECKOUT:-$HOME/src/kcp/kcp-wasm}
+export TMPDIR=${TMPDIR:-$HOME/.tmp}
+mkdir -p "$TMPDIR"
 REV=$(git -c safe.directory='*' -C "$SRC" rev-parse "${REV:?set REV to a socialweb commit}")
 cd "$W"
 if [[ "$(cat .work/socialweb-mirror/.mirror-commit 2>/dev/null)" != "$REV" ]]; then
