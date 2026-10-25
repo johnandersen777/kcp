@@ -35,6 +35,7 @@ import * as vmshell from "./vmshell.js";
 import * as webrtcGuest from "./webrtc_guest.js";
 import * as sshCmd from "./ssh_cmd.js";
 import { discardSnapshot } from "./kcp_hibernate.js";
+import { ControlStream, DebugLogSender } from "./debug_link.js";
 
 const config = await (await fetch("/config")).json();
 const apiServer = String(config.apiServer);
@@ -112,35 +113,45 @@ const debugSession = (() => {
     return Math.random().toString(36).slice(2, 8);
   }
 })();
-let debugQueue = [];
+// Requests to the dev server give up after a while: a stalled tunnel holds
+// them open without an answer.
+const debugTimeout = (ms) => typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(ms) : undefined;
+// The control stream client (startDebugControl, below).
+let debugControl = null;
 // Lines go out ~100 ms after the first one queued, so a driven session
-// (debug control) sees terminal output and results promptly.
-let debugFlushTimer = null;
+// (debug control) sees terminal output and results promptly. While the dev
+// server or its tunnel is unreachable they wait (debug_link.js) and the page
+// logs one line with the outage and the dropped count once it is back.
+const debugSender = new DebugLogSender({
+  encode: (lines) => JSON.stringify({ session: debugSession, ua: navigator.userAgent, lines }),
+  post: (body) =>
+    fetch("/debug/log", { method: "POST", body, signal: debugTimeout(20_000) }).then((res) => res.status, () => 0),
+  onDisabled: () => {
+    debugLog = false;
+  },
+  onReconnect: ({ downMs, dropped }) => {
+    debugSend("info", downMs
+      ? `debug log reconnected after ${Math.round(downMs / 1000)} s; ${dropped} lines dropped`
+      : `debug log buffer full; ${dropped} lines dropped`);
+    // The control stream is likely a dead connection after an outage too.
+    debugControl?.kick();
+  },
+});
 function debugSend(level, message) {
   if (!debugLog) return;
-  debugFlushTimer ??= setTimeout(() => {
-    debugFlushTimer = null;
-    debugFlush();
-  }, 100);
   const limit = level === "result" ? 60_000 : 4000;
-  debugQueue.push({ t: new Date().toISOString(), level, message: String(message).slice(0, limit) });
+  debugSender.push({ t: new Date().toISOString(), level, message: String(message).slice(0, limit) });
 }
 function debugFlush() {
-  if (!debugLog || debugQueue.length === 0) return;
-  const body = JSON.stringify({ session: debugSession, ua: navigator.userAgent, lines: debugQueue });
-  debugQueue = [];
-  fetch("/debug/log", { method: "POST", body, keepalive: body.length < 60000 })
-    .then((res) => {
-      // Only a host without the endpoint (a static host: 404/405) turns the
-      // log off; a dev server restarting answers 5xx for a moment.
-      if (res.status === 404 || res.status === 405) debugLog = false;
-    })
-    .catch(() => {});
+  if (debugLog) debugSender.flush();
 }
 if (debugLog) {
   addEventListener("error", (e) => debugSend("error", `uncaught: ${e.message} ${e.filename}:${e.lineno}`));
   addEventListener("unhandledrejection", (e) => debugSend("error", `unhandled rejection: ${e.reason}`));
-  addEventListener("pagehide", debugFlush);
+  addEventListener("pagehide", () => {
+    const body = debugSender.takeAll();
+    if (body) fetch("/debug/log", { method: "POST", body, keepalive: body.length < 60000 }).catch(() => {});
+  });
   debugSend("info", `debug log on; lowMemory=${lowMemory} isIOS=${isIOS} ` +
     `hardwareConcurrency=${navigator.hardwareConcurrency} screen=${screen.width}x${screen.height}`);
 }
@@ -3174,59 +3185,55 @@ const debugHandle = {
   },
 };
 
-// The browser closes an EventSource for good on a non-200 answer (the tunnel
-// answers 502 while the dev server restarts), so a closed source is reopened
-// with backoff; a server without --debug-control (404) is left alone.
-let debugControlRetryMs = 2_000;
+// The stream is reopened with backoff after errors, a stalled open and a
+// silent stream (debug_link.js ControlStream); a server without
+// --debug-control (404 before the first open) is left alone.
 function startDebugControl() {
-  if (!debugLog || typeof EventSource !== "function") return;
-  const source = new EventSource(`/debug/control?session=${encodeURIComponent(debugSession)}`);
-  source.onopen = () => {
-    debugControlRetryMs = 2_000;
-    debugSend("info", `debug control connected for session ${debugSession}`);
-  };
-  source.onerror = async () => {
-    if (source.readyState !== EventSource.CLOSED) return;
-    const status = await fetch(`/debug/control?session=probe`, { method: "HEAD" }).then((r) => r.status, () => 0);
-    if (status === 404 || status === 405) return;
-    setTimeout(startDebugControl, debugControlRetryMs);
-    debugControlRetryMs = Math.min(debugControlRetryMs * 2, 30_000);
-  };
-  source.onmessage = async (event) => {
-    let cmd;
+  if (!debugLog || typeof EventSource !== "function" || debugControl) return;
+  debugControl = new ControlStream({
+    url: `/debug/control?session=${encodeURIComponent(debugSession)}`,
+    open: (url) => new EventSource(url),
+    probe: () =>
+      fetch(`/debug/control?session=probe`, { method: "HEAD", signal: debugTimeout(10_000) }).then((r) => r.status, () => 0),
+    log: (what) => debugSend("info", `debug control ${what} for session ${debugSession}`),
+    onCommand: runDebugCommand,
+  });
+  debugControl.start();
+}
+async function runDebugCommand(data) {
+  let cmd;
+  try {
+    cmd = JSON.parse(data);
+  } catch {
+    return;
+  }
+  const id = cmd.id ?? "?";
+  let done = [];
+  try {
+    done = JSON.parse(sessionStorage.getItem("kcp.debugDone") ?? "[]");
+  } catch {
+    done = [];
+  }
+  if (done.includes(id)) return;
+  try {
+    sessionStorage.setItem("kcp.debugDone", JSON.stringify([...done.slice(-200), id]));
+  } catch {
+    // no sessionStorage: a replayed command may run twice
+  }
+  try {
+    const fn = new Function("d", `return (async () => { ${cmd.js} })();`);
+    const value = await fn(debugHandle);
+    let text;
     try {
-      cmd = JSON.parse(event.data);
+      text = typeof value === "string" ? value : JSON.stringify(value);
     } catch {
-      return;
+      text = String(value);
     }
-    const id = cmd.id ?? "?";
-    let done = [];
-    try {
-      done = JSON.parse(sessionStorage.getItem("kcp.debugDone") ?? "[]");
-    } catch {
-      done = [];
-    }
-    if (done.includes(id)) return;
-    try {
-      sessionStorage.setItem("kcp.debugDone", JSON.stringify([...done.slice(-200), id]));
-    } catch {
-      // no sessionStorage: a replayed command may run twice
-    }
-    try {
-      const fn = new Function("d", `return (async () => { ${cmd.js} })();`);
-      const value = await fn(debugHandle);
-      let text;
-      try {
-        text = typeof value === "string" ? value : JSON.stringify(value);
-      } catch {
-        text = String(value);
-      }
-      debugSend("result", `${id} ok ${text ?? "undefined"}`);
-    } catch (err) {
-      debugSend("result", `${id} error ${err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : err}`);
-    }
-    debugFlush();
-  };
+    debugSend("result", `${id} ok ${text ?? "undefined"}`);
+  } catch (err) {
+    debugSend("result", `${id} error ${err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : err}`);
+  }
+  debugFlush();
 }
 
 // Touch devices have no Ctrl key: expose the control actions the terminal

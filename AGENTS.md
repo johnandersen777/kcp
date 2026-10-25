@@ -97,8 +97,14 @@ while true; do ssh -NnT -p 2222 -o ExitOnForwardFailure=yes -o ServerAliveInterv
 - Reload or reset the phone yourself; do not ask the user. After sending
   `d.reload()`/`d.reset()` remove that line from `control.ndjson`
   (`grep -v 'd.reload()' ... > tmp && cat tmp > control.ndjson`) so a replay
-  cannot loop (the server replays the last 2 minutes on reconnect). The page
-  reopens its control stream with backoff after a dev-server restart.
+  cannot loop (the server replays the last 2 minutes on reconnect).
+- Outages (`scripts/browser/debug_link.js`): while the dev server or the
+  tunnel is unreachable (fedproxy's "no route" is a 404; only a 404/405 before
+  the first delivery means a static host) the page keeps up to 2000 log lines
+  (oldest dropped), retries with backoff up to 30 s and logs
+  `debug log reconnected after <s> s; <n> lines dropped`. The control stream
+  reopens with backoff after errors, an open stalled 30 s, or 45 s without the
+  server's 15 s `ping` event, and right after the log reconnects.
 - localStorage switches (set with `d`, take effect on reload):
   `kcp.heapProfile=<s>` (Go heap+goroutine profiles uploaded to
   `/tmp/claude-kcpwasm/{heap,goroutine}-<session>-<t>.pb.gz`; adds memory, iOS

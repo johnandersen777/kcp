@@ -114,10 +114,12 @@ function controlStream(request: Request, session: string): Response {
   const enc = new TextEncoder();
   const body = new ReadableStream({
     async start(controller) {
-      controller.enqueue(enc.encode(`: control for ${session}\n\n`));
+      // A "ping" event (not a comment: the page sees events only) every 15 s
+      // lets the page tell a stalled tunnel from a quiet stream.
+      controller.enqueue(enc.encode(`: control for ${session}\n\nevent: ping\ndata:\n\n`));
       const ping = setInterval(() => {
         try {
-          controller.enqueue(enc.encode(": ping\n\n"));
+          controller.enqueue(enc.encode("event: ping\ndata:\n\n"));
         } catch {
           abort.abort();
         }
@@ -188,6 +190,7 @@ const assets = new Map<string, string>([
   ["/ssh_cmd.js", "ssh_cmd.js"],
   ["/wasm_snapshot.js", "wasm_snapshot.js"],
   ["/kcp_hibernate.js", "kcp_hibernate.js"],
+  ["/debug_link.js", "debug_link.js"],
 ]);
 
 const wasmModules = new Map<string, string>([

@@ -71,6 +71,7 @@ assets=(
   ssh_cmd.js
   wasm_snapshot.js
   kcp_hibernate.js
+  debug_link.js
 )
 wasm_modules=(
   kcp.wasm
