@@ -167,9 +167,24 @@ async function page(js: string, timeoutMs = 30_000): Promise<string> {
   return r.replace(/^ok /, "");
 }
 
+// The terminal's last non-empty screen line, polled until it matches re. A
+// prompt has no newline, so it never reaches the debug log as a term line.
+async function prompt(re: RegExp, timeoutMs: number, what: string): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const last = await page(`return d.screen().split("\\n").filter((l) => l.trim()).pop() ?? "";`);
+    if (re.test(last)) return last;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error(`timed out after ${timeoutMs / 1000}s waiting for ${what}`);
+}
+
 const msg = (re: RegExp) => (l: Line) => re.test(l.message);
 const term = (re: RegExp) => (l: Line) => l.level === "term" && re.test(l.message);
 const API = "/apis/socialweb.computer/v1alpha1/computecontracts";
+
+let vm = "";
+let released = false;
 
 async function main() {
   await Deno.mkdir(outDir, { recursive: true });
@@ -208,39 +223,36 @@ async function main() {
      b.click(); return "clicked";`,
   );
   if (clicked !== "clicked") throw new Error(`Request VM: ${clicked}`);
-  const vm = (await req).message.match(/ComputeContract (vmshell-[a-z0-9]+)/)![1];
+  vm = (await req).message.match(/ComputeContract (vmshell-[a-z0-9]+)/)![1];
   note(`Request VM: ${vm}`);
   await next(term(new RegExp(vm)), 60_000, "kubectl in the terminal");
   note("kubectl get computecontracts shows it in flight");
   await have(msg(new RegExp(`ComputeContract ${vm} Held`)), 600_000, `${vm} Held`);
   note(`${vm} Held`);
 
-  const shell = next(term(/root@|did not open|Could not|refused|denied/), 90_000, "an ssh prompt");
   await page(`d.run("ssh ${vm}"); return "sent";`);
   note(`ssh ${vm}`);
-  const got = await shell;
-  if (!/root@/.test(got.message)) {
-    note(`ssh failed: ${got.message}`);
+  const got = await prompt(/root@\S+[#$]\s*$|did not open|Could not|refused|denied/, 90_000, "an ssh prompt");
+  if (!/root@/.test(got)) {
+    note(`ssh failed: ${got}`);
   } else {
     note("logged in on the guest");
     for (const cmd of commands) {
-      const echoed = next(term(new RegExp(cmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))), 20_000, `echo of ${cmd}`);
       const out = expect[cmd] ? next(term(expect[cmd]), 20_000, `output of ${cmd}`) : null;
       await page(`d.type(${JSON.stringify(cmd + "\r")}); return "typed";`);
-      await echoed;
       if (out) await out;
-      else await new Promise((r) => setTimeout(r, 400));
+      await prompt(/[#$]\s*$/, 20_000, `the prompt after ${cmd}`);
       note(`$ ${cmd}`);
     }
-    const local = next(term(/logout|Connection to|closed|\/home\/user \$/), 20_000, "the local prompt");
     await page(`d.type("exit\\r"); return "typed";`);
-    await local.catch(() => {});
+    await prompt(/\/home\/user \$\s*$/, 20_000, "the local prompt").catch(() => {});
     note("exit");
   }
 
   await page(
     `await d.rest("PATCH", "${API}/${vm}", {spec: {release: true}}, "application/merge-patch+json"); return "asked";`,
   );
+  released = true;
   note(`release ${vm}`);
   for (let i = 0; i < 30; i++) {
     const row = next(term(new RegExp(`^${vm}\\s`)), 30_000, "the kubectl row");
@@ -259,6 +271,12 @@ try {
 } catch (err) {
   failed = true;
   note(`FAILED: ${err instanceof Error ? err.message : err}`);
+}
+// Never leave a VM held behind a failed run.
+if (vm && !released) {
+  await page(
+    `await d.rest("PATCH", "${API}/${vm}", {spec: {release: true}}, "application/merge-patch+json"); return "asked";`,
+  ).then(() => note(`released ${vm} after the failure`), (err) => note(`releasing ${vm} failed: ${err.message}`));
 }
 const base = `${outDir}/${stamp}-${session || "nosession"}`;
 await Deno.writeTextFile(`${base}.timeline.txt`, timeline.join("\n") + "\n");
