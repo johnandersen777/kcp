@@ -89,8 +89,9 @@ const lowMemory = localStorage.getItem("kcp.lowmem") === "1" ||
 // --- remote debug log ------------------------------------------------------
 // The activity log, uncaught errors and the kcp heap size go to the page's
 // server (/debug/log), so a crash on a phone can be read on the server side.
-// On by default; ?debuglog=0 (sticky) turns it off, and the page stops on the
-// first refused POST (a static host, or a server without --debug-log).
+// On by default; ?debuglog=0 (sticky) turns it off, and the page stops when
+// the host has no such endpoint (404/405: a static host, or a server without
+// --debug-log).
 const debugLogParam = new URLSearchParams(location.search).get("debuglog");
 if (debugLogParam !== null) localStorage.setItem("kcp.debuglog", debugLogParam === "0" ? "0" : "1");
 let debugLog = localStorage.getItem("kcp.debuglog") !== "0";
@@ -123,7 +124,9 @@ function debugFlush() {
   debugQueue = [];
   fetch("/debug/log", { method: "POST", body, keepalive: body.length < 60000 })
     .then((res) => {
-      if (!res.ok) debugLog = false;
+      // Only a host without the endpoint (a static host: 404/405) turns the
+      // log off; a dev server restarting answers 5xx for a moment.
+      if (res.status === 404 || res.status === 405) debugLog = false;
     })
     .catch(() => {});
 }
