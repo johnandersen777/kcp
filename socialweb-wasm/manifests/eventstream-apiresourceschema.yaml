@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-5.eventstreams.events.socialweb.computer
+  name: v1alpha1-6.eventstreams.events.socialweb.computer
 spec:
   group: events.socialweb.computer
   names:
@@ -105,6 +105,25 @@ spec:
               lastEventAt:
                 type: string
                 format: date-time
+              serverFilter:
+                type: object
+                properties:
+                  collections:
+                    type: array
+                    items:
+                      type: string
+                  dids:
+                    type: array
+                    items:
+                      type: string
+                  supported:
+                    type: string
+                    enum:
+                      - "true"
+                      - "false"
+                      - unknown
+                required:
+                  - supported
               conditions:
                 type: array
                 items:
