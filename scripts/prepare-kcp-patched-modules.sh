@@ -130,6 +130,52 @@ if [[ "${mode}" == "js" ]]; then
 fi
 
 if [[ "${mode}" == "js" ]]; then
+  # Server-side apply bodies are JSON from every client here, but the apply
+  # patcher decodes them with the YAML parser (sigs.k8s.io/yaml goes through
+  # go-yaml first): on the iPhone that was ~600 MB of the ~3.7 GB allocated
+  # around one ComputeContract. JSON bodies decode with sigs.k8s.io/json
+  # (ints preserved, as the YAML route does); anything else stays on YAML.
+  replace_in "${work}/apiserver/pkg/endpoints/handlers/patch.go" \
+    'p.mechanism = newApplyPatcher(p, scope.FieldManager, yaml.Unmarshal, yaml.UnmarshalStrict)' \
+    'p.mechanism = newApplyPatcher(p, scope.FieldManager, applyUnmarshal, applyUnmarshalStrict)'
+  if ! grep -q 'func applyUnmarshal(' "${work}/apiserver/pkg/endpoints/handlers/patch.go"; then
+    cat >> "${work}/apiserver/pkg/endpoints/handlers/patch.go" <<'GO'
+
+// applyJSON reports whether an apply body is a JSON object.
+func applyJSON(data []byte) bool {
+	for _, c := range data {
+		switch c {
+		case ' ', '\t', '\r', '\n':
+			continue
+		}
+		return c == '{'
+	}
+	return false
+}
+
+func applyUnmarshal(data []byte, v interface{}) error {
+	if applyJSON(data) {
+		return kjson.UnmarshalCaseSensitivePreserveInts(data, v)
+	}
+	return yaml.Unmarshal(data, v)
+}
+
+func applyUnmarshalStrict(data []byte, v interface{}) error {
+	if !applyJSON(data) {
+		return yaml.UnmarshalStrict(data, v)
+	}
+	strict, err := kjson.UnmarshalStrict(data, v)
+	if err != nil {
+		return err
+	}
+	if len(strict) > 0 {
+		return fmt.Errorf("%v", strict)
+	}
+	return nil
+}
+GO
+  fi
+
   # Systemd journal logging is replaced by stderr logging.
   copy_module github.com/coreos/go-systemd/v22 "${work}/go-systemd"
   cp "${overlay}/go-systemd/journal_unix.go" \
