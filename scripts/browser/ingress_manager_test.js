@@ -265,3 +265,20 @@ Deno.test("fake relay: register, keepalive 204, request frames, reconnect with f
     await server.shutdown();
   }
 });
+
+Deno.test("an Exposure not served yet is a quiet wait with a fixed 2s retry", async () => {
+  const h = harness();
+  h.manager.apply([entry("a")]);
+  for (let i = 0; i < 4; i++) {
+    h.calls.at(-1).reject(new Error('exposure: no ingress Exposure serves "a.example"'));
+    await flush();
+    assertEquals(h.state("a"), "waiting");
+    await h.advance(2_000);
+    assertEquals(h.calls.length, i + 2);
+  }
+  h.calls.at(-1).resolve();
+  await flush();
+  h.calls.at(-1).sub.connecting = false;
+  h.calls.at(-1).hooks.onRegistered({});
+  assertEquals(h.state("a"), "registered");
+});

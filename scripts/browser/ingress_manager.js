@@ -19,6 +19,7 @@
 export const DROP_AFTER_MS = 15_000;
 const RETRY_BASE_MS = 1_000;
 const RETRY_MAX_MS = 30_000;
+const WAIT_RETRY_MS = 2_000;
 const RECHECK_MS = 1_000;
 
 const errorMessage = (err) => (err instanceof Error ? err.message : String(err));
@@ -114,6 +115,14 @@ export function createIngressManager({
     }, (err) => {
       rec.pending = false;
       rec.lastError = errorMessage(err);
+      // At boot Go lists the Exposure before its did:key route is served; that
+      // is a wait of seconds, not a failure: retry briskly, log it once.
+      if (/no ingress Exposure serves/.test(rec.lastError)) {
+        if (rec.state !== "waiting") log("info", `ingress ${rec.entry.name}: waiting for its Exposure to be served`);
+        rec.retryTimer = setTimer(() => open(rec), WAIT_RETRY_MS);
+        setState(rec, "waiting");
+        return;
+      }
       log("error", `ingress ${rec.entry.name}: ${rec.lastError}`);
       const delay = Math.min(RETRY_BASE_MS * 2 ** rec.attempt, RETRY_MAX_MS);
       rec.attempt += 1;
