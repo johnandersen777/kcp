@@ -207,7 +207,7 @@ async function main() {
   const left = JSON.parse(
     await page(
       `const act = (d.state()?.contracts ?? []).filter((c) => !c.release && !["Released", "Failed"].includes(c.phase));
-     for (const c of act) await d.rest("PATCH", "${API}/" + c.name, {spec: {release: true}}, "application/merge-patch+json");
+     for (const c of act) await d.release(c.name);
      return act.map((c) => c.name);`,
     ),
   );
@@ -216,14 +216,14 @@ async function main() {
     await have(msg(new RegExp(`ComputeContract ${name} Released`)), 300_000, `${name} Released`);
   }
 
-  const req = next(msg(/requesting ComputeContract vmshell-/), 30_000, "the request");
+  const req = next(msg(/requesting ComputeContract (einfra-\S+-)?vmshell-/), 60_000, "the request");
   const clicked = await page(
     `const b = document.querySelector("#compute-request");
      if (b.disabled) return "disabled: " + d.text("#compute-status");
      b.click(); return "clicked";`,
   );
   if (clicked !== "clicked") throw new Error(`Request VM: ${clicked}`);
-  vm = (await req).message.match(/ComputeContract (vmshell-[a-z0-9]+)/)![1];
+  vm = (await req).message.match(/ComputeContract ((?:einfra-\S+-)?vmshell-[a-z0-9]+)/)![1];
   note(`Request VM: ${vm}`);
   // Cosmetic: the page's own kubectl run can be slow to print; never fail on it.
   await next(term(new RegExp(vm)), 60_000, "kubectl in the terminal").then(
@@ -253,7 +253,7 @@ async function main() {
   }
 
   await page(
-    `await d.rest("PATCH", "${API}/${vm}", {spec: {release: true}}, "application/merge-patch+json"); return "asked";`,
+    `await d.release("${vm}"); return "asked";`,
   );
   released = true;
   note(`release ${vm}`);
@@ -278,7 +278,7 @@ try {
 // Never leave a VM held behind a failed run.
 if (vm && !released) {
   await page(
-    `await d.rest("PATCH", "${API}/${vm}", {spec: {release: true}}, "application/merge-patch+json"); return "asked";`,
+    `await d.release("${vm}"); return "asked";`,
   ).then(() => note(`released ${vm} after the failure`), (err) => note(`releasing ${vm} failed: ${err.message}`));
 }
 const base = `${outDir}/${stamp}-${session || "nosession"}`;

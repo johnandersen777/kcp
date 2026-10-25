@@ -330,8 +330,9 @@ Deno.serve({ hostname, port }, async (request) => {
     const bytes = new Uint8Array(await request.arrayBuffer());
     if (bytes.length > 32 << 20) return new Response("too large", { status: 413, headers });
     const session = (url.searchParams.get("session") ?? "page").replace(/[^a-z0-9]/gi, "").slice(0, 12);
+    const kind = url.searchParams.get("kind") === "goroutine" ? "goroutine" : "heap";
     const dir = debugLogPath.replace(/\/[^/]*$/, "");
-    await Deno.writeFile(`${dir}/heap-${session}-${new Date().toISOString().replace(/[:.]/g, "-")}.pb.gz`, bytes);
+    await Deno.writeFile(`${dir}/${kind}-${session}-${new Date().toISOString().replace(/[:.]/g, "-")}.pb.gz`, bytes);
     return new Response(null, { status: 204, headers });
   }
 

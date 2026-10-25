@@ -554,9 +554,12 @@ function attachKcp(worker) {
       return;
     }
     if (data.type === "heap-profile") {
-      const bytes = Uint8Array.from(atob(data.heapBase64 ?? ""), (c) => c.charCodeAt(0));
-      fetch(`/debug/heap?session=${encodeURIComponent(debugSession)}`, { method: "POST", body: bytes })
-        .then(() => addLog("debug", `heap profile uploaded (${bytes.length} bytes)`), () => {});
+      for (const [kind, b64] of [["heap", data.heapBase64], ["goroutine", data.goroutineBase64]]) {
+        if (!b64) continue;
+        const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+        fetch(`/debug/heap?session=${encodeURIComponent(debugSession)}&kind=${kind}`, { method: "POST", body: bytes })
+          .then(() => addLog("debug", `${kind} profile uploaded (${bytes.length} bytes)`), () => {});
+      }
       return;
     }
     if (data.type === "response") {
@@ -684,6 +687,12 @@ function schedulePersist(snapshot, key = stateKey, seq = 0) {
 // recorded once kcp (and the socialweb manifest apply) is ready, so a load
 // interrupted mid-apply re-applies on the next one.
 let kcpBuildEtag = null;
+let devServerProbe = null;
+function devServer() {
+  devServerProbe ??= fetch("/debug/control?session=probe", { method: "HEAD" }).then((r) => r.status === 204, () => false);
+  return devServerProbe;
+}
+
 async function kcpBuildChanged() {
   try {
     kcpBuildEtag = (await fetch("/kcp.wasm", { method: "HEAD" })).headers.get("etag") ?? "";
@@ -715,7 +724,9 @@ async function spawnKcp(useSnapshot = true) {
     debugGo: localStorage.getItem("kcp.debugGo") !== "0",
     lowMemory,
     gogcReady: Number(localStorage.getItem("kcp.gogcReady")) || undefined,
-    heapProfile: Number(localStorage.getItem("kcp.heapProfile")) || undefined,
+    // Profiles only when served by the dev server (it answers HEAD
+    // /debug/control); a static deploy never turns them on.
+    heapProfile: (await devServer()) ? Number(localStorage.getItem("kcp.heapProfile")) || undefined : undefined,
     debugMemory: debugLog,
     socialweb: {
       origin: location.origin,
@@ -2343,12 +2354,48 @@ function socialwebCall(fn, payload, timeoutMs = 30_000) {
   });
 }
 
+// This tab's EphemeralInfra (name kept in sessionStorage): created on the
+// first Request VM, replaced once its deadline ended it.
+async function sessionInfra() {
+  let name = null;
+  try {
+    name = sessionStorage.getItem("socialweb.sessionInfra");
+  } catch {
+    // no sessionStorage: one infra per load
+  }
+  if (name) {
+    const infra = await kcpREST("GET", `${SOCIALWEB_API}/ephemeralinfras/${name}`).catch(() => null);
+    if (infra && !infra.status?.endedAt && !infra.metadata?.deletionTimestamp) return infra;
+  }
+  name = `s${vmshell.contractName().slice("vmshell-".length)}`;
+  const infra = await kcpREST("POST", `${SOCIALWEB_API}/ephemeralinfras`, vmshell.sessionInfraManifest(name));
+  try {
+    sessionStorage.setItem("socialweb.sessionInfra", name);
+  } catch {
+    // see above
+  }
+  addLog("info", `EphemeralInfra ${name} holds this tab's VMs`);
+  return infra;
+}
+
+// Sets the state of contract short in the session infra (Requested adds it).
+async function setInfraContract(infraName, entry, secret) {
+  const infra = await kcpREST("GET", `${SOCIALWEB_API}/ephemeralinfras/${infraName}`);
+  const contracts = (infra.spec?.contracts ?? []).filter((c) => c.name !== entry.name);
+  const secrets = (infra.spec?.secrets ?? []).filter((x) => !secret || x.contract !== secret.contract);
+  const patch = { spec: { contracts: [...contracts, entry] } };
+  if (secret) patch.spec.secrets = [...secrets, secret];
+  await kcpREST("PATCH", `${SOCIALWEB_API}/ephemeralinfras/${infraName}`, patch, "application/merge-patch+json");
+}
+
 async function requestVM() {
   try {
     computeBusy = true;
     computeRequestEl.disabled = true;
     const sshKeys = [];
-    const name = vmshell.contractName();
+    const infraName = (await sessionInfra()).metadata.name;
+    const short = vmshell.contractName();
+    const name = vmshell.infraContractName(infraName, short);
     const wootty = await woottyServed();
     const shells = wootty ? "ssh over WebRTC and wootty" : "ssh over WebRTC (no wootty in this socialweb)";
     addLog("info", `requesting ComputeContract ${name} from discovered bidders with ${shells}`);
@@ -2368,11 +2415,8 @@ async function requestVM() {
         bundle: vmshell.secretsBundle(token),
       });
     }
-    const identity = await kcpREST("GET", `${SOCIALWEB_API}/marketidentities/requester`).catch(() => null);
-    const manifest = vmshell.contractManifest({
-      name, ownerDid: identity?.status?.did ?? "", wootty, sshKeys,
-    });
-    await kcpREST("POST", `${SOCIALWEB_API}/computecontracts`, manifest);
+    const { contract, secret } = vmshell.infraContract({ infra: infraName, short, wootty, sshKeys });
+    await setInfraContract(infraName, contract, secret);
     setAppStatus(computeStatusEl, `${name} requested; waiting for bids`, "ok");
     addLog("ok", `ComputeContract ${name} requested from discovered bidders with ${shells}`);
     // Show what is in flight; the user can watch it go Held in the terminal.
@@ -2389,8 +2433,19 @@ async function releaseContract(name) {
   computeReleaseAsked.add(name);
   computeLastRender = "";
   try {
-    await kcpREST("PATCH", `${SOCIALWEB_API}/computecontracts/${name}`, { spec: { release: true } },
-      "application/merge-patch+json");
+    // A session-infra contract is released through its infra (the infra
+    // controller owns the ComputeContract spec); older ones directly.
+    const cc = await kcpREST("GET", `${SOCIALWEB_API}/computecontracts/${name}`).catch(() => null);
+    const owner = (cc?.metadata?.ownerReferences ?? []).find((o) => o.kind === "EphemeralInfra");
+    const short = cc?.metadata?.labels?.["infra.socialweb.computer/contract"];
+    const infra = owner && await kcpREST("GET", `${SOCIALWEB_API}/ephemeralinfras/${owner.name}`).catch(() => null);
+    const entry = (infra?.spec?.contracts ?? []).find((c) => c.name === short || name.endsWith(`-${c.name}`));
+    if (infra && entry) {
+      await setInfraContract(owner.name, { ...entry, state: "Released" }, null);
+    } else {
+      await kcpREST("PATCH", `${SOCIALWEB_API}/computecontracts/${name}`, { spec: { release: true } },
+        "application/merge-patch+json");
+    }
   } catch (err) {
     computeReleaseAsked.delete(name);
     setAppStatus(computeStatusEl, String(err.message ?? err), "err");
@@ -3046,6 +3101,7 @@ const debugHandle = {
   run: (line) => handleTermData(`${line}\r`),
   state: () => lastFeedState,
   rest: (method, path, body, contentType) => kcpREST(method, path, body, contentType),
+  release: (name) => releaseContract(name),
   call: (fn, payload, timeoutMs) => socialwebCall(fn, payload, timeoutMs),
   click: (selector) => {
     const el = document.querySelector(selector);

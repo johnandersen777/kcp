@@ -58,6 +58,42 @@ export function secretsBundle(token) {
 }
 
 /**
+ * The page session's EphemeralInfra: every VM the tab requests is a contract
+ * in it, so the requester only tracks this session's contracts and deleting
+ * (or the deadline of) the infra releases and collects all of them. Deadline,
+ * not Complete: a session outlives its first released VM.
+ */
+export function sessionInfraManifest(name, ttlSeconds = 6 * 3600) {
+  return {
+    apiVersion: "socialweb.computer/v1alpha1",
+    kind: "EphemeralInfra",
+    metadata: { name },
+    spec: { description: "socialweb.computer page session", ttlSeconds, endWhen: "Deadline", contracts: [] },
+  };
+}
+
+/** The ComputeContract the infra controller creates for contract short in infra. */
+export function infraContractName(infra, short) {
+  return `einfra-${infra}-${short}`;
+}
+
+/**
+ * One EphemeralInfra contract entry (and its secrets entry, with wootty) for
+ * the VM short; cc is the ComputeContract name it becomes. The template is
+ * the one contractManifest builds.
+ */
+export function infraContract({ infra, short, wootty = false, sshKeys = [] }) {
+  const cc = infraContractName(infra, short);
+  const { spec } = contractManifest({ name: cc, wootty, sshKeys });
+  const { secretsRef, ...template } = spec;
+  return {
+    cc,
+    contract: { name: short, state: "Requested", ...template },
+    secret: secretsRef ? { contract: short, secretsRef } : null,
+  };
+}
+
+/**
  * A ComputeContract for the page: the webrtc ssh tunnel (sshKeys must hold
  * the page's key) and, with wootty, the opentunnel wootty tunnel and the
  * secretsRef of its token bundle.

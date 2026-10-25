@@ -4,6 +4,8 @@
 import {
   contractManifest,
   contractName,
+  infraContract,
+  sessionInfraManifest,
   isActive,
   isReleasing,
   orderContracts,
@@ -94,4 +96,16 @@ Deno.test("orderContracts puts Released last and keeps the rest in feed order", 
     { name: "e", phase: "Pending" },
   ]).map((c) => c.name);
   assert(names.join() === "b,d,e,a,c", names.join());
+});
+
+Deno.test("infraContract: a Requested entry, its secrets entry and the child name", () => {
+  const out = infraContract({ infra: "s1", short: "vmshell-abc", wootty: true, sshKeys: ["ssh-ed25519 K"] });
+  assert(out.cc === "einfra-s1-vmshell-abc", "cc name");
+  assert(out.contract.name === "vmshell-abc" && out.contract.state === "Requested", "entry");
+  assert(out.contract.vmName === "einfra-s1-vmshell-abc" && out.contract.sshAuthorizedKeys[0] === "ssh-ed25519 K", "template");
+  assert(out.contract.tunnels.length === 2 && out.contract.secretsRef === undefined, "tunnels, no secretsRef in the template");
+  assert(out.secret.contract === "vmshell-abc" && out.secret.secretsRef.path.includes("einfra-s1-vmshell-abc"), "secrets");
+  assert(infraContract({ infra: "s1", short: "x" }).secret === null, "no wootty, no secrets entry");
+  const infra = sessionInfraManifest("s1");
+  assert(infra.kind === "EphemeralInfra" && infra.spec.endWhen === "Deadline" && infra.spec.contracts.length === 0, "infra");
 });
