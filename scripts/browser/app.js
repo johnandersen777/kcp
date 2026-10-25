@@ -2352,6 +2352,8 @@ async function requestVM() {
     await kcpREST("POST", `${SOCIALWEB_API}/computecontracts`, manifest);
     setAppStatus(computeStatusEl, `${name} requested; waiting for bids`, "ok");
     addLog("ok", `ComputeContract ${name} requested from discovered bidders with ${shells}`);
+    // Show what is in flight; the user can watch it go Held in the terminal.
+    runInTerminal("kubectl get computecontracts");
   } catch (err) {
     addLog("error", `Request VM failed: ${err instanceof Error ? err.message : err}`);
     setAppStatus(computeStatusEl, String(err.message ?? err), "err");
