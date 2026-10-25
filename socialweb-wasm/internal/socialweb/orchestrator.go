@@ -29,11 +29,13 @@ import (
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/app/marketrequester"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/atproto/oauth"
 	atpds "github.com/johnandersen777/socialweb-computer-kcp/internal/atproto/pds"
+	"github.com/johnandersen777/socialweb-computer-kcp/internal/atproto/pdsclient"
 	reporemote "github.com/johnandersen777/socialweb-computer-kcp/internal/atprotorepo/remote"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/bus"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/component"
 	componentlink "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/componentlink"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/contractevent"
+	eventsctl "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/events"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/infra"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketidentity"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketintents"
@@ -48,7 +50,6 @@ import (
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/oauthcallback"
 	pecontroller "github.com/johnandersen777/socialweb-computer-kcp/internal/policyengine/controller"
 
-	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserinfra/eventstream"
 	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserinfra/exposure"
 	bvault "github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserinfra/vault"
 	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserinfra/vaulthost"
@@ -106,8 +107,6 @@ type Orchestrator struct {
 	Vault *vaulthost.Controller
 
 	Exposure *exposure.Controller
-
-	Events *eventstream.Controller
 
 	Identity *marketidentity.Controller
 
@@ -233,7 +232,23 @@ func Start(parent context.Context, cfg Config) (*Orchestrator, error) {
 	if err != nil {
 		return nil, err
 	}
-	eventsCtl, err := eventstream.Register(mgr, eventstream.Options{Scope: scope})
+	// socialweb's own event stream controllers: relay, Jetstream and bidder
+	// PDS streams dial the browser WebSocket (wsconn's js build) and deliver
+	// into the market handler, so a Firehose requester reads bids and guest
+	// events without any ingress.
+	ctx, cancel := context.WithCancel(parent)
+	started := false
+	defer func() {
+		if !started {
+			cancel()
+		}
+	}()
+	watchChildren, watchRepos, watchValues := eventsctl.RecordWatch(workspaceClients(cfg.Rest))
+	runEvents, err := eventsctl.Register(ctx, mgr, eventsctl.Options{
+		Bus: cfg.Bus, Dynamic: kube.NewFactory(cfg.Rest), Resolver: &pdsclient.Resolver{Handlers: cfg.Bus},
+		PLCURL: "https://plc.directory", HTTPClient: http.DefaultClient, StateDir: cfg.StateDir,
+		RecordWatchChildren: watchChildren, RecordWatchRepos: watchRepos, RecordWatchValues: watchValues, Scope: scope, Log: log,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +359,7 @@ func Start(parent context.Context, cfg Config) (*Orchestrator, error) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(parent)
+	started = true
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -352,10 +367,15 @@ func Start(parent context.Context, cfg Config) (*Orchestrator, error) {
 			log.Error("socialweb manager exited", "err", err)
 		}
 	}()
+	go func() {
+		if err := runEvents(ctx); err != nil && ctx.Err() == nil {
+			log.Error("socialweb event streams exited", "err", err)
+		}
+	}()
 
 	orc := &Orchestrator{
 		Manager: mgr, Composer: composer, Vault: vaultCtl, Exposure: exposureCtl,
-		Events: eventsCtl, Identity: identityCtl, cancel: cancel, done: done,
+		Identity: identityCtl, cancel: cancel, done: done,
 	}
 	fmt.Fprintln(os.Stderr, "socialweb: manager started; creating MarketRequester")
 	if err := orc.createRoot(ctx, cfg); err != nil {

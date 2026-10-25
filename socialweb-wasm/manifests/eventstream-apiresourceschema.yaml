@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-4.eventstreams.events.socialweb.computer
+  name: v1alpha1-5.eventstreams.events.socialweb.computer
 spec:
   group: events.socialweb.computer
   names:
@@ -58,6 +58,11 @@ spec:
               cursor:
                 type: integer
                 format: int64
+              resume:
+                type: string
+                enum:
+                  - Persisted
+                  - Live
               sink:
                 type: object
                 properties:

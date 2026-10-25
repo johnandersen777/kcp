@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-17.bidders.socialweb.computer
+  name: v1alpha1-19.bidders.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -93,6 +93,14 @@ spec:
                           required:
                             - kind
                             - name
+                      relayUrls:
+                        type: array
+                        items:
+                          type: string
+                      jetstreamUrls:
+                        type: array
+                        items:
+                          type: string
                   ingress:
                     type: object
                     properties:
@@ -398,6 +406,27 @@ spec:
                     type: boolean
                   hostUDP:
                     type: boolean
+                  webrtcUDPPorts:
+                    type: object
+                    properties:
+                      min:
+                        type: integer
+                        format: int32
+                        minimum: 1024
+                        maximum: 65535
+                      max:
+                        type: integer
+                        format: int32
+                        minimum: 1024
+                        maximum: 65535
+                    required:
+                      - min
+                      - max
+                  webrtcUDPPort:
+                    type: integer
+                    format: int32
+                    minimum: 0
+                    maximum: 65535
               bidderDIDs:
                 type: array
                 items:
@@ -439,6 +468,14 @@ spec:
                       required:
                         - kind
                         - name
+                  relayUrls:
+                    type: array
+                    items:
+                      type: string
+                  jetstreamUrls:
+                    type: array
+                    items:
+                      type: string
               suspendParticipation:
                 type: boolean
           status:
@@ -497,6 +534,22 @@ spec:
                     type: boolean
                   hostUDPReason:
                     type: string
+                  webrtcUDPPorts:
+                    type: object
+                    properties:
+                      min:
+                        type: integer
+                        format: int32
+                        minimum: 1024
+                        maximum: 65535
+                      max:
+                        type: integer
+                        format: int32
+                        minimum: 1024
+                        maximum: 65535
+                    required:
+                      - min
+                      - max
                 required:
                   - lanUDP
                   - hostUDP

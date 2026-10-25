@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-9.pds.socialweb.computer
+  name: v1alpha1-10.pds.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -93,6 +93,14 @@ spec:
                           required:
                             - kind
                             - name
+                      relayUrls:
+                        type: array
+                        items:
+                          type: string
+                      jetstreamUrls:
+                        type: array
+                        items:
+                          type: string
                   ingress:
                     type: object
                     properties:
