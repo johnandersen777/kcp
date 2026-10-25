@@ -493,8 +493,10 @@ func (s *Store) guaranteedUpdate(
 
 	if exists && objectsEqual(orig, output) {
 		s.mu.Unlock()
+		countUpdate(key, false)
 		return existing, m, nil
 	}
+	countUpdate(key, true)
 
 	s.rv++
 	if err := s.versioner.UpdateObject(output, s.rv); err != nil {
@@ -1146,4 +1148,38 @@ func (w *bufferWatcher) send(ev watch.Event) bool {
 	default:
 		return false
 	}
+}
+
+// Update counts per resource (written vs no-op), for the debug memstats line:
+// which objects a controller keeps re-applying. Cheap enough to keep on.
+var updateCounts sync.Map // resource -> *[2]atomic.Int64
+
+// countUpdate files key under its resource: the path segment before the
+// cluster name, e.g. /registry/socialweb.computer/statesyncs/<cluster>/<name>.
+func countUpdate(key string, written bool) {
+	parts := strings.Split(strings.Trim(key, "/"), "/")
+	resource := key
+	if len(parts) >= 3 {
+		resource = strings.Join(parts[1:len(parts)-2], "/")
+	}
+	v, _ := updateCounts.LoadOrStore(resource, new([2]atomic.Int64))
+	if written {
+		v.(*[2]atomic.Int64)[0].Add(1)
+	} else {
+		v.(*[2]atomic.Int64)[1].Add(1)
+	}
+}
+
+// TakeUpdateCounts returns and resets the counts: resource -> {written, noop}.
+func TakeUpdateCounts() map[string][2]int64 {
+	out := map[string][2]int64{}
+	updateCounts.Range(func(k, v any) bool {
+		c := v.(*[2]atomic.Int64)
+		w, n := c[0].Swap(0), c[1].Swap(0)
+		if w+n > 0 {
+			out[k.(string)] = [2]int64{w, n}
+		}
+		return true
+	})
+	return out
 }

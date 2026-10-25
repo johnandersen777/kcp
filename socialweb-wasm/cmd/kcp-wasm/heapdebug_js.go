@@ -10,9 +10,13 @@ import (
 	"os"
 	"runtime"
 	"runtime/pprof"
+	"sort"
 	"strconv"
+	"strings"
 	"syscall/js"
 	"time"
+
+	"github.com/kcp-dev/kcp/contrib/wasm/storage"
 )
 
 // startHeapDebug is debug-only: with KCP_HEAP_PROFILE=<seconds> in the Go env
@@ -63,6 +67,24 @@ func startMemStats() {
 				mib(ms.Sys), mib(ms.HeapSys), mib(ms.HeapInuse), mib(ms.HeapIdle), mib(ms.HeapReleased),
 				ms.HeapObjects, mib(ms.StackInuse), runtime.NumGoroutine(), ms.NumGC, mib(ms.NextGC),
 				mib(ms.TotalAlloc), ms.Mallocs, time.Duration(ms.PauseTotalNs).Round(time.Millisecond), ms.GCCPUFraction)
+			// Updates per resource since the last line, top 8: written/no-op.
+			counts := storage.TakeUpdateCounts()
+			names := make([]string, 0, len(counts))
+			for name := range counts {
+				names = append(names, name)
+			}
+			sort.Slice(names, func(i, j int) bool {
+				a, b := counts[names[i]], counts[names[j]]
+				return a[0]+a[1] > b[0]+b[1]
+			})
+			if len(names) > 8 {
+				names = names[:8]
+			}
+			parts := make([]string, 0, len(names))
+			for _, name := range names {
+				parts = append(parts, fmt.Sprintf("%s=%d/%d", name, counts[name][0], counts[name][1]))
+			}
+			fmt.Fprintf(os.Stderr, "updates (written/noop per resource): %s\n", strings.Join(parts, " "))
 		}
 	}()
 }
