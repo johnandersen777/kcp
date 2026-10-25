@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-11.nodeclaims.socialweb.computer
+  name: v1alpha1-12.nodeclaims.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -344,6 +344,69 @@ spec:
                     required:
                       - keys
                       - observedAt
+                      - event
+                      - payload
+                  secretsRequested:
+                    type: object
+                    properties:
+                      requestedAt:
+                        type: string
+                      event:
+                        type: object
+                        properties:
+                          uri:
+                            type: string
+                          cid:
+                            type: string
+                        required:
+                          - uri
+                          - cid
+                      payload:
+                        type: object
+                        properties:
+                          uri:
+                            type: string
+                          cid:
+                            type: string
+                        required:
+                          - uri
+                          - cid
+                    required:
+                      - requestedAt
+                      - event
+                      - payload
+                  secretsApplied:
+                    type: object
+                    properties:
+                      appliedAt:
+                        type: string
+                      via:
+                        type: string
+                      count:
+                        type: integer
+                        format: int64
+                      event:
+                        type: object
+                        properties:
+                          uri:
+                            type: string
+                          cid:
+                            type: string
+                        required:
+                          - uri
+                          - cid
+                      payload:
+                        type: object
+                        properties:
+                          uri:
+                            type: string
+                          cid:
+                            type: string
+                        required:
+                          - uri
+                          - cid
+                    required:
+                      - appliedAt
                       - event
                       - payload
                   outcome:

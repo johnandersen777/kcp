@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-1.contractevents.socialweb.computer
+  name: v1alpha1-2.contractevents.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -47,6 +47,7 @@ spec:
                 enum:
                   - com.publicdomainrelay.temp.compute.events.guest.publicKey
                   - com.publicdomainrelay.temp.compute.events.guest.signalWebRTC
+                  - com.publicdomainrelay.temp.compute.events.guest.secrets
               kind:
                 type: string
                 maxLength: 32
@@ -58,7 +59,25 @@ spec:
                 maxLength: 256
               ciphertext:
                 type: string
-                maxLength: 16384
+                maxLength: 65536
+              recipientRef:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    maxLength: 253
+                required:
+                  - name
+              inReplyTo:
+                type: object
+                properties:
+                  uri:
+                    type: string
+                  cid:
+                    type: string
+                required:
+                  - uri
+                  - cid
             required:
               - contractRef
               - nsid

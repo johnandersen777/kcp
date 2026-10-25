@@ -33,6 +33,7 @@ import (
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/component"
 	componentlink "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/componentlink"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/contractevent"
+	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/infra"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketidentity"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketintents"
 	policyenginectl "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/policyengine"
@@ -320,6 +321,15 @@ func Start(parent context.Context, cfg Config) (*Orchestrator, error) {
 	}); err != nil {
 		return nil, err
 	}
+	// One EphemeralInfra per page session owns that session's ComputeContracts.
+	if _, err := infra.Register(mgr, infra.Options{
+		Bus:     cfg.Bus,
+		Scope:   scope,
+		Log:     log,
+		Dynamic: func(workspace string) (*kube.Client, error) { return kube.ForWorkspace(cfg.Rest, workspace) },
+	}); err != nil {
+		return nil, err
+	}
 	if err := marketrequester.Register(mgr, composer); err != nil {
 		return nil, err
 	}
@@ -479,6 +489,9 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 				Association: v1alpha1.AssociationSkip,
 			},
 			Network: &v1alpha1.MarketNetworkValue{PLCDirectoryURL: "https://plc.directory"},
+			// getSecrets over the ingress stays primary; when the guest cannot
+			// reach it, the requester seals the bundle to the guest's key.
+			SecretsFallback: v1alpha1.SecretsFallbackSealed,
 		},
 	}
 	obj.APIVersion = v1alpha1.GroupVersion.String()

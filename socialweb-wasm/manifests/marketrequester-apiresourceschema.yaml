@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-22.marketrequesters.socialweb.computer
+  name: v1alpha1-25.marketrequesters.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -165,6 +165,10 @@ spec:
                               - v2
                           localHost:
                             type: string
+                  discoveryRelays:
+                    type: array
+                    items:
+                      type: string
                 required:
                   - plcDirectoryUrl
                   - ingressProxyHost
@@ -240,6 +244,11 @@ spec:
                       required:
                         - kind
                         - name
+              secretsFallback:
+                type: string
+                enum:
+                  - None
+                  - Sealed
               ingress:
                 type: object
                 properties:
@@ -1166,6 +1175,26 @@ spec:
                       - reserve
                   updatedAt:
                     type: string
+              bidderStreams:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    eventStream:
+                      type: string
+                    pds:
+                      type: string
+                    dids:
+                      type: array
+                      items:
+                        type: string
+                    active:
+                      type: boolean
+                    seenAt:
+                      type: string
+                  required:
+                    - eventStream
+                    - pds
       additionalPrinterColumns:
         - name: Profile
           type: string

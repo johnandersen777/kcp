@@ -3,6 +3,7 @@ module github.com/johnandersen777/socialweb-computer-kcp/wasm
 go 1.26.6
 
 require (
+	filippo.io/age v1.3.2
 	github.com/bluesky-social/indigo v0.0.0-20261020053033-bdacece3f80e
 	github.com/ipfs/go-block-format v0.2.0
 	github.com/ipfs/go-cid v0.6.2
@@ -14,6 +15,7 @@ require (
 )
 
 require (
+	filippo.io/hpke v0.4.0 // indirect
 	cel.dev/expr v0.25.2 // indirect
 	cyphar.com/go-pathrs v0.2.2 // indirect
 	github.com/NYTimes/gziphandler v1.1.1 // indirect

@@ -6,7 +6,7 @@ spec:
   resources:
     - group: socialweb.computer
       name: clusters
-      schema: v1alpha1-4.clusters.socialweb.computer
+      schema: v1alpha1-5.clusters.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
@@ -16,7 +16,7 @@ spec:
         crd: {}
     - group: socialweb.computer
       name: nodeclaims
-      schema: v1alpha1-11.nodeclaims.socialweb.computer
+      schema: v1alpha1-12.nodeclaims.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer

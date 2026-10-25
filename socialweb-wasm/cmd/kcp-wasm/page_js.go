@@ -35,6 +35,19 @@ func registerPageExports(orc *socialweb.Orchestrator) {
 		}
 		return map[string]any{"status": http.StatusOK}
 	})
+	pageExport("socialwebSignOut", func(raw string) any {
+		var in struct {
+			Workspace string `json:"workspace"`
+			Name      string `json:"name"`
+		}
+		if err := json.Unmarshal([]byte(raw), &in); err != nil {
+			return failure(http.StatusBadRequest, err)
+		}
+		if err := orc.Identity.SignOut(context.Background(), in.Workspace, in.Name); err != nil {
+			return failure(http.StatusBadRequest, err)
+		}
+		return map[string]any{"status": http.StatusOK}
+	})
 	pageExport("socialwebIngressSign", func(raw string) any {
 		var in struct {
 			Host  string `json:"host"`

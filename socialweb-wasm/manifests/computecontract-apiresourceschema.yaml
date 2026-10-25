@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-14.computecontracts.socialweb.computer
+  name: v1alpha1-17.computecontracts.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -50,6 +50,38 @@ spec:
                 type: string
               vmReadyTimeoutSec:
                 type: integer
+              tunnels:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    tag:
+                      type: string
+                      pattern: ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$
+                    port:
+                      type: integer
+                      minimum: 1
+                      maximum: 65535
+                    server:
+                      type: string
+                    shell:
+                      type: object
+                      properties:
+                        envFile:
+                          type: string
+                          default: /etc/wootty/wootty.env
+                    transport:
+                      type: string
+                      enum:
+                        - opentunnel
+                        - webrtc
+                      default: opentunnel
+                  required:
+                    - tag
+                    - port
+                x-kubernetes-list-type: map
+                x-kubernetes-list-map-keys:
+                  - tag
               secretsRef:
                 type: object
                 properties:
@@ -137,32 +169,6 @@ spec:
                       - pins
                 required:
                   - clusterRef
-              tunnels:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    tag:
-                      type: string
-                      pattern: ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$
-                    port:
-                      type: integer
-                      minimum: 1
-                      maximum: 65535
-                    server:
-                      type: string
-                    transport:
-                      type: string
-                      enum:
-                        - opentunnel
-                        - webrtc
-                      default: opentunnel
-                  required:
-                    - tag
-                    - port
-                x-kubernetes-list-type: map
-                x-kubernetes-list-map-keys:
-                  - tag
               ttlSecondsAfterFinished:
                 type: integer
                 format: int32
@@ -455,6 +461,69 @@ spec:
                       - observedAt
                       - event
                       - payload
+                  secretsRequested:
+                    type: object
+                    properties:
+                      requestedAt:
+                        type: string
+                      event:
+                        type: object
+                        properties:
+                          uri:
+                            type: string
+                          cid:
+                            type: string
+                        required:
+                          - uri
+                          - cid
+                      payload:
+                        type: object
+                        properties:
+                          uri:
+                            type: string
+                          cid:
+                            type: string
+                        required:
+                          - uri
+                          - cid
+                    required:
+                      - requestedAt
+                      - event
+                      - payload
+                  secretsApplied:
+                    type: object
+                    properties:
+                      appliedAt:
+                        type: string
+                      via:
+                        type: string
+                      count:
+                        type: integer
+                        format: int64
+                      event:
+                        type: object
+                        properties:
+                          uri:
+                            type: string
+                          cid:
+                            type: string
+                        required:
+                          - uri
+                          - cid
+                      payload:
+                        type: object
+                        properties:
+                          uri:
+                            type: string
+                          cid:
+                            type: string
+                        required:
+                          - uri
+                          - cid
+                    required:
+                      - appliedAt
+                      - event
+                      - payload
                   outcome:
                     type: string
                     enum:
@@ -594,6 +663,19 @@ spec:
                       type: string
                   required:
                     - uri
+              bidderRepos:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    did:
+                      type: string
+                    pds:
+                      type: string
+                    seenAt:
+                      type: string
+                  required:
+                    - did
       additionalPrinterColumns:
         - name: Phase
           type: string

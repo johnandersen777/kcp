@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-21.marketnetworks.socialweb.computer
+  name: v1alpha1-25.marketnetworks.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -509,6 +509,13 @@ spec:
                       type: string
                     policy:
                       type: string
+                    guestNetwork:
+                      type: object
+                      properties:
+                        lanUDP:
+                          type: boolean
+                        hostUDP:
+                          type: boolean
                     firecracker:
                       type: object
                       properties:
@@ -577,6 +584,11 @@ spec:
                         scalePodsPerNode:
                           type: integer
                           format: int32
+                    secretsFallback:
+                      type: string
+                      enum:
+                        - None
+                        - Sealed
                     components:
                       type: object
                       additionalProperties:
@@ -1098,6 +1110,10 @@ spec:
                               - v2
                           localHost:
                             type: string
+                  discoveryRelays:
+                    type: array
+                    items:
+                      type: string
                 required:
                   - plcDirectoryUrl
                   - ingressProxyHost
