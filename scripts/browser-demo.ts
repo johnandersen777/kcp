@@ -225,8 +225,11 @@ async function main() {
   if (clicked !== "clicked") throw new Error(`Request VM: ${clicked}`);
   vm = (await req).message.match(/ComputeContract (vmshell-[a-z0-9]+)/)![1];
   note(`Request VM: ${vm}`);
-  await next(term(new RegExp(vm)), 60_000, "kubectl in the terminal");
-  note("kubectl get computecontracts shows it in flight");
+  // Cosmetic: the page's own kubectl run can be slow to print; never fail on it.
+  await next(term(new RegExp(vm)), 60_000, "kubectl in the terminal").then(
+    () => note("kubectl get computecontracts shows it in flight"),
+    () => note("kubectl output not seen in 60 s; continuing"),
+  );
   await have(msg(new RegExp(`ComputeContract ${vm} Held`)), 600_000, `${vm} Held`);
   note(`${vm} Held`);
 
