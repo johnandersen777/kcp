@@ -154,10 +154,11 @@ function controlStream(request: Request, session: string): Response {
   });
 }
 const debugLogMax = 256 * 1024;
-const scope = await loadScope(
-  options.get("scope-file") ?? kcpWasmPath.replace(/[^/]*$/, SCOPE_FILE),
-  options.has("scope-file"),
-);
+// The scope comes from requester-scope.txt next to kcp.wasm and is read per
+// metadata request: a kcp.wasm deploy changes it, and a scope cached at
+// startup made bsky reject the new build's sign-in (invalid_scope).
+const scopeFile = options.get("scope-file") ?? kcpWasmPath.replace(/[^/]*$/, SCOPE_FILE);
+await loadScope(scopeFile, options.has("scope-file"));
 const port = Number(options.get("port") ?? "8090");
 const origin = options.get("origin");
 const apiServer = options.get("api-server") ?? "http://kcp.local";
@@ -334,7 +335,7 @@ Deno.serve({ hostname, port }, async (request) => {
     const derived = forwarded && host ? `${forwarded}://${host}` : url.origin;
     const metadata = buildClientMetadata(
       origin ? normalizeOrigin(origin) : derived,
-      scope,
+      await loadScope(scopeFile, options.has("scope-file")),
     );
     return new Response(`${JSON.stringify(metadata, null, 2)}\n`, {
       headers: { ...headers, "content-type": "application/json" },
