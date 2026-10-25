@@ -2778,7 +2778,7 @@ async function sshDial(host, port, status, onEof) {
 async function runSsh(args, ctx) {
   await bash.fs.mkdir(sshDir, { recursive: true }).catch(() => {});
   let config = await bash.fs.readFile(`${sshDir}/config`).catch(() => null);
-  if (config === null) {
+  if (config === null || sshCmd.OLD_SSH_CONFIGS.includes(config)) {
     config = sshCmd.DEFAULT_SSH_CONFIG;
     await bash.fs.writeFile(`${sshDir}/config`, config);
   }

@@ -6,12 +6,21 @@
 // status.contract.hostKeys. The config itself is parsed in Go
 // (contrib/wasm/sshclient/sshconfig.go).
 
-export const DEFAULT_SSH_CONFIG = `# Seeded by the kcp-wasm page. Hosts are ComputeContract names; kcp-webrtc
+export const DEFAULT_SSH_CONFIG = `# Seeded by the kcp-wasm page. Hosts are ComputeContract names (a tab's
+# EphemeralInfra names them einfra-<infra>-vmshell-...); kcp-webrtc is the
+# built-in proxy that reaches the guest's sshd over WebRTC.
+Host vmshell-* einfra-*
+  User root
+  ProxyCommand kcp-webrtc %h %p
+`;
+
+// Earlier seeds, replaced by DEFAULT_SSH_CONFIG when found unchanged.
+export const OLD_SSH_CONFIGS = [`# Seeded by the kcp-wasm page. Hosts are ComputeContract names; kcp-webrtc
 # is the built-in proxy that reaches the guest's sshd over WebRTC.
 Host vmshell-*
   User root
   ProxyCommand kcp-webrtc %h %p
-`;
+`];
 
 // With ?sshTestPeer=, this name reaches contrib/wasm/sshclient/testpeer.
 export const TEST_PEER_HOST = "vmshell-testpeer";

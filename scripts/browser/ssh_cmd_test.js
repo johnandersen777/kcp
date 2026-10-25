@@ -18,7 +18,7 @@ const throws = (fn, re) => {
 };
 
 Deno.test("seeded config routes vmshell-* through kcp-webrtc as root", () => {
-  assert(/^Host vmshell-\*$/m.test(DEFAULT_SSH_CONFIG), "host block");
+  assert(/^Host vmshell-\* einfra-\*$/m.test(DEFAULT_SSH_CONFIG), "host block covers infra contract names");
   assert(/^\s+User root$/m.test(DEFAULT_SSH_CONFIG), "user");
   assert(/^\s+ProxyCommand kcp-webrtc %h %p$/m.test(DEFAULT_SSH_CONFIG), "proxy");
 });
