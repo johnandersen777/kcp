@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -507,8 +508,18 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 	obj.Name = "app"
 	// Never overwrite an existing app: the UI edits spec.identity at runtime
 	// and the worker config may be empty on a reload with restored state.
-	if _, err := kube.Get[*v1alpha1.MarketRequester](ctx, kc.Resource(v1alpha1.MarketRequesterGVR), "app"); err == nil {
-		return nil
+	// Only the comms mode and secrets fallback, which the page owns, are
+	// brought up to date (restored state from before Firehose).
+	if cur, err := kube.Get[v1alpha1.MarketRequester](ctx, kc.Resource(v1alpha1.MarketRequesterGVR), "app"); err == nil {
+		if cur.Spec.Comms != nil && cur.Spec.Comms.Mode == obj.Spec.Comms.Mode && cur.Spec.SecretsFallback == obj.Spec.SecretsFallback {
+			return nil
+		}
+		patch, err := json.Marshal(map[string]any{"spec": map[string]any{"comms": obj.Spec.Comms, "secretsFallback": obj.Spec.SecretsFallback}})
+		if err != nil {
+			return err
+		}
+		_, err = kube.Patch[v1alpha1.MarketRequester](ctx, kc.Resource(v1alpha1.MarketRequesterGVR), "app", types.MergePatchType, patch, metav1.PatchOptions{FieldManager: "socialweb-wasm"})
+		return err
 	}
 	_, err = kube.Apply[*v1alpha1.MarketRequester](ctx, kc.Resource(v1alpha1.MarketRequesterGVR), obj,
 		kube.ApplyOptions{FieldManager: "socialweb-wasm", Force: true})
