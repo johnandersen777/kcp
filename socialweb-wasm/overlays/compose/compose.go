@@ -84,13 +84,17 @@ type Composer struct {
 
 	samples samples
 
+	adoptions adoptions
+
 	roots rootIndex
 
 	drift map[string]*driftState
 
 	trusts Trusts
 
-	bidderSets sync.Map
+	requesterSets sync.Map
+
+	requesters requesterIndex
 }
 
 func New(cfg Config) (*Composer, error) {
@@ -191,9 +195,10 @@ func (c *Composer) AppliedBefore(r Root, recorded *v1alpha1.AppliedSet, digest s
 
 func (c *Composer) Forget(r Root) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	delete(c.applied, string(r.UID))
 	c.forgotten[string(r.UID)] = true
+	c.mu.Unlock()
+	c.adoptions.forget(r)
 }
 
 func ComponentStateDir(instanceState, component string) string {

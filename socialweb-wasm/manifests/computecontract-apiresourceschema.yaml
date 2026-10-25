@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-17.computecontracts.socialweb.computer
+  name: v1alpha1-18.computecontracts.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -663,19 +663,6 @@ spec:
                       type: string
                   required:
                     - uri
-              bidderRepos:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    did:
-                      type: string
-                    pds:
-                      type: string
-                    seenAt:
-                      type: string
-                  required:
-                    - did
       additionalPrinterColumns:
         - name: Phase
           type: string

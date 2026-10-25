@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-31.gateways.socialweb.computer
+  name: v1alpha1-32.gateways.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -1223,26 +1223,6 @@ spec:
                       - reserve
                   updatedAt:
                     type: string
-              bidderStreams:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    eventStream:
-                      type: string
-                    pds:
-                      type: string
-                    dids:
-                      type: array
-                      items:
-                        type: string
-                    active:
-                      type: boolean
-                    seenAt:
-                      type: string
-                  required:
-                    - eventStream
-                    - pds
       additionalPrinterColumns:
         - name: Profile
           type: string

@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-6.eventstreams.events.socialweb.computer
+  name: v1alpha1-7.eventstreams.events.socialweb.computer
 spec:
   group: events.socialweb.computer
   names:
@@ -63,6 +63,7 @@ spec:
                 enum:
                   - Persisted
                   - Live
+                  - Recent
               sink:
                 type: object
                 properties:
