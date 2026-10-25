@@ -53,9 +53,14 @@ interface Line {
 }
 const lineRE = /^(\S+) \[(\S+) ?([^\]]*)\] (\S+) (.*)$/;
 
-// Follow the debug log from its current end, polling every 50 ms.
-async function* follow(path: string): AsyncGenerator<Line> {
-  let offset = (await Deno.stat(path)).size;
+function parse(p: string): Line | null {
+  // Terminal lines end in \r, which . does not match.
+  const m = p.replace(/\r+$/, "").match(lineRE);
+  return m ? { t: m[1], session: m[2], ua: m[3], level: m[4], message: m[5].replaceAll("\\n", "\n") } : null;
+}
+
+// Follow the debug log from offset, polling every 50 ms.
+async function* follow(path: string, offset: number): AsyncGenerator<Line> {
   let partial = "";
   while (true) {
     const size = (await Deno.stat(path)).size;
@@ -75,16 +80,8 @@ async function* follow(path: string): AsyncGenerator<Line> {
       const parts = (partial + new TextDecoder().decode(buf.subarray(0, n))).split("\n");
       partial = parts.pop() ?? "";
       for (const p of parts) {
-        const m = p.match(lineRE);
-        if (m) {
-          yield {
-            t: m[1],
-            session: m[2],
-            ua: m[3],
-            level: m[4],
-            message: m[5].replaceAll("\\n", "\n"),
-          };
-        }
+        const l = parse(p);
+        if (l) yield l;
       }
     }
     await new Promise((r) => setTimeout(r, 50));
@@ -99,7 +96,18 @@ const waiters: { pred: (l: Line) => boolean; resolve: (l: Line) => void }[] = []
 const timeline: string[] = [];
 const transcript: string[] = [];
 
-const tail = follow(logPath);
+// With --session, the page is already loaded: start from what it logged
+// since its last load.
+const logText = await Deno.readTextFile(logPath);
+if (fixedSession) {
+  for (const p of logText.split("\n")) {
+    const l = parse(p);
+    if (!l || l.session !== fixedSession) continue;
+    if (/debug log on;/.test(l.message)) seen.length = 0;
+    seen.push(l);
+  }
+}
+const tail = follow(logPath, new TextEncoder().encode(logText).length);
 (async () => {
   for await (const l of tail) {
     if (!session) {
