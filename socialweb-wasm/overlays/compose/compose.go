@@ -97,6 +97,10 @@ type Composer struct {
 	requesterSets sync.Map
 
 	requesters requesterIndex
+
+	applies applyCache
+
+	linkSets linkSets
 }
 
 func New(cfg Config) (*Composer, error) {
