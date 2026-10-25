@@ -2655,7 +2655,11 @@ async function sshDial(host, port, status, onEof) {
   // Only a Shell tap falls back; a typed ssh just reports the error.
   const fallback = shellFallback.delete(host);
   try {
-    return await webrtcGuest.dialGuest({ signaling, tag: "ssh", status, onEof });
+    const logged = (message) => {
+      addLog("info", `ssh ${host} over WebRTC: ${message}`);
+      status(message);
+    };
+    return await webrtcGuest.dialGuest({ signaling, tag: "ssh", status: logged, onEof });
   } catch (err) {
     if (fallback && err.connectivity && openWootty(host, "WebRTC could not connect")) {
       throw new Error(`${err.message}\r\n` +

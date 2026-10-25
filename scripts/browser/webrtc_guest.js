@@ -182,6 +182,28 @@ function gatheringComplete(pc, timeoutMs = 15_000, settleMs = 500) {
   });
 }
 
+/** The selected ICE pair as candidate types, e.g. "host/udp -> srflx/udp" (no addresses). */
+export async function selectedPair(pc) {
+  try {
+    const stats = await pc.getStats();
+    let pair;
+    stats.forEach((r) => {
+      if (r.type === "transport" && r.selectedCandidatePairId) pair = stats.get(r.selectedCandidatePairId);
+    });
+    stats.forEach((r) => {
+      if (!pair && r.type === "candidate-pair" && (r.selected || (r.nominated && r.state === "succeeded"))) pair = r;
+    });
+    if (!pair) return "pair unknown";
+    const side = (id) => {
+      const c = stats.get(id);
+      return c ? `${c.candidateType}/${c.protocol}` : "?";
+    };
+    return `${side(pair.localCandidateId)} -> ${side(pair.remoteCandidateId)}`;
+  } catch {
+    return "pair unknown";
+  }
+}
+
 /**
  * The kcp-webrtc proxy: opens one datachannel (label = tag) to the guest and
  * returns {port, close}. port is a MessagePort carrying the channel's raw TCP
@@ -217,6 +239,7 @@ export async function dialGuest({
     // Sealed bodies are JSON {sdp, replyTo}; replyTo (offers only) is the
     // recipient the guest seals its answer to.
     const offer = JSON.stringify({ sdp: pc.localDescription.sdp, replyTo: me.recipient });
+    const offeredAt = performance.now();
     const opened = await within(signaling.exchange(await seal(offer, guest.key), (c) => me.open(c)),
       answerTimeoutMs, `no answer from the guest agent within ${answerTimeoutMs / 1000} s`);
     const answer = String(JSON.parse(opened)?.sdp ?? "");
@@ -233,7 +256,7 @@ export async function dialGuest({
         }
       };
     }), openTimeoutMs, `the datachannel did not open within ${openTimeoutMs / 1000} s`);
-    status("datachannel open");
+    status(`datachannel open ${((performance.now() - offeredAt) / 1000).toFixed(1)} s after the offer (${await selectedPair(pc)})`);
     const { port1, port2 } = new MessageChannel();
     dc.onmessage = (e) => port1.postMessage(e.data, [e.data]);
     port1.onmessage = (e) => dc.readyState === "open" && dc.send(e.data);
