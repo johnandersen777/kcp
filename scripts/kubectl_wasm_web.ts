@@ -322,6 +322,18 @@ Deno.serve({ hostname, port }, async (request) => {
     return new Response(null, { status: 204, headers });
   }
 
+  // A Go heap profile from a debugged page (localStorage kcp.heapProfile),
+  // saved next to the debug log as heap-<session>-<time>.pb.gz for go tool pprof.
+  if (url.pathname === "/debug/heap" && request.method === "POST") {
+    if (!debugLogPath) return new Response("debug log disabled", { status: 404, headers });
+    const bytes = new Uint8Array(await request.arrayBuffer());
+    if (bytes.length > 32 << 20) return new Response("too large", { status: 413, headers });
+    const session = (url.searchParams.get("session") ?? "page").replace(/[^a-z0-9]/gi, "").slice(0, 12);
+    const dir = debugLogPath.replace(/\/[^/]*$/, "");
+    await Deno.writeFile(`${dir}/heap-${session}-${new Date().toISOString().replace(/[:.]/g, "-")}.pb.gz`, bytes);
+    return new Response(null, { status: 204, headers });
+  }
+
   if (url.pathname === "/config") {
     return Response.json(
       { apiServer, intervalMs },

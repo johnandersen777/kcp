@@ -207,6 +207,12 @@ if (init.lowMemory) {
 }
 // With the Go console forwarded (debug), log Go's memory stats every minute.
 if (init.debugGo) go.env = { ...go.env, KCP_MEMSTATS: "60" };
+// Debug only (localStorage kcp.heapProfile=<seconds>): Go hands a heap
+// profile to __kcpHeapDump on that period; the page uploads it.
+if (init.heapProfile) {
+  go.env = { ...go.env, KCP_HEAP_PROFILE: String(init.heapProfile) };
+  globalThis.__kcpHeapDump = (_stats, heapBase64) => postMessage({ type: "heap-profile", heapBase64 });
+}
 const fetchStarted = performance.now();
 // The module hash only keys the snapshot; skip it (and its buffered copy)
 // when hibernation is off.

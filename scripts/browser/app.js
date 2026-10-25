@@ -553,6 +553,12 @@ function attachKcp(worker) {
       renderIngress(data.entries ?? []);
       return;
     }
+    if (data.type === "heap-profile") {
+      const bytes = Uint8Array.from(atob(data.heapBase64 ?? ""), (c) => c.charCodeAt(0));
+      fetch(`/debug/heap?session=${encodeURIComponent(debugSession)}`, { method: "POST", body: bytes })
+        .then(() => addLog("debug", `heap profile uploaded (${bytes.length} bytes)`), () => {});
+      return;
+    }
     if (data.type === "response") {
       const page = pendingPageRequests.get(data.id);
       if (page) {
@@ -709,6 +715,7 @@ async function spawnKcp(useSnapshot = true) {
     debugGo: localStorage.getItem("kcp.debugGo") !== "0",
     lowMemory,
     gogcReady: Number(localStorage.getItem("kcp.gogcReady")) || undefined,
+    heapProfile: Number(localStorage.getItem("kcp.heapProfile")) || undefined,
     debugMemory: debugLog,
     socialweb: {
       origin: location.origin,
