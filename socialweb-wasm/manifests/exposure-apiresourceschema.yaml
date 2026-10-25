@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-4.exposures.exposure.socialweb.computer
+  name: v1alpha1-5.exposures.exposure.socialweb.computer
 spec:
   group: exposure.socialweb.computer
   names:
@@ -89,6 +89,38 @@ spec:
                 type: string
               endpoint:
                 type: string
+              ingress:
+                type: object
+                properties:
+                  host:
+                    type: string
+                  did:
+                    type: string
+                  relay:
+                    type: string
+                  url:
+                    type: string
+                  subscriber:
+                    type: object
+                    properties:
+                      state:
+                        type: string
+                        enum:
+                          - connecting
+                          - registered
+                          - reconnecting
+                          - waiting
+                          - closed
+                      registeredAt:
+                        type: string
+                        format: date-time
+                      lastError:
+                        type: string
+                      closeCode:
+                        type: integer
+                        format: int32
+                      relayVersion:
+                        type: string
               conditions:
                 type: array
                 items:
@@ -107,6 +139,9 @@ spec:
         - name: Ready
           type: boolean
           jsonPath: .status.ready
+        - name: IngressRegistered
+          type: string
+          jsonPath: .status.conditions[?(@.type=="IngressRegistered")].status
         - name: Address
           type: string
           jsonPath: .status.address

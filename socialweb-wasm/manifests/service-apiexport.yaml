@@ -11,7 +11,7 @@ spec:
         crd: {}
     - group: exposure.socialweb.computer
       name: exposures
-      schema: v1alpha1-4.exposures.exposure.socialweb.computer
+      schema: v1alpha1-5.exposures.exposure.socialweb.computer
       storage:
         crd: {}
     - group: exposure.socialweb.computer

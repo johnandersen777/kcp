@@ -9,7 +9,7 @@
  * the page (on a phone, say): the program attaches to the first page that
  * connects its debug control after it started, and then
  *
- *   waits for kcp, the signed-in MarketIdentity and the requester ingress,
+ *   waits for kcp and the signed-in MarketIdentity,
  *   releases VMs left from earlier runs,
  *   taps Request VM (the page itself runs kubectl get computecontracts),
  *   waits for Held, runs ssh <vm> (over WebRTC) in the page terminal,
@@ -188,8 +188,6 @@ async function main() {
     await next(msg(/MarketIdentity Ready/), 600_000, "a signed-in identity");
   }
   note("signed in");
-  await have(msg(/ingress .* registered at/), 300_000, "the requester ingress");
-  note("ingress registered");
 
   const left = JSON.parse(
     await page(

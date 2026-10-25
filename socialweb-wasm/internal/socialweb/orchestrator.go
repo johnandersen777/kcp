@@ -494,8 +494,11 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 				Association:      v1alpha1.AssociationSkip,
 			},
 			Network: &v1alpha1.MarketNetworkValue{PLCDirectoryURL: "https://plc.directory"},
-			// getSecrets over the ingress stays primary; when the guest cannot
-			// reach it, the requester seals the bundle to the guest's key.
+			// Records only: the requester writes to its PDS and reads bids and
+			// events from the streams, with no inbound XRPC and no ingress
+			// Exposure (socialweb 91590920). Guest secrets are sealed to the
+			// guest's key.
+			Comms:           &v1alpha1.MarketComms{Mode: v1alpha1.MarketCommsModeFirehose},
 			SecretsFallback: v1alpha1.SecretsFallbackSealed,
 		},
 	}
