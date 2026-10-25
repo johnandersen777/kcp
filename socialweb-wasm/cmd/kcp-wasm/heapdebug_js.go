@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"runtime"
 	"runtime/pprof"
@@ -18,6 +19,7 @@ import (
 // it hands the host __kcpHeapDump(memStatsJSON, heapProfileBase64, goroutineProfileBase64) on that
 // period. The default (unset) keeps allocation profiling off.
 func startHeapDebug() {
+	startMemStats()
 	period, _ := strconv.Atoi(os.Getenv("KCP_HEAP_PROFILE"))
 	if period <= 0 {
 		// Allocation profiling samples callers through the wasm pclntab; with
@@ -39,6 +41,27 @@ func startHeapDebug() {
 				fn.Invoke(string(stats), base64.StdEncoding.EncodeToString(buf.Bytes()),
 					base64.StdEncoding.EncodeToString(goroutines.Bytes()))
 			}
+		}
+	}()
+}
+
+// startMemStats is debug-only and cheap: with KCP_MEMSTATS=<seconds> it logs
+// one line of runtime.MemStats and the goroutine count on that period, so a
+// slow heap growth on a phone shows whether the live heap, idle spans or
+// goroutines are what grows.
+func startMemStats() {
+	period, _ := strconv.Atoi(os.Getenv("KCP_MEMSTATS"))
+	if period <= 0 {
+		return
+	}
+	go func() {
+		for range time.Tick(time.Duration(period) * time.Second) {
+			var ms runtime.MemStats
+			runtime.ReadMemStats(&ms)
+			mib := func(b uint64) float64 { return float64(b) / (1 << 20) }
+			fmt.Fprintf(os.Stderr, "memstats: sys=%.1fMiB heapSys=%.1fMiB heapInuse=%.1fMiB heapIdle=%.1fMiB heapReleased=%.1fMiB heapObjects=%d stackInuse=%.1fMiB goroutines=%d numGC=%d nextGC=%.1fMiB\n",
+				mib(ms.Sys), mib(ms.HeapSys), mib(ms.HeapInuse), mib(ms.HeapIdle), mib(ms.HeapReleased),
+				ms.HeapObjects, mib(ms.StackInuse), runtime.NumGoroutine(), ms.NumGC, mib(ms.NextGC))
 		}
 	}()
 }

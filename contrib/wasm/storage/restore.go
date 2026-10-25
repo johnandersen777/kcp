@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -319,10 +320,17 @@ func OnSnapshot(fn func([]byte)) func() {
 	// message in order. A full snapshot every snapshotCompact lets a consumer
 	// that lost a delta converge again.
 	const (
-		snapshotQuiet   = 750 * time.Millisecond
-		snapshotMaxAge  = 10 * time.Second
-		snapshotCompact = 10 * time.Minute
+		snapshotQuiet  = 750 * time.Millisecond
+		snapshotMaxAge = 10 * time.Second
 	)
+	// KCP_SNAPSHOT_COMPACT_SECONDS overrides the periodic full snapshot; 0
+	// turns it off (full snapshots then happen only first and after a failed
+	// persist). Each full one encodes the whole store at once, and on a phone
+	// that peak is wasm memory the page never gets back.
+	snapshotCompact := 10 * time.Minute
+	if v, err := strconv.Atoi(os.Getenv("KCP_SNAPSHOT_COMPACT_SECONDS")); err == nil && v >= 0 {
+		snapshotCompact = time.Duration(v) * time.Second
+	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -346,7 +354,7 @@ func OnSnapshot(fn func([]byte)) func() {
 					continue
 				}
 				last = current
-				full := now.Sub(lastFull) >= snapshotCompact
+				full := lastFull.IsZero() || (snapshotCompact > 0 && now.Sub(lastFull) >= snapshotCompact)
 				raw, wasFull, err := persistMessage(full)
 				if err != nil {
 					lastFull = time.Time{} // dirty keys were consumed; resync
