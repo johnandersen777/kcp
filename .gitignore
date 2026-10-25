@@ -56,3 +56,4 @@ contrib/production/oidc-dex/values.yaml
 .go.memory.mod
 .go.memory.sum
 public/
+.claude/
