@@ -196,7 +196,9 @@
     padding: 3px 6px;
   }
   .app-block textarea { min-height: 44px; resize: vertical; }
-  .app-block button {
+  .app-block button, .app-block a.button {
+    display: inline-block;
+    text-decoration: none;
     background: transparent;
     color: var(--accent);
     border: 1px solid var(--accent);
@@ -231,7 +233,7 @@
   .compute-list .phase-Failed { color: var(--critical); }
   .compute-list .phase-Released { color: var(--muted); }
   .compute-list .detail { color: var(--muted); }
-  .compute-list button { margin: 3px 0 0 6px; }
+  .compute-list button, .compute-list a.button { margin: 3px 0 0 6px; }
   #diagram-pane h2 {
     font-size: 12px;
     text-transform: uppercase;

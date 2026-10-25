@@ -2441,15 +2441,31 @@ function shellAction(contract) {
     if (contract.phase === "Held") el.textContent = "Held; the shells are starting…";
     return el;
   }
-  const button = document.createElement("button");
-  button.type = "button";
-  button.textContent = "Shell";
-  button.addEventListener("click", () => openShell(contract.name));
+  // SSH over WebRTC runs in the page terminal and falls back to the web shell
+  // when it cannot connect; the Web shell link is a plain link, so a tap
+  // always opens it (iOS blocks only opens the page starts on its own).
+  if (s.webrtc) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "SSH";
+    button.title = "ssh over WebRTC in the terminal below; falls back to the web shell";
+    button.addEventListener("click", () => openShell(contract.name));
+    el.append(button);
+  }
+  if (s.link) {
+    const link = document.createElement("a");
+    link.href = s.link;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.className = "button";
+    link.textContent = "Web shell";
+    link.addEventListener("click", () => addLog("info", `opening the web shell of ${contract.name}`));
+    el.append(link);
+  }
   const note = document.createElement("span");
   note.className = "detail";
-  note.textContent = [s.webrtc ? " ssh ready" : "", s.link ? " web shell ready" : s.wootty ? " web shell starting" : ""]
-    .filter(Boolean).join(" ·");
-  el.append(button, note);
+  note.textContent = s.link ? "" : s.wootty ? " web shell starting (usually 1-3 min after Held)" : "";
+  el.append(note);
   return el;
 }
 
@@ -2492,7 +2508,9 @@ function openLink(link) {
     return;
   }
   // Popup blocked (an open that does not follow a tap): let a tap do it.
-  showToast("Tap to open the web shell", () => globalThis.open(link, "_blank"), 30_000);
+  addLog("info", "the browser blocked opening the web shell; showing a tap-to-open notice");
+  showToast("WebRTC could not connect. Tap here to open the web shell (or use Web shell on the VM's row).",
+    () => globalThis.open(link, "_blank"), 60_000);
 }
 
 // Opens the contract's wootty link, or waits for its address (the
@@ -2502,10 +2520,12 @@ function openWootty(name, why = "") {
   if (!token) return false;
   const link = vmshell.shellLink(contractNamed(lastFeedState, name), token);
   if (link) {
+    addLog("info", `opening the web shell of ${name}${why ? ` (${why})` : ""}`);
     openLink(link);
     return true;
   }
-  showToast(`${why ? `${why}; ` : ""}the web shell is still starting…`, null, 0);
+  addLog("info", `${name}: waiting for the web shell address${why ? ` (${why})` : ""}`);
+  showToast(`${why ? `${why}. ` : ""}The web shell is still starting (usually 1-3 min); this notice turns into a link when it is ready.`, null, 0);
   void watchFeed((state) => {
     const c = contractNamed(state, name);
     if (!c || !vmshell.isActive(c)) return "gone";
@@ -2643,7 +2663,9 @@ async function sshDial(host, port, status, onEof) {
     return await webrtcGuest.dialGuest({ signaling, tag: "ssh", status, onEof });
   } catch (err) {
     if (fallback && err.connectivity && openWootty(host, "WebRTC could not connect")) {
-      throw new Error(`${err.message}; opening the wootty web shell instead`);
+      throw new Error(`${err.message}\r\n` +
+        "WebRTC could not connect (common when this device and the VM's bidder share a Wi-Fi network).\r\n" +
+        "Opening the web shell instead: if no tab opens, tap the notice at the bottom or the Web shell link on the VM's row.");
     }
     throw err;
   }
