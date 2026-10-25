@@ -193,11 +193,17 @@ const go = hibernate.instrument(new globalThis.Go());
 // KCP_LOW_MEMORY turns off the apiserver watch cache and shortens the storage
 // watch history (contrib/wasm/real). KCP_GOGC_READY collects harder once kcp is
 // up, while socialweb composes: settled memory ~417 -> ~395 MiB in Deno, at
-// the cost of a slower compose (~38 -> ~56 s). KCP_SNAPSHOT_COMPACT_SECONDS=0
+// the cost of a slower compose (~38 -> ~56 s). 10 starved the iPhone once the
+// event streams decode records (heap ~280 MiB, ~100 collections a minute, kcp
+// GETs taking 4 s and PDS calls timing out), so it is 25 unless the page
+// passes gogcReady (localStorage kcp.gogcReady). KCP_SNAPSHOT_COMPACT_SECONDS=0
 // drops the periodic full state snapshot (a 6 MB encode every 10 min, each
 // raising the wasm memory peak a step); deltas still persist.
 if (init.lowMemory) {
-  go.env = { ...go.env, GOGC: "25", KCP_LOW_MEMORY: "1", KCP_GOGC_READY: "10", KCP_SNAPSHOT_COMPACT_SECONDS: "0" };
+  go.env = {
+    ...go.env, GOGC: "25", KCP_LOW_MEMORY: "1", KCP_GOGC_READY: String(init.gogcReady ?? 25),
+    KCP_SNAPSHOT_COMPACT_SECONDS: "0",
+  };
 }
 // With the Go console forwarded (debug), log Go's memory stats every minute.
 if (init.debugGo) go.env = { ...go.env, KCP_MEMSTATS: "60" };

@@ -708,6 +708,7 @@ async function spawnKcp(useSnapshot = true) {
     hibernate,
     debugGo: localStorage.getItem("kcp.debugGo") !== "0",
     lowMemory,
+    gogcReady: Number(localStorage.getItem("kcp.gogcReady")) || undefined,
     debugMemory: debugLog,
     socialweb: {
       origin: location.origin,
