@@ -207,6 +207,24 @@ if (init.lowMemory) {
 }
 // With the Go console forwarded (debug), log Go's memory stats every minute.
 if (init.debugGo) go.env = { ...go.env, KCP_MEMSTATS: "60" };
+// OAuth token refreshes (socialweb oauthclient TokenRefresher seam,
+// cmd/kcp-wasm/refresher_js.go): Go asks __kcpRefreshTokens(requestJSON) and
+// awaits the response JSON; the page relays to its refresh worker
+// (oauth_refresh_worker.js), which runs on its own thread.
+if (init.oauthRefreshWorker) {
+  const pending = new Map();
+  let next = 0;
+  self.addEventListener("message", (event) => {
+    if (event.data?.type !== "oauth-refresh-result") return;
+    pending.get(event.data.id)?.(event.data.response);
+    pending.delete(event.data.id);
+  });
+  globalThis.__kcpRefreshTokens = (request) => new Promise((resolve) => {
+    const id = ++next;
+    pending.set(id, resolve);
+    self.postMessage({ type: "oauth-refresh", id, request });
+  });
+}
 // Debug only (localStorage kcp.heapProfile=<seconds>, dev server only): Go
 // hands heap and goroutine profiles to __kcpHeapDump on that period; the
 // page uploads them.

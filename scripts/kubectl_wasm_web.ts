@@ -171,6 +171,7 @@ const assets = new Map<string, string>([
   ["/app.js", "app.js"],
   ["/diagram.js", "diagram.js"],
   ["/kcp_worker.js", "kcp_worker.js"],
+  ["/oauth_refresh_worker.js", "oauth_refresh_worker.js"],
   ["/kubectl_worker.js", "kubectl_worker.js"],
   ["/cli_worker.js", "cli_worker.js"],
   ["/fs_shim.js", "fs_shim.js"],

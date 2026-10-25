@@ -44,6 +44,7 @@ type response struct {
 
 func main() {
 	startHeapDebug()
+	installTokenRefresher()
 
 	rootDir := "/kcp"
 	cfg := real.Config{

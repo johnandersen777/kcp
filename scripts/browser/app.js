@@ -553,6 +553,17 @@ function attachKcp(worker) {
       renderIngress(data.entries ?? []);
       return;
     }
+    if (data.type === "oauth-refresh") {
+      oauthRefreshWorker().then((w) => {
+        const channel = new MessageChannel();
+        channel.port1.onmessage = (e) => {
+          worker.postMessage({ type: "oauth-refresh-result", id: data.id, response: e.data.response });
+          channel.port1.close();
+        };
+        w.postMessage({ id: data.id, request: data.request }, [channel.port2]);
+      });
+      return;
+    }
     if (data.type === "heap-profile") {
       for (const [kind, b64] of [["heap", data.heapBase64], ["goroutine", data.goroutineBase64]]) {
         if (!b64) continue;
@@ -687,6 +698,14 @@ function schedulePersist(snapshot, key = stateKey, seq = 0) {
 // recorded once kcp (and the socialweb manifest apply) is ready, so a load
 // interrupted mid-apply re-applies on the next one.
 let kcpBuildEtag = null;
+// One refresh worker per tab, outliving kcp worker restarts; it answers on
+// the MessagePort each request brings.
+let refreshWorker = null;
+function oauthRefreshWorker() {
+  refreshWorker ??= Promise.resolve(new Worker("/oauth_refresh_worker.js", { type: "module" }));
+  return refreshWorker;
+}
+
 let devServerProbe = null;
 function devServer() {
   devServerProbe ??= fetch("/debug/control?session=probe", { method: "HEAD" }).then((r) => r.status === 204, () => false);
@@ -726,6 +745,7 @@ async function spawnKcp(useSnapshot = true) {
     gogcReady: Number(localStorage.getItem("kcp.gogcReady")) || undefined,
     // Profiles only when served by the dev server (it answers HEAD
     // /debug/control); a static deploy never turns them on.
+    oauthRefreshWorker: typeof Worker === "function",
     heapProfile: (await devServer()) ? Number(localStorage.getItem("kcp.heapProfile")) || undefined : undefined,
     debugMemory: debugLog,
     socialweb: {

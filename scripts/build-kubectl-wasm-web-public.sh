@@ -54,6 +54,7 @@ assets=(
   app.js
   diagram.js
   kcp_worker.js
+  oauth_refresh_worker.js
   kubectl_worker.js
   cli_worker.js
   fs_shim.js
