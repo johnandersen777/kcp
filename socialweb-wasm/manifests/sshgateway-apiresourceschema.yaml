@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-23.sshgateways.socialweb.computer
+  name: v1alpha1-24.sshgateways.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -217,6 +217,10 @@ spec:
                     items:
                       type: string
                     x-kubernetes-list-type: set
+                  oauthClientID:
+                    type: string
+                  oauthRedirectURI:
+                    type: string
               comms:
                 type: object
                 properties:

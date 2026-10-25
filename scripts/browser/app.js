@@ -1983,7 +1983,15 @@ const DEFAULT_PDS_URL = "https://bsky.social";
 
 function requesterIdentity() {
   const handle = identityHandleEl.value.trim();
-  const identity = { mode: identityModeEl.value, association: "Skip" };
+  // The page origin is the OAuth client (static metadata and callback), so
+  // sign-in never depends on this tab's ingress, which iOS pauses while the
+  // user is on the PDS.
+  const identity = {
+    mode: identityModeEl.value,
+    association: "Skip",
+    oauthClientID: `${location.origin}/oauth-client-metadata.json`,
+    oauthRedirectURI: `${location.origin}/oauth/callback/requester`,
+  };
   if (handle) identity.handle = handle;
   else identity.pdsUrl = DEFAULT_PDS_URL;
   return identity;

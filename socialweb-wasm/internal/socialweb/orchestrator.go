@@ -482,11 +482,16 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 		Spec: v1alpha1.MarketRequesterSpec{
 			Profile: marketrequester.RequesterProfileDefault,
 			Identity: v1alpha1.ApplicationIdentity{
-				Mode:        cfg.IdentityMode,
-				Handle:      cfg.Handle,
-				Did:         cfg.DID,
-				PdsURL:      cfg.PDSURL,
-				Association: v1alpha1.AssociationSkip,
+				Mode:   cfg.IdentityMode,
+				Handle: cfg.Handle,
+				// The page origin is the OAuth client: a static client metadata
+				// file and callback page. Never the ingress Exposure, which the
+				// tab cannot serve while the user is on the PDS.
+				OAuthClientID:    cfg.OAuthClientID,
+				OAuthRedirectURI: cfg.OAuthRedirectURI,
+				Did:              cfg.DID,
+				PdsURL:           cfg.PDSURL,
+				Association:      v1alpha1.AssociationSkip,
 			},
 			Network: &v1alpha1.MarketNetworkValue{PLCDirectoryURL: "https://plc.directory"},
 			// getSecrets over the ingress stays primary; when the guest cannot
