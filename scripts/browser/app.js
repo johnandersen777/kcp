@@ -674,13 +674,15 @@ function schedulePersist(snapshot, key = stateKey, seq = 0) {
 // has Ready APIBindings, so state saved by an older kcp.wasm would keep that
 // build's schemas. Re-apply once whenever kcp.wasm changed since the state was
 // saved (its ETag is the build's identity).
+// The kcp.wasm ETag the saved state was last fully booted with. It is only
+// recorded once kcp (and the socialweb manifest apply) is ready, so a load
+// interrupted mid-apply re-applies on the next one.
+let kcpBuildEtag = null;
 async function kcpBuildChanged() {
   try {
-    const etag = (await fetch("/kcp.wasm", { method: "HEAD" })).headers.get("etag") ?? "";
-    const previous = localStorage.getItem("kcp.stateBuild");
-    localStorage.setItem("kcp.stateBuild", etag);
+    kcpBuildEtag = (await fetch("/kcp.wasm", { method: "HEAD" })).headers.get("etag") ?? "";
     // No record means state from before this check: re-apply to be safe.
-    return previous !== etag;
+    return localStorage.getItem("kcp.stateBuild") !== kcpBuildEtag;
   } catch {
     return false;
   }
@@ -728,6 +730,13 @@ async function spawnKcp(useSnapshot = true) {
     return spawnKcp(false);
   }
   logBootKind(ready, spawnStarted);
+  if (kcpBuildEtag !== null) {
+    try {
+      localStorage.setItem("kcp.stateBuild", kcpBuildEtag);
+    } catch {
+      // no localStorage: the next load re-applies, which is only slower
+    }
+  }
   kcpWorker = worker;
   worker.postMessage({ type: "state-subscribe" });
 }
