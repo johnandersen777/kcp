@@ -132,6 +132,7 @@ func startSocialweb(srv *real.Server, kcpHandler js.Func) {
 			OAuthRedirectURI string  `json:"oauthRedirectUri"`
 			IdentityMode     string  `json:"identityMode"`
 			ForceApply       bool    `json:"forceApply"`
+			CommsMode        string  `json:"commsMode"`
 			Restore          string  `json:"restore"`
 			StatusFeed       *bool   `json:"statusFeed"`
 		}
@@ -143,6 +144,7 @@ func startSocialweb(srv *real.Server, kcpHandler js.Func) {
 			cfg.OAuthClientID = in.OAuthClientID
 			cfg.OAuthRedirectURI = in.OAuthRedirectURI
 			cfg.ForceApply = in.ForceApply
+			cfg.CommsMode = v1alpha1.MarketCommsMode(strings.TrimSpace(in.CommsMode))
 			if restore := strings.TrimSpace(in.Restore); restore != "" {
 				cfg.Restore = json.RawMessage(restore)
 			}

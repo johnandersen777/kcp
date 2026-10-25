@@ -78,6 +78,10 @@ type Config struct {
 
 	OAuthRedirectURI string
 
+	// CommsMode is the MarketRequester's spec.comms.mode: Firehose (records
+	// only, no ingress; the default) or Both (the ingress XRPC endpoints too).
+	CommsMode v1alpha1.MarketCommsMode
+
 	// ForceApply re-applies every provider manifest set even when the snapshot
 	// already holds ready bindings. Dev loops leave it off; schema changes and
 	// first boots turn it on.
@@ -515,11 +519,12 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 				Association:      v1alpha1.AssociationSkip,
 			},
 			Network: &v1alpha1.MarketNetworkValue{PLCDirectoryURL: "https://plc.directory"},
-			// Records only: the requester writes to its PDS and reads bids and
-			// events from the streams, with no inbound XRPC and no ingress
-			// Exposure (socialweb 91590920). Guest secrets are sealed to the
-			// guest's key.
-			Comms:           &v1alpha1.MarketComms{Mode: v1alpha1.MarketCommsModeFirehose},
+			// Firehose (default): records only; the requester writes to its PDS
+			// and reads bids and events from the streams, with no inbound XRPC
+			// and no ingress Exposure. Both (the page's Ingress mode) adds the
+			// relay-hosted XRPC endpoints. Guest secrets fall back to a record
+			// sealed to the guest's key either way.
+			Comms:           &v1alpha1.MarketComms{Mode: commsMode(cfg.CommsMode)},
 			SecretsFallback: v1alpha1.SecretsFallbackSealed,
 		},
 	}
@@ -576,4 +581,14 @@ func (o *Orchestrator) Lookup(host, path string) (http.Handler, bool) {
 		return nil, false
 	}
 	return o.Exposure.Lookup(host, path)
+}
+
+// commsMode is the requester comms mode the page asked for, Firehose unless
+// it named Both or XRPC.
+func commsMode(m v1alpha1.MarketCommsMode) v1alpha1.MarketCommsMode {
+	switch m {
+	case v1alpha1.MarketCommsModeBoth, v1alpha1.MarketCommsModeXRPC:
+		return m
+	}
+	return v1alpha1.MarketCommsModeFirehose
 }

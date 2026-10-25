@@ -371,6 +371,12 @@
       </div>
       <div class="app-block">
         <h2>Compute</h2>
+        <label><span>Comms</span>
+          <select id="compute-comms">
+            <option value="Firehose">Firehose: records over relays and jetstreams, no ingress</option>
+            <option value="Both">Ingress: XRPC endpoints on the relay plus the streams</option>
+          </select>
+        </label>
         <button id="compute-request" type="button" disabled>Request VM</button>
         <button id="compute-testpeer" type="button" hidden>Connect test peer</button>
         <div id="compute-status" class="app-status">sign in to request a VM</div>

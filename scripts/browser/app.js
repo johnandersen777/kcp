@@ -728,6 +728,7 @@ async function spawnKcp(useSnapshot = true) {
       oauthClientId: `${location.origin}/oauth-client-metadata.json`,
       oauthRedirectUri: `${location.origin}/oauth/callback/requester`,
       forceApply: buildChanged || localStorage.getItem("socialweb.forceApply") === "1",
+      commsMode: localStorage.getItem("socialweb.commsMode") ?? "Firehose",
       statusFeed: localStorage.getItem("socialweb.statusFeed") !== "0",
       restore: socialwebSnapshot,
     },
@@ -1989,6 +1990,18 @@ async function typeBootSteps(steps) {
 }
 
 // --- socialweb requester UI ------------------------------------------------
+
+// The requester's comms mode is read once at boot (the orchestrator brings the
+// MarketRequester to it), so a change reloads the page. Firehose is the
+// default; Ingress (comms mode Both) keeps the relay-hosted XRPC endpoints
+// (submitBid, submitEvent, getSecrets) as a backstop next to the streams.
+const commsEl = document.getElementById("compute-comms");
+commsEl.value = localStorage.getItem("socialweb.commsMode") ?? "Firehose";
+commsEl.addEventListener("change", () => {
+  localStorage.setItem("socialweb.commsMode", commsEl.value);
+  addLog("info", `comms mode ${commsEl.value}; reloading to apply it`);
+  setTimeout(() => location.reload(), 300);
+});
 
 const identityPrefs = {
   mode: "socialweb.identity",
