@@ -6,6 +6,7 @@ import {
   contractName,
   isActive,
   isReleasing,
+  orderContracts,
   randomToken,
   schemaHasShell,
   secretsBundle,
@@ -82,4 +83,15 @@ Deno.test("isActive and isReleasing follow phase and release", () => {
   for (const [c, active, releasing] of cases) {
     if (isActive(c) !== active || isReleasing(c) !== releasing) throw new Error(JSON.stringify(c));
   }
+});
+
+Deno.test("orderContracts puts Released last and keeps the rest in feed order", () => {
+  const names = orderContracts([
+    { name: "a", phase: "Released" },
+    { name: "b", phase: "Held" },
+    { name: "c", phase: "Released" },
+    { name: "d", phase: "Failed" },
+    { name: "e", phase: "Pending" },
+  ]).map((c) => c.name);
+  assert(names.join() === "b,d,e,a,c", names.join());
 });

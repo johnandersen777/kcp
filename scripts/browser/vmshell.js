@@ -43,6 +43,11 @@ export function isReleasing(contract) {
   return Boolean(contract?.release) && !FINISHED.has(contract?.phase ?? "Pending");
 }
 
+/** Feed order with Released contracts below everything else. */
+export function orderContracts(contracts) {
+  return [...contracts].sort((a, b) => (a?.phase === "Released") - (b?.phase === "Released"));
+}
+
 export function secretsPath(name) {
   return `contracts/${name}/secrets`;
 }

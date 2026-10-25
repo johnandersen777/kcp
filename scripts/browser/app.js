@@ -2770,7 +2770,7 @@ function applyComputeState(state) {
     addLog("info", `ComputeContract ${c.name} ${c.phase ?? "Pending"}${c.release ? " (release asked)" : ""}${c.message ? `: ${c.message}` : ""}`);
   }
   computeLastRender = render;
-  computeListEl.replaceChildren(...contracts.map(computeRow));
+  computeListEl.replaceChildren(...vmshell.orderContracts(contracts).map(computeRow));
   toastReadyShells(contracts);
 }
 
