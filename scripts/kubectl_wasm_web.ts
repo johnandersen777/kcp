@@ -300,8 +300,9 @@ Deno.serve({ hostname, port }, async (request) => {
   const canonical = canonicalRedirect(request, url);
   if (canonical) return canonical;
 
-  if (url.pathname === "/debug/control" && request.method === "GET") {
+  if (url.pathname === "/debug/control" && (request.method === "GET" || request.method === "HEAD")) {
     if (!debugControlPath) return new Response("debug control disabled", { status: 404, headers });
+    if (request.method === "HEAD") return new Response(null, { status: 204, headers });
     return controlStream(request, url.searchParams.get("session") ?? "");
   }
 

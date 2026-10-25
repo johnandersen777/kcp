@@ -3085,16 +3085,23 @@ const debugHandle = {
   },
 };
 
+// The browser closes an EventSource for good on a non-200 answer (the tunnel
+// answers 502 while the dev server restarts), so a closed source is reopened
+// with backoff; a server without --debug-control (404) is left alone.
+let debugControlRetryMs = 2_000;
 function startDebugControl() {
   if (!debugLog || typeof EventSource !== "function") return;
   const source = new EventSource(`/debug/control?session=${encodeURIComponent(debugSession)}`);
-  let opened = false;
   source.onopen = () => {
-    opened = true;
+    debugControlRetryMs = 2_000;
     debugSend("info", `debug control connected for session ${debugSession}`);
   };
-  source.onerror = () => {
-    if (!opened) source.close();
+  source.onerror = async () => {
+    if (source.readyState !== EventSource.CLOSED) return;
+    const status = await fetch(`/debug/control?session=probe`, { method: "HEAD" }).then((r) => r.status, () => 0);
+    if (status === 404 || status === 405) return;
+    setTimeout(startDebugControl, debugControlRetryMs);
+    debugControlRetryMs = Math.min(debugControlRetryMs * 2, 30_000);
   };
   source.onmessage = async (event) => {
     let cmd;
