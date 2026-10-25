@@ -113,8 +113,15 @@ const debugSession = (() => {
   }
 })();
 let debugQueue = [];
+// Lines go out ~100 ms after the first one queued, so a driven session
+// (debug control) sees terminal output and results promptly.
+let debugFlushTimer = null;
 function debugSend(level, message) {
   if (!debugLog) return;
+  debugFlushTimer ??= setTimeout(() => {
+    debugFlushTimer = null;
+    debugFlush();
+  }, 100);
   const limit = level === "result" ? 60_000 : 4000;
   debugQueue.push({ t: new Date().toISOString(), level, message: String(message).slice(0, limit) });
 }
@@ -131,7 +138,6 @@ function debugFlush() {
     .catch(() => {});
 }
 if (debugLog) {
-  setInterval(debugFlush, 500);
   addEventListener("error", (e) => debugSend("error", `uncaught: ${e.message} ${e.filename}:${e.lineno}`));
   addEventListener("unhandledrejection", (e) => debugSend("error", `unhandled rejection: ${e.reason}`));
   addEventListener("pagehide", debugFlush);
@@ -2200,15 +2206,6 @@ async function switchAccount() {
   }
 }
 
-function parseTTLSeconds(value) {
-  const text = value.trim();
-  if (!text) return null;
-  const match = text.match(/^(\d+)\s*(s|m|h|d)?$/i);
-  if (!match) throw new Error("TTL must look like 30m, 1h or 3600s");
-  const units = { s: 1, m: 60, h: 3600, d: 86400 };
-  return Number(match[1]) * units[(match[2] ?? "s").toLowerCase()];
-}
-
 function applyState(state) {
   if (!state) return;
   applyComputeState(state);
@@ -2277,8 +2274,6 @@ function initSocialwebUI() {
 // connects to contrib/wasm/sshclient/testpeer instead of a guest. Nothing
 // here loads kubectl: kcpREST talks to kcp directly.
 
-const computeSSHEl = document.getElementById("compute-ssh");
-const computeTTLEl = document.getElementById("compute-ttl");
 const computeRequestEl = document.getElementById("compute-request");
 const computeStatusEl = document.getElementById("compute-status");
 const computeListEl = document.getElementById("compute-list");
@@ -2322,9 +2317,7 @@ async function requestVM() {
   try {
     computeBusy = true;
     computeRequestEl.disabled = true;
-    const ssh = computeSSHEl.value.trim();
-    const sshKeys = ssh ? [ssh] : [];
-    const ttlSeconds = parseTTLSeconds(computeTTLEl.value);
+    const sshKeys = [];
     const name = vmshell.contractName();
     const wootty = await woottyServed();
     const shells = wootty ? "ssh over WebRTC and wootty" : "ssh over WebRTC (no wootty in this socialweb)";
@@ -2347,7 +2340,7 @@ async function requestVM() {
     }
     const identity = await kcpREST("GET", `${SOCIALWEB_API}/marketidentities/requester`).catch(() => null);
     const manifest = vmshell.contractManifest({
-      name, ownerDid: identity?.status?.did ?? "", wootty, sshKeys, ttlSeconds,
+      name, ownerDid: identity?.status?.did ?? "", wootty, sshKeys,
     });
     await kcpREST("POST", `${SOCIALWEB_API}/computecontracts`, manifest);
     setAppStatus(computeStatusEl, `${name} requested; waiting for bids`, "ok");

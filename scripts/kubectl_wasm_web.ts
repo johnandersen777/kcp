@@ -104,7 +104,7 @@ async function* controlLines(signal: AbortSignal): AsyncGenerator<string> {
       partial = lines.pop() ?? "";
       for (const line of lines) if (line.trim()) yield line;
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }
 

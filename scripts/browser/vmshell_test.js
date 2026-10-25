@@ -28,12 +28,12 @@ Deno.test("contract name is a DNS label", () => {
 Deno.test("manifest without wootty carries only the webrtc ssh tunnel", () => {
   const m = contractManifest({
     name: "vmshell-abc123", ownerDid: "did:plc:me",
-    sshKeys: ["ssh-ed25519 AAAA page"], ttlSeconds: 3600,
+    sshKeys: ["ssh-ed25519 AAAA page"],
   });
   assert(m.spec.bidderDids === undefined, "no bidders listed: the requester discovers them");
   assert(JSON.stringify(m.spec.tunnels) === '[{"tag":"ssh","port":22,"transport":"webrtc"}]', "tunnels");
   assert(m.spec.secretsRef === undefined, "no secretsRef");
-  assert(m.spec.sshAuthorizedKeys[0] === "ssh-ed25519 AAAA page" && m.spec.ttlSecondsAfterFinished === 3600, "keys, ttl");
+  assert(m.spec.sshAuthorizedKeys[0] === "ssh-ed25519 AAAA page" && m.spec.ttlSecondsAfterFinished === undefined, "keys, no ttl");
   assert(m.spec.ownerDid === "did:plc:me" && m.spec.userData === undefined, "owner, no userData");
 });
 

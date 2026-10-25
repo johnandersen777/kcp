@@ -57,7 +57,7 @@ export function secretsBundle(token) {
  * the page's key) and, with wootty, the opentunnel wootty tunnel and the
  * secretsRef of its token bundle.
  */
-export function contractManifest({ name, ownerDid, wootty = false, sshKeys = [], ttlSeconds = null }) {
+export function contractManifest({ name, ownerDid, wootty = false, sshKeys = [] }) {
   // No bidderDids: the requester's discovery picks the bidders.
   const spec = { vmName: name };
   spec.tunnels = [{ tag: SSH_TAG, port: 22, transport: "webrtc" }];
@@ -66,7 +66,6 @@ export function contractManifest({ name, ownerDid, wootty = false, sshKeys = [],
     spec.tunnels.unshift({ tag: WOOTTY_TAG, port: WOOTTY_PORT, transport: "opentunnel", shell: { envFile: WOOTTY_ENV } });
   }
   if (sshKeys.length > 0) spec.sshAuthorizedKeys = sshKeys;
-  if (ttlSeconds !== null) spec.ttlSecondsAfterFinished = ttlSeconds;
   if (ownerDid) spec.ownerDid = ownerDid;
   return {
     apiVersion: "socialweb.computer/v1alpha1",
