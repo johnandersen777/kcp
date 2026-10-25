@@ -59,9 +59,10 @@ func startMemStats() {
 			var ms runtime.MemStats
 			runtime.ReadMemStats(&ms)
 			mib := func(b uint64) float64 { return float64(b) / (1 << 20) }
-			fmt.Fprintf(os.Stderr, "memstats: sys=%.1fMiB heapSys=%.1fMiB heapInuse=%.1fMiB heapIdle=%.1fMiB heapReleased=%.1fMiB heapObjects=%d stackInuse=%.1fMiB goroutines=%d numGC=%d nextGC=%.1fMiB\n",
+			fmt.Fprintf(os.Stderr, "memstats: sys=%.1fMiB heapSys=%.1fMiB heapInuse=%.1fMiB heapIdle=%.1fMiB heapReleased=%.1fMiB heapObjects=%d stackInuse=%.1fMiB goroutines=%d numGC=%d nextGC=%.1fMiB totalAlloc=%.0fMiB mallocs=%d gcPauseTotal=%s gcCPU=%.3f\n",
 				mib(ms.Sys), mib(ms.HeapSys), mib(ms.HeapInuse), mib(ms.HeapIdle), mib(ms.HeapReleased),
-				ms.HeapObjects, mib(ms.StackInuse), runtime.NumGoroutine(), ms.NumGC, mib(ms.NextGC))
+				ms.HeapObjects, mib(ms.StackInuse), runtime.NumGoroutine(), ms.NumGC, mib(ms.NextGC),
+				mib(ms.TotalAlloc), ms.Mallocs, time.Duration(ms.PauseTotalNs).Round(time.Millisecond), ms.GCCPUFraction)
 		}
 	}()
 }
