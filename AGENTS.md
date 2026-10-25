@@ -91,6 +91,11 @@ bash $D/tunnel-watchdog.sh 2>&1 | tee -a $D/watchdog.log    # background
   ("no route configured for host", a 404, from fedproxy = the tunnel is down).
 - Production is static files; the `/debug/*` hooks exist only on this dev
   server. Profiles turn on only when `HEAD /debug/control` answers 204.
+  `scripts/deploy.sh` builds `public/` from `bin/wasm`, writes the OAuth
+  client metadata for https://shell.socialweb.computer and ships it to the
+  socialweb.computer host (`root@socialweb.computer -p 1997`, Caddy site
+  `/etc/caddy/sites/shell.socialweb.computer.caddy`). Another origin is
+  another OAuth client and browser storage: sign in again there.
 - iOS gets low-memory mode automatically (no snapshot, lazy kubectl, GOGC 25,
   watch cache off). iOS kills the tab near ~630 MiB of wasm memory.
 
