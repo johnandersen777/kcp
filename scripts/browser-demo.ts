@@ -148,9 +148,9 @@ function next(pred: (l: Line) => boolean, timeoutMs: number, what: string): Prom
   });
 }
 
-// A page line already seen or still to come.
+// The latest page line already seen, or the next one to come.
 function have(pred: (l: Line) => boolean, timeoutMs: number, what: string): Promise<Line> {
-  const hit = seen.find(pred);
+  const hit = seen.findLast(pred);
   return hit ? Promise.resolve(hit) : next(pred, timeoutMs, what);
 }
 
