@@ -51,6 +51,7 @@ fi
 git -C "${work}" clean -fdx >/dev/null
 
 echo "Preparing adapted indigo copy for js/wasm..."
+(cd "${work}" && GOTOOLCHAIN="${cli_toolchain}" go mod download)
 indigo_src="$(cd "${work}" && GOTOOLCHAIN="${cli_toolchain}" go list -m -f '{{.Dir}}' github.com/bluesky-social/indigo)"
 indigo_dir="${work}/indigo"
 rm -rf "${indigo_dir}"

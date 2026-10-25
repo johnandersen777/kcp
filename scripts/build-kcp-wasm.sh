@@ -35,7 +35,7 @@ echo "Building kcp for js/wasm (the kcp command's wasm build mode)..."
 deno run --allow-read --allow-write "${repo_root}/scripts/wasm_globals.js" "${out_dir}/kcp.wasm"
 
 goroot="$(go env GOROOT)"
-cp "${goroot}/lib/wasm/wasm_exec.js" "${out_dir}/wasm_exec.js"
+install -m 0644 "${goroot}/lib/wasm/wasm_exec.js" "${out_dir}/wasm_exec.js"
 
 # ~282 MB becomes ~43 MB; kubectl_wasm_web.ts and the browser workers
 # prefer this sibling.

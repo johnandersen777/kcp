@@ -57,5 +57,5 @@ for file in kubectl.wasm kubectl-slim.wasm; do
   gzip -9 -n -c "${outdir}/${file}" > "${outdir}/${file}.gz"
 done
 
-cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "${outdir}/wasm_exec.js"
+install -m 0644 "$(go env GOROOT)/lib/wasm/wasm_exec.js" "${outdir}/wasm_exec.js"
 echo "Built ${outdir}/kubectl.wasm ${outdir}/kubectl-slim.wasm"

@@ -71,7 +71,7 @@ echo "building combined kcp + socialweb wasm..."
 # instance into a per-user memory snapshot (scripts/browser/wasm_snapshot.js).
 deno run --allow-read --allow-write "${repo_root}/scripts/wasm_globals.js" "${out}"
 
-cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$(dirname "${out}")/wasm_exec.js"
+install -m 0644 "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$(dirname "${out}")/wasm_exec.js"
 # The page server and the browser workers prefer this sibling; gzip -9 takes
 # ~269 MB to ~41 MB (browsers can only inflate gzip, not brotli/zstd).
 gzip -9 -n -c "${out}" > "${out}.gz"

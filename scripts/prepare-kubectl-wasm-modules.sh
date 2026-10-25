@@ -61,7 +61,7 @@ copy_module() {
   local module="$1" dest="$2"
   if [[ ! -d "${dest}" ]]; then
     local dir
-    dir="$(cd "${module_dir}" && go list -m -f '{{.Dir}}' "${module}")"
+    dir="$(cd "${module_dir}" && go mod download "${module}" && go list -m -f '{{.Dir}}' "${module}")"
     cp -a "${dir}" "${dest}"
     chmod -R u+w "${dest}"
   fi

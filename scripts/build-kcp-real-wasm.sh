@@ -39,5 +39,5 @@ echo "Building the real kcp server for js/wasm..."
     ./cmd/kcp
 )
 
-cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "${out_dir}/wasm_exec.js"
+install -m 0644 "$(go env GOROOT)/lib/wasm/wasm_exec.js" "${out_dir}/wasm_exec.js"
 echo "Built ${out_dir}/kcp-real.wasm"
