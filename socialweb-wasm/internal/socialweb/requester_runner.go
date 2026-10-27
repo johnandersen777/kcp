@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 
 	"k8s.io/apimachinery/pkg/types"
 
@@ -12,9 +13,12 @@ import (
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/app/compose"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/bus"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/component"
+	"github.com/johnandersen777/socialweb-computer-kcp/internal/contract/tunnel"
 	ctlruntime "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/runtime"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/oauthcallback"
 	servicesrequester "github.com/johnandersen777/socialweb-computer-kcp/internal/services/requester"
+
+	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserwebrtc"
 )
 
 // RequesterRunner starts the real requester service for each Requester object
@@ -52,6 +56,9 @@ func RegisterRequesterRunner(m *ctlruntime.Manager, opts RequesterRunnerOptions)
 			Instance:       in,
 			Egress:         component.Egress{Log: log},
 			OAuthCallbacks: opts.OAuthCallbacks,
+			OpenIngress: func(handler http.Handler, options tunnel.ServiceOptions) (tunnel.Service, error) {
+				return browserwebrtc.NewService(browserwebrtc.Config{Handler: handler, Log: log, Options: options})
+			},
 		})
 	})); err != nil {
 		return nil, err
@@ -82,15 +89,15 @@ func (r *RequesterRunner) Reconcile(ctx context.Context, req ctlruntime.Request,
 		return ctlruntime.Result{}, err
 	}
 	spec := component.ComponentSpec{
-		UID:           types.UID(obj.UID),
-		Group:         v1alpha1.GroupName,
-		Kind:          servicesrequester.Kind,
-		Name:          obj.Name,
-		Workspace:     req.Workspace,
-		Generation:    obj.Generation,
-		Suspend:       obj.Spec.Suspend,
-		Deleting:      !obj.DeletionTimestamp.IsZero(),
-		StateDir:      obj.Spec.StateDir,
+		UID:         types.UID(obj.UID),
+		Group:       v1alpha1.GroupName,
+		Kind:        servicesrequester.Kind,
+		Name:        obj.Name,
+		Workspace:   req.Workspace,
+		Generation:  obj.Generation,
+		Suspend:     obj.Spec.Suspend,
+		Deleting:    !obj.DeletionTimestamp.IsZero(),
+		StateDir:    obj.Spec.StateDir,
 		Spec:        raw,
 		Annotations: obj.Annotations,
 		Labels:      obj.Labels,

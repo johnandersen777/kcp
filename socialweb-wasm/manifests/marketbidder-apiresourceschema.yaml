@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-33.marketbidders.socialweb.computer
+  name: v1alpha1-36.marketbidders.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -98,6 +98,11 @@ spec:
                     properties:
                       provider:
                         type: string
+                        enum:
+                          - webrtc
+                          - xrpc-subscription
+                          - opentunnel
+                          - iroh
                       ingressRef:
                         type: object
                         properties:
@@ -173,6 +178,23 @@ spec:
                               - v2
                           localHost:
                             type: string
+                      webrtc:
+                        type: object
+                        properties:
+                          stunUrls:
+                            type: array
+                            items:
+                              type: string
+                          sessionTtlSeconds:
+                            type: integer
+                            format: int32
+                            default: 600
+                            minimum: 1
+                          maxSessions:
+                            type: integer
+                            format: int32
+                            default: 64
+                            minimum: 1
                   discoveryRelays:
                     type: array
                     items:
@@ -269,6 +291,11 @@ spec:
                 properties:
                   provider:
                     type: string
+                    enum:
+                      - webrtc
+                      - xrpc-subscription
+                      - opentunnel
+                      - iroh
                   ingressRef:
                     type: object
                     properties:
@@ -344,6 +371,23 @@ spec:
                           - v2
                       localHost:
                         type: string
+                  webrtc:
+                    type: object
+                    properties:
+                      stunUrls:
+                        type: array
+                        items:
+                          type: string
+                      sessionTtlSeconds:
+                        type: integer
+                        format: int32
+                        default: 600
+                        minimum: 1
+                      maxSessions:
+                        type: integer
+                        format: int32
+                        default: 64
+                        minimum: 1
               policy:
                 type: string
               guestNetwork:
@@ -506,6 +550,11 @@ spec:
                       properties:
                         provider:
                           type: string
+                          enum:
+                            - webrtc
+                            - xrpc-subscription
+                            - opentunnel
+                            - iroh
                         ingressRef:
                           type: object
                           properties:
@@ -581,6 +630,23 @@ spec:
                                 - v2
                             localHost:
                               type: string
+                        webrtc:
+                          type: object
+                          properties:
+                            stunUrls:
+                              type: array
+                              items:
+                                type: string
+                            sessionTtlSeconds:
+                              type: integer
+                              format: int32
+                              default: 600
+                              minimum: 1
+                            maxSessions:
+                              type: integer
+                              format: int32
+                              default: 64
+                              minimum: 1
                     settings:
                       type: object
                       properties:

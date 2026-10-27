@@ -524,7 +524,11 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 			// and no ingress Exposure. Both (the page's Ingress mode) adds the
 			// relay-hosted XRPC endpoints. Guest secrets fall back to a record
 			// sealed to the guest's key either way.
-			Comms:           &v1alpha1.MarketComms{Mode: commsMode(cfg.CommsMode)},
+			Comms: &v1alpha1.MarketComms{Mode: commsMode(cfg.CommsMode)},
+			RequesterIngress: &v1alpha1.IngressConfig{
+				Provider: v1alpha1.IngressProviderWebRTC,
+				WebRTC:   &v1alpha1.IngressWebRTCConfig{},
+			},
 			SecretsFallback: v1alpha1.SecretsFallbackSealed,
 		},
 	}
@@ -536,10 +540,12 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 	// Only the comms mode and secrets fallback, which the page owns, are
 	// brought up to date (restored state from before Firehose).
 	if cur, err := kube.Get[v1alpha1.MarketRequester](ctx, kc.Resource(v1alpha1.MarketRequesterGVR), "app"); err == nil {
-		if cur.Spec.Comms != nil && cur.Spec.Comms.Mode == obj.Spec.Comms.Mode && cur.Spec.SecretsFallback == obj.Spec.SecretsFallback {
+		if cur.Spec.Comms != nil && cur.Spec.Comms.Mode == obj.Spec.Comms.Mode &&
+			cur.Spec.RequesterIngress != nil && cur.Spec.RequesterIngress.ProviderName() == v1alpha1.IngressProviderWebRTC &&
+			cur.Spec.SecretsFallback == obj.Spec.SecretsFallback {
 			return nil
 		}
-		patch, err := json.Marshal(map[string]any{"spec": map[string]any{"comms": obj.Spec.Comms, "secretsFallback": obj.Spec.SecretsFallback}})
+		patch, err := json.Marshal(map[string]any{"spec": map[string]any{"comms": obj.Spec.Comms, "requesterIngress": obj.Spec.RequesterIngress, "secretsFallback": obj.Spec.SecretsFallback}})
 		if err != nil {
 			return err
 		}

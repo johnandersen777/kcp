@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-21.requesters.socialweb.computer
+  name: v1alpha1-23.requesters.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -106,6 +106,11 @@ spec:
                     properties:
                       provider:
                         type: string
+                        enum:
+                          - webrtc
+                          - xrpc-subscription
+                          - opentunnel
+                          - iroh
                       ingressRef:
                         type: object
                         properties:
@@ -181,6 +186,23 @@ spec:
                               - v2
                           localHost:
                             type: string
+                      webrtc:
+                        type: object
+                        properties:
+                          stunUrls:
+                            type: array
+                            items:
+                              type: string
+                          sessionTtlSeconds:
+                            type: integer
+                            format: int32
+                            default: 600
+                            minimum: 1
+                          maxSessions:
+                            type: integer
+                            format: int32
+                            default: 64
+                            minimum: 1
                   discoveryRelays:
                     type: array
                     items:
@@ -469,6 +491,108 @@ spec:
                     type: array
                     items:
                       type: string
+              ingress:
+                type: object
+                properties:
+                  provider:
+                    type: string
+                    enum:
+                      - webrtc
+                      - xrpc-subscription
+                      - opentunnel
+                      - iroh
+                  ingressRef:
+                    type: object
+                    properties:
+                      group:
+                        type: string
+                      kind:
+                        type: string
+                        maxLength: 63
+                      name:
+                        type: string
+                        maxLength: 253
+                      workspace:
+                        type: string
+                    required:
+                      - kind
+                      - name
+                  publicHost:
+                    type: string
+                  xrpc:
+                    type: object
+                    properties:
+                      ingressProxyHost:
+                        type: string
+                      relayURL:
+                        type: string
+                      relayRef:
+                        type: object
+                        properties:
+                          group:
+                            type: string
+                          kind:
+                            type: string
+                            maxLength: 63
+                          name:
+                            type: string
+                            maxLength: 253
+                          workspace:
+                            type: string
+                        required:
+                          - kind
+                          - name
+                      identityRef:
+                        type: object
+                        properties:
+                          group:
+                            type: string
+                          kind:
+                            type: string
+                            maxLength: 63
+                          name:
+                            type: string
+                            maxLength: 253
+                          workspace:
+                            type: string
+                        required:
+                          - kind
+                          - name
+                  opentunnel:
+                    type: object
+                    properties:
+                      command:
+                        type: array
+                        items:
+                          type: string
+                      routeName:
+                        type: string
+                        maxLength: 63
+                        pattern: ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
+                      proxyProtocol:
+                        type: string
+                        enum:
+                          - v1
+                          - v2
+                      localHost:
+                        type: string
+                  webrtc:
+                    type: object
+                    properties:
+                      stunUrls:
+                        type: array
+                        items:
+                          type: string
+                      sessionTtlSeconds:
+                        type: integer
+                        format: int32
+                        default: 600
+                        minimum: 1
+                      maxSessions:
+                        type: integer
+                        format: int32
+                        default: 64
+                        minimum: 1
               secretsFallback:
                 type: string
                 enum:

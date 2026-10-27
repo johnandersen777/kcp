@@ -156,6 +156,13 @@ globalThis.__socialwebIngress = (json) => {
   queueMicrotask(() => ingress.apply(list));
 };
 
+// WebRTC ingress (webrtc_ingress.js): Go offers a datachannel to a bidder
+// during submitRfp and serves that bidder's XRPC calls over it. Only where
+// the worker exposes RTCPeerConnection; Go disables the ingress otherwise and
+// keeps the relay and firehose paths.
+const webRTCIngress = await import("./webrtc_ingress.js");
+if (webRTCIngress.supported()) globalThis.__socialwebWebRTC = webRTCIngress;
+
 // Socialweb vault state (OAuth session, pending PKCE, credentials) is small;
 // the page persists it under the "socialweb" IndexedDB key.
 globalThis.__socialwebPersist = (snapshot) => {

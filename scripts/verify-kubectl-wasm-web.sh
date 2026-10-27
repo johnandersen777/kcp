@@ -93,7 +93,7 @@ app_js="$(curl -sf "http://${host}:${port}/app.js")"
 [[ "${app_js}" == *"just-bash"* ]] || fail "app.js does not load just-bash"
 [[ "${app_js}" == *"cli_worker.js"* ]] || fail "app.js does not load cli_worker.js"
 
-for asset in app.js diagram.js kcp_worker.js kubectl_worker.js cli_worker.js fs_shim.js wasm_exec.js wasm_exec_cli.js; do
+for asset in app.js diagram.js kcp_worker.js kubectl_worker.js cli_worker.js fs_shim.js webrtc_ingress.js wasm_exec.js wasm_exec_cli.js; do
   curl -sf -o /dev/null "http://${host}:${port}/${asset}" || fail "missing ${asset}"
 done
 for wasm in kcp.wasm kubectl.wasm goat.wasm yq.wasm; do

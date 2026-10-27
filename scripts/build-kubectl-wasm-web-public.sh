@@ -67,6 +67,7 @@ assets=(
   ingress_manager.js
   vmshell.js
   webrtc_guest.js
+  webrtc_ingress.js
   ssh_worker.js
   ssh_cmd.js
   wasm_snapshot.js
