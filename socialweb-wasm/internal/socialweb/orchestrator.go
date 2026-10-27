@@ -27,6 +27,7 @@ import (
 	"github.com/johnandersen777/socialweb-computer-kcp/api/v1alpha1"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/app/compose"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/app/marketrequester"
+	"github.com/johnandersen777/socialweb-computer-kcp/internal/sandbox/worker"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/atproto/oauth"
 	atpds "github.com/johnandersen777/socialweb-computer-kcp/internal/atproto/pds"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/atproto/pdsclient"
@@ -312,7 +313,7 @@ func Start(parent context.Context, cfg Config) (*Orchestrator, error) {
 		return nil, err
 	}
 	engines := pecontroller.NewEngineManager(pecontroller.NewDefaultEngineFactory(pecontroller.Config{
-		DenoPath:       "wasm-unavailable",
+		Sandbox:        worker.New(),
 		DisableActions: true,
 		Log: func(level, msg string, meta map[string]any) {
 			log.Info(msg, "level", level)

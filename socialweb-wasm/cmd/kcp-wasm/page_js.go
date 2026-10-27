@@ -8,6 +8,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"syscall/js"
+	"time"
+
+	"github.com/johnandersen777/socialweb-computer-kcp/internal/contract/sandbox"
+	"github.com/johnandersen777/socialweb-computer-kcp/internal/sandbox/worker"
 
 	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserinfra/exposure"
 	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/socialweb"
@@ -25,6 +29,7 @@ const defaultIngressProxyHost = "xrpc.fedproxy.com"
 // Each takes (requestJSON, callbackID) and answers through
 // __kcpResolve(callbackID, responseJSON) like kcpHandleRequest.
 func registerPageExports(orc *socialweb.Orchestrator) {
+	registerSandboxExports()
 	pageExport("socialwebVaultPut", func(raw string) any {
 		var in socialweb.ContractSecrets
 		if err := json.Unmarshal([]byte(raw), &in); err != nil {
@@ -111,6 +116,37 @@ func pageExport(name string, fn func(raw string) any) {
 		}()
 		return nil
 	}))
+}
+
+// registerSandboxExports exposes the Web Worker sandbox runner: the same
+// sandbox.Runner a deno-kind compute workload runs under, executed in the page
+// instead of a deno process. The answer arrives through __kcpResolve like every
+// page export, because a synchronous wait would block the event loop the
+// worker's message must arrive on.
+func registerSandboxExports() {
+	runner := worker.New()
+	js.Global().Set("socialwebSandboxAvailable", js.FuncOf(func(js.Value, []js.Value) any {
+		return runner.Available()
+	}))
+	pageExport("socialwebSandboxRun", func(raw string) any {
+		var in struct {
+			Source    string `json:"source"`
+			TimeoutMs int    `json:"timeoutMs"`
+		}
+		if err := json.Unmarshal([]byte(raw), &in); err != nil {
+			return failure(400, err)
+		}
+		timeout := 10 * time.Second
+		if in.TimeoutMs > 0 {
+			timeout = time.Duration(in.TimeoutMs) * time.Millisecond
+		}
+		result, err := runner.Run(context.Background(), sandbox.Program{Source: in.Source, Timeout: timeout})
+		out := map[string]any{"exitCode": result.ExitCode, "timedOut": result.TimedOut, "stdout": result.Stdout, "stderr": result.Stderr}
+		if err != nil {
+			out["error"] = err.Error()
+		}
+		return out
+	})
 }
 
 func failure(status int, err error) map[string]any {
