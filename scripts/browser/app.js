@@ -2416,7 +2416,8 @@ let lastFeedState = null;
 let computeBusy = false;
 let computeReleasing = false;
 let computeLastRender = "";
-const computeReleaseAsked = new Set();
+// Contract name -> the spec.releaseRequestedAt this tab last sent.
+const computeReleaseAsked = new Map();
 // Contracts already marked Released in the tab infra after a terminal phase.
 const infraAutoReleased = new Set();
 let infraAutoSync = false;
@@ -2674,29 +2675,30 @@ async function requestVM() {
   // computeBusy clears when the status feed shows the new contract.
 }
 
+// Every Release (button, Release again, d.release, the demo's leftover
+// sweep) applies spec.release with a fresh spec.releaseRequestedAt, then
+// marks a session-infra entry Released (vmshell.requestRelease).
 async function releaseContract(name) {
-  computeReleaseAsked.add(name);
+  const previous = computeReleaseAsked.get(name);
+  computeReleaseAsked.set(name, new Date().toISOString()); // hides Release again while in flight
   computeLastRender = "";
+  let requestedAt;
   try {
-    // A session-infra contract is released through its infra (the infra
-    // controller owns the ComputeContract spec); older ones directly.
-    const cc = await kcpREST("GET", `${SOCIALWEB_API}/computecontracts/${name}`).catch(() => null);
-    const owner = (cc?.metadata?.ownerReferences ?? []).find((o) => o.kind === "EphemeralInfra");
-    const short = cc?.metadata?.labels?.["infra.socialweb.computer/contract"];
-    const infra = owner && await kcpREST("GET", `${SOCIALWEB_API}/ephemeralinfras/${owner.name}`).catch(() => null);
-    const entry = (infra?.spec?.contracts ?? []).find((c) => c.name === short || name.endsWith(`-${c.name}`));
-    if (infra && entry) {
-      await setInfraContract(owner.name, { ...entry, state: "Released" }, null);
-    } else {
-      await kcpREST("PATCH", `${SOCIALWEB_API}/computecontracts/${name}`, { spec: { release: true } },
-        "application/merge-patch+json");
-    }
+    requestedAt = await vmshell.requestRelease({
+      rest: kcpREST,
+      api: SOCIALWEB_API,
+      name,
+      setInfraContract: (infra, entry) => setInfraContract(infra, entry, null),
+    });
+    computeReleaseAsked.set(name, requestedAt);
   } catch (err) {
-    computeReleaseAsked.delete(name);
+    if (previous === undefined) computeReleaseAsked.delete(name);
+    else computeReleaseAsked.set(name, previous);
     setAppStatus(computeStatusEl, String(err.message ?? err), "err");
     return;
   }
-  addLog("info", `ComputeContract ${name} released`);
+  computeLastRender = "";
+  addLog("info", `ComputeContract ${name} released (releaseRequestedAt ${requestedAt})`);
   void webrtcGuest.deleteSSHKey(name).catch(() => {});
 }
 
@@ -2711,15 +2713,27 @@ addEventListener("beforeunload", (event) => {
 
 function computeRow(contract) {
   const name = contract.name;
-  const phase = contract.phase ?? "Pending";
   const li = document.createElement("li");
   const head = document.createElement("div");
   const title = document.createElement("strong");
   title.textContent = name;
   const phaseEl = document.createElement("span");
-  phaseEl.className = `phase-${phase}`;
-  phaseEl.textContent = ` ${phase}${contract.release && phase !== "Released" ? " · releasing" : ""}`;
+  const label = vmshell.phaseLabel(contract);
+  phaseEl.className = `phase-${label.phase}`;
+  phaseEl.textContent = label.text;
   head.append(title, phaseEl);
+  if (vmshell.canReleaseAgain(contract, computeReleaseAsked.get(name))) {
+    // A release the requester gave up on (ReleaseFailed): a newer
+    // releaseRequestedAt restarts it without a tab reload.
+    const again = document.createElement("button");
+    again.type = "button";
+    again.textContent = "Release again";
+    again.addEventListener("click", () => {
+      again.disabled = true;
+      void releaseContract(name);
+    });
+    head.append(again);
+  }
   if (vmshell.isActive(contract) && !computeReleaseAsked.has(name)) {
     const release = document.createElement("button");
     release.type = "button";
@@ -2740,7 +2754,7 @@ function computeRow(contract) {
     contract.guestRequester ? `R2: ${contract.guestRequester.did} ${contract.guestRequester.state ?? "Pending"}` +
       `${contract.guestRequester.message ? ` (${contract.guestRequester.message})` : ""}` : "",
     contract.secretsFetchedAt ? `secrets fetched ${contract.secretsFetchedAt}` : "",
-    contract.message ?? "",
+    vmshell.releasePending(contract) ? "" : contract.message ?? "",
   ].filter(Boolean).join(" · ");
   li.append(head, detail);
   if (vmshell.isActive(contract) && shellsOf(contract).mine) li.append(shellAction(contract));

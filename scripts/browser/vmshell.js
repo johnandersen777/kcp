@@ -190,7 +190,95 @@ export function isActive(contract) {
 
 /** A contract whose release was asked for but has not finished. */
 export function isReleasing(contract) {
-  return Boolean(contract?.release) && !FINISHED.has(contract?.phase ?? "Pending");
+  return (Boolean(contract?.release) && !FINISHED.has(contract?.phase ?? "Pending")) || releasePending(contract);
+}
+
+// Release requests (socialweb rc127 H1, computecontracts 30): every Release
+// server-side applies spec.release with spec.releaseRequestedAt (now); the
+// requester copies the request it answered into status.release.requestedAt
+// (the feed's releaseAnsweredAt), and a newer request restarts a Failed
+// contract whose ReleaseFailed condition is True. The manager is the one
+// socialweb's own release intent (session.go releaseHeldContract) applies
+// exactly these two fields with, force on both sides
+// (marketintents.FieldManagerContractRelease), so neither writer conflicts
+// or drops the other's fields. Not the composer manager: for a session-infra
+// contract that is socialweb.computer/ephemeralinfra, the EphemeralInfra
+// controller's own manager, which owns the whole spec it created; an apply
+// with only these two fields under it would remove the rest. The infra
+// controller only sets spec.release while it is still false, so the page
+// applies first and then marks the infra entry Released.
+export const RELEASE_FIELD_MANAGER = "socialweb.computer/requester-release";
+
+/** spec.releaseRequestedAt for a Release now: strictly after previous, so a second Release always differs. */
+export function releaseRequestedAt(previous = "", now = new Date()) {
+  const before = Date.parse(previous ?? "");
+  const at = Number.isNaN(before) ? now.getTime() : Math.max(now.getTime(), before + 1);
+  return new Date(at).toISOString();
+}
+
+/** The server-side apply that releases ComputeContract name. */
+export function releaseApply(api, name, requestedAt) {
+  return {
+    path: `${api}/computecontracts/${name}?fieldManager=${encodeURIComponent(RELEASE_FIELD_MANAGER)}&force=true`,
+    contentType: "application/apply-patch+yaml",
+    body: {
+      apiVersion: "socialweb.computer/v1alpha1",
+      kind: "ComputeContract",
+      metadata: { name },
+      spec: { release: true, releaseRequestedAt: requestedAt },
+    },
+  };
+}
+
+/**
+ * Releases ComputeContract name (the Release button, d.release and so the
+ * demo's leftover sweep): applies spec.release + a fresh releaseRequestedAt,
+ * then marks a session-infra entry Released so the record says terminated.
+ * rest(method, path, body, contentType) is kcpREST; setInfraContract(infra,
+ * entry) is the page's queued infra patch. Returns the requestedAt sent.
+ */
+export async function requestRelease({ rest, api, name, setInfraContract, now = new Date() }) {
+  const cc = await rest("GET", `${api}/computecontracts/${name}`);
+  if (!cc) throw new Error(`ComputeContract ${name} not found`);
+  const requestedAt = releaseRequestedAt(cc.spec?.releaseRequestedAt, now);
+  const apply = releaseApply(api, name, requestedAt);
+  await rest("PATCH", apply.path, apply.body, apply.contentType);
+  const owner = (cc.metadata?.ownerReferences ?? []).find((o) => o.kind === "EphemeralInfra");
+  if (owner) {
+    const short = cc.metadata?.labels?.["infra.socialweb.computer/contract"];
+    const infra = await rest("GET", `${api}/ephemeralinfras/${owner.name}`).catch(() => null);
+    const entry = (infra?.spec?.contracts ?? []).find((c) => c.name === short || name.endsWith(`-${c.name}`));
+    if (entry && entry.state !== "Released") await setInfraContract(owner.name, { ...entry, state: "Released" });
+  }
+  return requestedAt;
+}
+
+/** status.release answers the current Release (a contract without releaseRequestedAt predates rc127: always). */
+export function releaseAnswered(contract) {
+  const requested = contract?.releaseRequestedAt ?? "";
+  return !requested || (contract?.releaseAnsweredAt ?? "") === requested;
+}
+
+/** A failed release with a newer, unanswered Release: the requester restarts it, so it is pending, not Failed. */
+export function releasePending(contract) {
+  return Boolean(contract?.release) && contract?.phase === "Failed" && Boolean(contract?.releaseFailed) &&
+    !releaseAnswered(contract);
+}
+
+/**
+ * The Release again button: a failed release whose outcome answers the
+ * latest request, and nothing newer sent from this tab (sentAt).
+ */
+export function canReleaseAgain(contract, sentAt = "") {
+  return Boolean(contract?.release) && contract?.phase === "Failed" && Boolean(contract?.releaseFailed) &&
+    releaseAnswered(contract) && !(sentAt && sentAt > (contract?.releaseRequestedAt ?? ""));
+}
+
+/** The row's phase: a pending re-release shows as Releasing, not the earlier Failed. */
+export function phaseLabel(contract) {
+  const phase = contract?.phase ?? "Pending";
+  if (releasePending(contract)) return { phase: "Releasing", text: ` Releasing · release requested ${contract.releaseRequestedAt}` };
+  return { phase, text: ` ${phase}${contract?.release && phase !== "Released" && phase !== "Failed" ? " · releasing" : ""}` };
 }
 
 /** Feed order with Released contracts below everything else. */
@@ -350,7 +438,10 @@ export function releaseNotes(contract, contractEvents = [], now = Date.now()) {
   }
   const revokes = { Pending: "tokens: revoking", Done: "tokens: revoked", Abandoned: "tokens: revoke ABANDONED, revoke them by hand" };
   if (contract?.atircRevokes) notes.push(revokes[contract.atircRevokes] ?? `tokens: ${contract.atircRevokes}`);
-  return notes;
+  if (!releasePending(contract)) return notes;
+  // The outcomes above answer an earlier Release; the requester restarts it.
+  return [`release: requested ${contract.releaseRequestedAt}, pending (the earlier release failed${contract.message ? `: ${contract.message}` : ""})`,
+    ...notes.map((note) => `${note} (earlier attempt)`)];
 }
 
 // ", ~N min left" for the requester's remaining wait, "" without a time.
