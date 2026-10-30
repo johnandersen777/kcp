@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-29.computecontracts.socialweb.computer
+  name: v1alpha1-30.computecontracts.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -141,6 +141,8 @@ spec:
                   - path
               release:
                 type: boolean
+              releaseRequestedAt:
+                type: string
               ownerDid:
                 type: string
               adopt:
@@ -752,6 +754,8 @@ spec:
                   attempts:
                     type: integer
                   lastError:
+                    type: string
+                  requestedAt:
                     type: string
               pendingEvents:
                 type: array
