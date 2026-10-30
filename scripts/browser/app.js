@@ -2521,6 +2521,7 @@ function identityAction(action) {
 // A changed spec makes the controller issue a URL for it; an unchanged one
 // keeps the URL it has, which a callback spends.
 async function startSignIn() {
+  identityGeneration++;
   setSignIn({ step: "preparing", error: "" });
   await patchRequesterIdentity();
 }
@@ -2573,9 +2574,11 @@ async function openSignInPopup() {
 // session, so the controller starts a fresh authorization. Builds without the
 // export can still switch to a named account.
 async function signOutIdentity() {
+  identityGeneration++;
   setSignIn({ step: "signingOut", error: "" });
   try {
-    await socialwebCall("socialwebSignOut", { workspace: "root", name: "requester" });
+    // As long as a queued Request VM waits for kcp (a slow cold boot).
+    await socialwebCall("socialwebSignOut", { workspace: "root", name: "requester" }, 30_000, REQUEST_KCP_WAIT_MS);
   } catch (err) {
     if (!/not available/.test(err.message)) throw err;
     setSignIn({ step: "idle", notice: "This kcp build cannot sign out yet. To use another account, type its handle and tap Switch account." });
@@ -2586,6 +2589,7 @@ async function signOutIdentity() {
 }
 
 async function switchAccount() {
+  identityGeneration++;
   const typed = normalizeHandle(identityHandleEl.value);
   const current = signIn.account?.did === identityState?.did ? normalizeHandle(signIn.account?.handle) : "";
   if (typed && typed !== current && typed !== identityState?.did) return startSignIn();
@@ -2733,8 +2737,8 @@ const infraAutoReleased = new Set();
 let infraAutoSync = false;
 
 // socialwebCall invokes a page-only Go export through kcp_worker.js.
-async function socialwebCall(fn, payload, timeoutMs = 30_000) {
-  const worker = await kcpWorkerReady();
+async function socialwebCall(fn, payload, timeoutMs = 30_000, readyWaitMs = undefined) {
+  const worker = await kcpWorkerReady(readyWaitMs);
   const id = nextPageRequestID--;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -2816,10 +2820,10 @@ async function waitInfraRecord(name, did, timeoutMs = 60_000) {
 // object. Existing record bindings are repaired, and the record must be
 // synced before the caller adds its first contract (the first sync pulls an
 // existing record and would otherwise erase it).
-async function sessionInfra(onStep = () => {}, expectDid = "") {
+async function sessionInfra(onStep = () => {}, expectDid = "", expectGen = identityGeneration) {
   const did = identityState?.phase === "Ready" ? identityState.did : "";
   if (!did) throw new Error("sign in before requesting a VM");
-  if (expectDid && !identityReadyFor(expectDid)) throw new Error("the signed-in identity changed or is signing out; request again");
+  if (expectDid && !identityReadyFor(expectDid, expectGen)) throw new Error("the signed-in identity changed or is signing out; request again");
   try {
     sessionStorage.removeItem("socialweb.sessionInfra");
   } catch {
@@ -3011,8 +3015,13 @@ async function markFinishedInfraContracts(contracts) {
 
 // Request VM's own state: the identity it was clicked for must still be
 // signed in (a Sign out may run while the request waits for kcp).
-function identityReadyFor(did) {
-  return Boolean(did) && identityState?.phase === "Ready" && identityState.did === did && signIn.step !== "signingOut";
+// identityGeneration is bumped synchronously by every Sign in, Switch
+// account and Sign out tap; signIn.step alone resets to idle after
+// GRACE_MS while kcp may still boot (review page-rc130 e0707955c, A).
+let identityGeneration = 0;
+function identityReadyFor(did, gen) {
+  return Boolean(did) && identityState?.phase === "Ready" && identityState.did === did &&
+    signIn.step !== "signingOut" && gen === identityGeneration;
 }
 
 // How long a queued click waits for kcp (a slow phone cold boot takes minutes).
@@ -3043,8 +3052,10 @@ const runRequest = createRequestRunner({
 
 function requestVM() {
   const did = identityState?.phase === "Ready" ? identityState.did : "";
+  const gen = identityGeneration;
   return runRequest({
     did,
+    gen,
     prepare: async () => {
       const association = vmshell.associationSubject(computeAssociateEl.value, did);
       if (association.error) return { error: association.error };
@@ -3053,19 +3064,19 @@ function requestVM() {
       }
       return association;
     },
-    request: (association) => requestVMFor(did, association),
+    request: (association) => requestVMFor(did, gen, association),
   });
 }
 
 // The request itself, for the identity did it was clicked for. True once the
 // contract is in the infra.
-async function requestVMFor(did, association) {
+async function requestVMFor(did, gen, association) {
   {
     const sshKeys = [];
     // The infra and its PDS record take a while (~18 s seen on dev); say so.
     const progress = (step) => setAppStatus(computeStatusEl, `requesting a VM: ${step}…`, "warn");
     progress("preparing this tab's infra");
-    const infraName = (await sessionInfra((step) => progress(step), did)).metadata.name;
+    const infraName = (await sessionInfra((step) => progress(step), did, gen)).metadata.name;
     const short = vmshell.contractName();
     const name = vmshell.infraContractName(infraName, short);
     const wootty = await woottyServed();
@@ -3074,6 +3085,9 @@ async function requestVMFor(did, association) {
     const shells = (wootty ? "ssh over WebRTC and wootty" : "ssh over WebRTC (no wootty in this socialweb)") +
       (agent ? ", and the atirc agent" : "") + (guestTools ? ", with socialweb-computer in the VM" : "") + (association.subject ? `, associated with ${association.subject}` : "");
     addLog("info", `requesting ComputeContract ${name} from discovered bidders with ${shells}`);
+    // Before anything is written for the contract (its key, tokens, vault
+    // bundle): a sign out meanwhile leaves nothing behind.
+    if (!identityReadyFor(did, gen)) throw new Error("signed out while the request ran; nothing was created");
     const key = await webrtcGuest.newSSHKey();
     await webrtcGuest.saveSSHKey(name, key);
     sshKeys.unshift(key.authorized);
@@ -3093,7 +3107,14 @@ async function requestVMFor(did, association) {
       });
     }
     const { contract, secret } = vmshell.infraContract({ infra: infraName, short, wootty, agent, sshKeys, association: association.subject, guestTools });
-    if (!identityReadyFor(did)) throw new Error("signed out while the request ran; no contract was created");
+    if (!identityReadyFor(did, gen)) {
+      // A sign out in the last moments: drop what this request wrote (the
+      // vault bundle stays; it is keyed by a contract that never exists).
+      void webrtcGuest.deleteSSHKey(name).catch(() => {});
+      localStorage.removeItem(computePrefs.transport(name));
+      localStorage.removeItem(computePrefs.token(name));
+      throw new Error("signed out while the request ran; no contract was created");
+    }
     progress("creating the contract");
     await setInfraContract(infraName, contract, secret);
     void flushKcpSoon("Request VM");
@@ -3637,7 +3658,9 @@ function computeRequestDisabled(state) {
   const active = (state?.contracts ?? [])
     .map((c) => vmshell.withReleaseSent(c, computeReleaseAsked.get(c?.name)))
     .filter(vmshell.isActive);
-  return !socialwebUIReady || computeBusy || state?.marketIdentity?.phase !== "Ready" || active.length > 0;
+  // A failed kcp gate (taken over by another tab): nothing can run here.
+  return !socialwebUIReady || computeBusy || kcpGate.state === "failed" ||
+    state?.marketIdentity?.phase !== "Ready" || active.length > 0;
 }
 function refreshComputeRequest() {
   computeRequestEl.disabled = computeRequestDisabled(lastFeedState);

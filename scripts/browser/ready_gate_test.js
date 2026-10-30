@@ -65,7 +65,7 @@ Deno.test("identity Ready before kcp ready: features turn on and the GC runs onc
 Deno.test("page wiring: kcp calls wait for ready; probes retry; Request VM never a silent no-op", async () => {
   const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
   assert(/async function kcpPageRequest\(request, timeoutMs = 60_000\) \{\s*const worker = await kcpWorkerReady\(\);/.test(app), "kcpREST waits");
-  assert(/async function socialwebCall\(fn, payload, timeoutMs = 30_000\) \{\s*const worker = await kcpWorkerReady\(\);/.test(app), "socialwebCall waits");
+  assert(/async function socialwebCall\(fn, payload, timeoutMs = 30_000, readyWaitMs = undefined\) \{\s*const worker = await kcpWorkerReady\(readyWaitMs\);/.test(app), "socialwebCall waits");
   assert(/kcpWorker = worker;\s*kcpGate\.open\(worker\);/.test(app), "gate opens with the worker");
   assert(/if \(lastFeedState\) queueMicrotask\(\(\) => applyState\(lastFeedState\)\)/.test(app), "identity handler reruns on ready");
   assert(/kcpGate\.fail\(new Error\(TAKEN_OVER_MESSAGE\)\)/.test(app), "a take over fails the waiters");
@@ -135,7 +135,7 @@ Deno.test("a Request VM click before kcp ready is logged and queued, then runs",
 Deno.test("page wiring: Request VM shows its progress while the infra and record take time", async () => {
   const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
   const req = app.slice(app.indexOf("async function requestVMFor"), app.indexOf("async function requestVMFor") + 4000);
-  const steps = ['progress("preparing this tab\'s infra")', "sessionInfra((step) => progress(step), did)", 'progress("creating the contract")', "await setInfraContract("];
+  const steps = ['progress("preparing this tab\'s infra")', "sessionInfra((step) => progress(step), did, gen)", 'progress("creating the contract")', "await setInfraContract("];
   let at = 0;
   for (const step of steps) {
     const i = req.indexOf(step, at);
