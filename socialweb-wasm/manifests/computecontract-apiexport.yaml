@@ -6,7 +6,7 @@ spec:
   resources:
     - group: socialweb.computer
       name: computecontracts
-      schema: v1alpha1-21.computecontracts.socialweb.computer
+      schema: v1alpha1-22.computecontracts.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer

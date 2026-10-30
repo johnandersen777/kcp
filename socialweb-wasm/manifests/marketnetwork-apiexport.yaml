@@ -11,22 +11,22 @@ spec:
         crd: {}
     - group: socialweb.computer
       name: marketbidders
-      schema: v1alpha1-40.marketbidders.socialweb.computer
+      schema: v1alpha1-41.marketbidders.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
       name: marketrequesters
-      schema: v1alpha1-33.marketrequesters.socialweb.computer
+      schema: v1alpha1-34.marketrequesters.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
       name: gateways
-      schema: v1alpha1-35.gateways.socialweb.computer
+      schema: v1alpha1-36.gateways.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
       name: sshgateways
-      schema: v1alpha1-29.sshgateways.socialweb.computer
+      schema: v1alpha1-30.sshgateways.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
