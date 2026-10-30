@@ -70,10 +70,14 @@ type Contract struct {
 	// status.atircRevokes (Pending|Done|Abandoned), run before Released.
 	Step         string `json:"step,omitempty"`
 	AtircRevokes string `json:"atircRevokes,omitempty"`
-	// GuestMayRun mirrors the requester's guestMayRun (runner.go): an ok
-	// receipt (status.contract.receipt with receiptOk true), no termination
-	// and no ok release answer, so a guest may still be running.
-	GuestMayRun bool `json:"guestMayRun,omitempty"`
+	// The parts of the requester's guestMayRun (runner.go), which r128
+	// 388ccee6 uses to re-release a Failed contract for a newer stamp:
+	// ReceiptOk is status.contract.receipt set with receiptOk true,
+	// Terminated is status.contract.termination set, ReleaseOk is
+	// status.contract.release.ok (the bidder acknowledged the release).
+	ReceiptOk  bool `json:"receiptOk,omitempty"`
+	Terminated bool `json:"terminated,omitempty"`
+	ReleaseOk  bool `json:"releaseOk,omitempty"`
 	// R2Release is status.contract.r2Release: the A8 cascade's guest answer
 	// (phase Requested|Released|Failed|TimedOut; ok is omitted when false).
 	R2Release *R2Release `json:"r2Release,omitempty"`
@@ -372,7 +376,7 @@ func contract(u *unstructured.Unstructured) Contract {
 	c.FromGuest, _, _ = unstructured.NestedBool(u.Object, "spec", "association", "fromGuest")
 	c.Step, _, _ = unstructured.NestedString(u.Object, "status", "execution", "step")
 	c.AtircRevokes, _, _ = unstructured.NestedString(u.Object, "status", "atircRevokes")
-	c.GuestMayRun = guestMayRun(u)
+	c.ReceiptOk, c.Terminated, c.ReleaseOk = guestParts(u)
 	if rel, ok, _ := unstructured.NestedMap(u.Object, "status", "contract", "r2Release"); ok {
 		r := &R2Release{}
 		r.Phase, _ = rel["phase"].(string)
@@ -462,19 +466,14 @@ func policyEngine(u *unstructured.Unstructured) *Resource {
 	return r
 }
 
-// guestMayRun is socialweb's requester guestMayRun over the unstructured
-// status.contract: receipt set, receiptOk true, no termination, and no
-// release answer with ok true.
-func guestMayRun(u *unstructured.Unstructured) bool {
-	if _, ok, _ := unstructured.NestedMap(u.Object, "status", "contract", "receipt"); !ok {
-		return false
+// guestParts reads the requester's guestMayRun inputs from the unstructured
+// status.contract: an ok receipt (receipt set, receiptOk true), a
+// termination, and a release answer with ok true.
+func guestParts(u *unstructured.Unstructured) (receiptOK, terminated, releaseOK bool) {
+	if _, ok, _ := unstructured.NestedMap(u.Object, "status", "contract", "receipt"); ok {
+		receiptOK, _, _ = unstructured.NestedBool(u.Object, "status", "contract", "receiptOk")
 	}
-	if receiptOK, _, _ := unstructured.NestedBool(u.Object, "status", "contract", "receiptOk"); !receiptOK {
-		return false
-	}
-	if _, ok, _ := unstructured.NestedFieldNoCopy(u.Object, "status", "contract", "termination"); ok {
-		return false
-	}
-	released, _, _ := unstructured.NestedBool(u.Object, "status", "contract", "release", "ok")
-	return !released
+	_, terminated, _ = unstructured.NestedFieldNoCopy(u.Object, "status", "contract", "termination")
+	releaseOK, _, _ = unstructured.NestedBool(u.Object, "status", "contract", "release", "ok")
+	return receiptOK, terminated, releaseOK
 }

@@ -149,7 +149,7 @@ func TestR2ReleaseProjection(t *testing.T) {
 	}
 }
 
-func TestGuestMayRun(t *testing.T) {
+func TestGuestParts(t *testing.T) {
 	with := func(c map[string]any) Contract {
 		return contract(&unstructured.Unstructured{Object: map[string]any{
 			"metadata": map[string]any{"name": "c"},
@@ -157,25 +157,27 @@ func TestGuestMayRun(t *testing.T) {
 		}})
 	}
 	receipt := map[string]any{"uri": "at://did:plc:b/x/1", "cid": "bafy"}
+	type parts struct{ receiptOk, terminated, releaseOk bool }
 	cases := []struct {
 		name string
 		c    map[string]any
-		want bool
+		want parts
 	}{
-		{"ok receipt, no answer", map[string]any{"receipt": receipt, "receiptOk": true}, true},
-		{"release answered not ok", map[string]any{"receipt": receipt, "receiptOk": true, "release": map[string]any{"ok": false}}, true},
-		{"no receipt", map[string]any{}, false},
-		{"receipt not ok", map[string]any{"receipt": receipt, "receiptOk": false}, false},
-		{"receiptOk unset", map[string]any{"receipt": receipt}, false},
-		{"terminated", map[string]any{"receipt": receipt, "receiptOk": true, "termination": map[string]any{"reason": "exit"}}, false},
-		{"released ok", map[string]any{"receipt": receipt, "receiptOk": true, "release": map[string]any{"ok": true}}, false},
+		{"ok receipt, no answer", map[string]any{"receipt": receipt, "receiptOk": true}, parts{true, false, false}},
+		{"release answered not ok", map[string]any{"receipt": receipt, "receiptOk": true, "release": map[string]any{"ok": false}}, parts{true, false, false}},
+		{"no receipt", map[string]any{"receiptOk": true}, parts{false, false, false}},
+		{"receipt not ok", map[string]any{"receipt": receipt, "receiptOk": false}, parts{false, false, false}},
+		{"receiptOk unset", map[string]any{"receipt": receipt}, parts{false, false, false}},
+		{"terminated", map[string]any{"receipt": receipt, "receiptOk": true, "termination": map[string]any{"reason": "exit"}}, parts{true, true, false}},
+		{"released ok", map[string]any{"receipt": receipt, "receiptOk": true, "release": map[string]any{"ok": true}}, parts{true, false, true}},
 	}
 	for _, tc := range cases {
-		if got := with(tc.c).GuestMayRun; got != tc.want {
-			t.Errorf("%s: guestMayRun %v, want %v", tc.name, got, tc.want)
+		c := with(tc.c)
+		if got := (parts{c.ReceiptOk, c.Terminated, c.ReleaseOk}); got != tc.want {
+			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
 		}
 	}
-	if contract(&unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "c"}}}).GuestMayRun {
-		t.Error("no status: no guest")
+	if c := contract(&unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "c"}}}); c.ReceiptOk || c.Terminated || c.ReleaseOk {
+		t.Error("no status: nothing set")
 	}
 }
