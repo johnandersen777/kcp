@@ -35,11 +35,15 @@ import {
   backendNotice,
   backupUnreadable,
   createPersister,
+  isNotOwner,
+  OWNER_KEY,
+  UNREADABLE_PREFIXES,
   openBestBackend,
   snapshotRecords,
   unreadableMessage,
 } from "./state_store.js";
 import { createBanners } from "./page_banner.js";
+import { createReadyGate } from "./ready_gate.js";
 import { BUSY_MESSAGE, createKcpLock, FORCE_WARNING, TAKEN_OVER_MESSAGE } from "./kcp_lock.js";
 import * as vmshell from "./vmshell.js";
 import * as webrtcGuest from "./webrtc_guest.js";
@@ -508,15 +512,23 @@ function serializeQueue() {
 // --- kcp worker ------------------------------------------------------------
 
 let kcpWorker = null;
+// Opens with the worker once kcp is ready (spawnKcp). With a snapshot restore
+// the status feed says MarketIdentity Ready before that, so kcp calls wait
+// here rather than fail and switch features off (rc130 boot race).
+const kcpGate = createReadyGate();
+async function kcpWorkerReady() {
+  if (kcpWorker) return kcpWorker;
+  if (kcpGate.state === "open") throw new Error("kcp worker is not running");
+  return await kcpGate.wait();
+}
 const pendingBridges = new Map();
 const pendingPageRequests = new Map();
 let nextPageRequestID = -1;
 
 // Send a request straight to the kcp/socialweb bridge. kubectl has its own
 // worker; the identity callback needs this page-origin path.
-function kcpPageRequest(request, timeoutMs = 60_000) {
-  const worker = kcpWorker;
-  if (!worker) return Promise.reject(new Error("kcp worker is not running"));
+async function kcpPageRequest(request, timeoutMs = 60_000) {
+  const worker = await kcpWorkerReady();
   const id = nextPageRequestID--;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -706,7 +718,7 @@ function persistKcp(snapshot, seq) {
     if (seq) ops.puts.push([kcpSeqKey, seq]);
     await backend.apply(ops);
   }).catch((err) => {
-    addLog("warn", `kcp state save failed: ${err instanceof Error ? err.message : err}`);
+    stateWriteFailed("kcp state save", err);
   });
 }
 
@@ -718,28 +730,37 @@ function persistKcp(snapshot, seq) {
 const persister = createPersister({
   backend: stateBackend,
   immediate: [socialwebStateKey],
-  onError: (key, err) => addLog("warn", `state save failed (${key}): ${err instanceof Error ? err.message : err}`),
+  onError: (key, err) => stateWriteFailed(`state save (${key})`, err),
 });
 addEventListener("pagehide", () => void persister.flushAll());
+addEventListener("pagehide", () => void flushKcpSoon("pagehide"));
 
 // --- saved state this build cannot read (rc129) -------------------------------
 // Go reports a kcp or socialweb value it could not read and never persists
 // that channel then, so nothing is saved over it. The raw value is copied to
 // <channel>-unreadable-<time> first, then the error is shown.
 let restoredRaw = { kcp: "", socialweb: "" };
+// Set when Go runs kcp without saving (its saved state was unreadable).
+let kcpPersistOff = false;
 async function restoreUnreadable(channel, message) {
+  if (channel === "kcp") kcpPersistOff = true;
   const raw = restoredRaw[channel] ?? "";
   let backup = null;
   try {
     backup = await backupUnreadable(await stateBackend(), channel, raw);
   } catch (err) {
-    addLog("error", `backing up the unreadable ${channel} state failed: ${err instanceof Error ? err.message : err}`);
+    stateWriteFailed(`backing up the unreadable ${channel} state`, err);
   }
   const text = `${unreadableMessage(channel)}${backup ? ` (a copy is saved as ${backup})` : ""}. ` +
-    "This session runs without saving it; reload with a build that reads it, or reset.";
+    "This session runs without saving it; reload with a build that reads it, or Reset. " +
+    "The copies hold secrets (sign-in tokens and keys of the vault); Reset keeps them.";
   addLog("error", `${unreadableMessage(channel)}: ${message}${backup ? `; backed up as ${backup}` : backup === "" ? "; already backed up" : ""}`);
   console.error(`${unreadableMessage(channel)}: ${message}`);
-  banners.show(`unreadable-${channel}`, { text, level: "error" });
+  banners.show(`unreadable-${channel}`, {
+    text,
+    level: "error",
+    actions: [{ label: "Reset", onClick: () => void resetState() }],
+  });
 }
 
 // --- one kcp per origin (kcp_lock.js) -------------------------------------------
@@ -753,7 +774,56 @@ const kcpLock = createKcpLock({ log: (level, message) => addLog(level, message),
 
 // "yielding": a take over is flushing; those last writes must land.
 function kcpStateOwned() {
-  return ["held", "yielding", "unsupported", "idle"].includes(kcpLock.state);
+  return !stateFenced && ["held", "yielding", "unsupported", "idle"].includes(kcpLock.state);
+}
+
+// Owner fence (state_store.js claimOwner): right after this tab takes the
+// lock, and before its first persist, it writes its token; a write from a
+// tab whose token was replaced aborts whole (NotOwner). The first such
+// refusal stops every persist of this tab.
+const stateOwnerToken = vmshell.randomToken();
+let stateFenced = false;
+// The owner before this tab's claim (the tab that wrote the saved state), for
+// the hibernation snapshot check; undefined while the state is not fenced.
+let stateOwnerPrevious;
+async function claimStateOwner() {
+  const backend = await stateBackend();
+  if (backend.kind === "indexeddb") stateOwnerPrevious = (await backend.load(OWNER_KEY).catch(() => null)) ?? null;
+  await backend.claimOwner(stateOwnerToken);
+  addLog("debug", `saved state owner: this tab (${stateOwnerToken.slice(0, 8)})`);
+}
+
+function stateWriteFailed(what, err) {
+  if (!isNotOwner(err)) {
+    addLog("warn", `${what} failed: ${err instanceof Error ? err.message : err}`);
+    return;
+  }
+  if (stateFenced) return;
+  stateFenced = true;
+  persister.stop();
+  addLog("error", `${what} refused: another tab owns the saved state now; this tab stops saving`);
+}
+
+// Clears the kcp and socialweb state (one transaction) and the shell, then
+// reloads: the terminal reset and the unreadable-state banner's Reset. The
+// <channel>-unreadable-* backups stay unless all is set (reset --all).
+async function resetState({ all = false } = {}) {
+  // A worker may hold the snapshot's OPFS file open; stop it first.
+  kcpWorker?.terminate();
+  kcpWorker = null;
+  await discardSnapshot().catch(() => {});
+  try {
+    const backend = await stateBackend();
+    await backend.apply({ clearPrefix: kcpRecordPrefix, deletes: [stateKey, socialwebStateKey, socialwebSeqKey] });
+    if (all) for (const prefix of UNREADABLE_PREFIXES) await backend.apply({ clearPrefix: prefix });
+  } catch (err) {
+    // A missing or read-only store is already a reset; another owner is not.
+    if (isNotOwner(err)) stateWriteFailed("reset", err);
+  }
+  localStorage.removeItem(legacyStateKey);
+  localStorage.removeItem(shellStateKey);
+  addLog("warn", `shell, kcp and socialweb state cleared${all ? " with the unreadable-state backups" : ""}; reloading`);
+  setTimeout(() => location.reload(), 300);
 }
 
 // Has the kcp worker persist what its coalescer still holds; resolves once
@@ -792,6 +862,7 @@ async function yieldKcp(why) {
   worker?.terminate();
   kcpWorker = null;
   kcpWorkerBooting = null;
+  kcpGate.fail(new Error(TAKEN_OVER_MESSAGE));
   setStatus("taken over by another tab", "disconnected");
   banners.show("lock", {
     text: TAKEN_OVER_MESSAGE,
@@ -979,6 +1050,11 @@ async function spawnKcp(useSnapshot = true) {
   }
   logBootKind(ready, spawnStarted);
   kcpWorker = worker;
+  kcpGate.open(worker);
+  // Whatever the feed's identity Ready started before kcp was ready (feature
+  // probes, the infra GC) waited for this; run the handler again in case one
+  // gave up meanwhile.
+  if (lastFeedState) queueMicrotask(() => applyState(lastFeedState));
   worker.postMessage({ type: "state-subscribe" });
 }
 
@@ -1008,6 +1084,9 @@ async function hibernateInit(useSnapshot) {
     enabled,
     restore: useSnapshot,
     persistSeq: { kcp: Number(kcp ?? 0), socialweb: Number(socialweb ?? 0) },
+    // Owner fence for snapshots (kcp_hibernate.js): captures carry and check
+    // this tab's token; a restore needs the previous owner's.
+    owner: stateOwnerPrevious === undefined ? null : { token: stateOwnerToken, previous: stateOwnerPrevious, db: stateDB },
     gzip: localStorage.getItem("kcp.snapshot.gzip") !== "0",
     store: localStorage.getItem("kcp.snapshot.store") ?? undefined,
   };
@@ -1035,8 +1114,43 @@ function noteKcpAnswer() {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "hidden") return;
   void persister.flushAll();
+  void flushKcpSoon("hidden");
   kcpWorker?.postMessage({ type: "hibernate" });
 });
+
+// The kcp coalescer holds writes for up to 10 s (750 ms quiet), so a status
+// written just before a reload (a contract turning Held), or a Release
+// clicked just before the tab closes, would be lost and the older state
+// restored. On hidden, pagehide and after every user action that writes spec
+// (Request VM, Release, Start R2, the infra GC) the worker persists them at
+// once (kcpPersistFlush); the messages land through the kcp persist queue.
+// Only a running kcp of the owning tab that saves at all (not fail-closed).
+// A call while one runs flushes again after it (the new write may be later).
+let kcpFlushRunning = null;
+let kcpFlushAgain = false;
+// Returns a promise that settles once the flush landed (or at once when
+// there is nothing to flush). An unload does not wait for it: pagehide is
+// best effort, which is why every spec-writing action flushes itself.
+function flushKcpSoon(why) {
+  if (!kcpWorker || !kcpStateOwned() || kcpPersistOff) return Promise.resolve();
+  if (kcpFlushRunning) {
+    kcpFlushAgain = true;
+    return kcpFlushRunning;
+  }
+  kcpFlushRunning = flushKcpWorker(kcpWorker, 3000)
+    .then(async (flushed) => {
+      await kcpPersistQueue;
+      if (!flushed) addLog("debug", `kcp flush after ${why} unanswered`);
+    })
+    .finally(() => {
+      kcpFlushRunning = null;
+      if (kcpFlushAgain) {
+        kcpFlushAgain = false;
+        void flushKcpSoon(why);
+      }
+    });
+  return kcpFlushRunning;
+}
 
 // Deletes the stored snapshot; the next load cold boots. The running worker
 // stops capturing until reload.
@@ -1387,7 +1501,7 @@ function shellHelp() {
     "  ssh vmshell-abc123            (a Held ComputeContract, over WebRTC; see ~/.ssh/config)",
     "  ssh vmshell-abc123 uname -a | grep Linux",
     "",
-    "builtins: help · clear · reset (wipe kcp state and reload) · snapshot-discard (cold boot next load)",
+    "builtins: help · clear · reset [--all] (wipe kcp state and reload; --all also the unreadable-state backups) · snapshot-discard (cold boot next load)",
     "keys: Ctrl-C cancel · Ctrl-D finish stdin · Tab complete · ↑/↓ history",
     "",
   ].join("\n");
@@ -1485,25 +1599,17 @@ function makeCommands() {
     return { stdout: "kcp snapshot discarded; the next load cold boots\n", stderr: "", exitCode: 0 };
   });
 
-  const reset = defineCommand("reset", async () => {
-    // A worker may hold the snapshot's OPFS file open; stop it first.
-    kcpWorker?.terminate();
-    kcpWorker = null;
-    await discardSnapshot().catch(() => {});
-    try {
-      const backend = await stateBackend();
-      await backend.remove(stateKey);
-      await backend.apply({ clearPrefix: kcpRecordPrefix });
-      await backend.remove(socialwebStateKey);
-      await backend.remove(socialwebSeqKey);
-    } catch {
-      // A missing or read-only store is already a reset.
+  const reset = defineCommand("reset", async (args) => {
+    const all = (args ?? []).includes("--all");
+    if ((args ?? []).some((a) => a !== "--all")) {
+      return { stdout: "", stderr: "usage: reset [--all]\n", exitCode: 2 };
     }
-    localStorage.removeItem(legacyStateKey);
-    localStorage.removeItem(shellStateKey);
-    addLog("warn", "shell, kcp and socialweb state cleared; reloading");
-    setTimeout(() => location.reload(), 300);
-    return { stdout: "cleared shell and kcp state; reloading…\n", stderr: "", exitCode: 0 };
+    await resetState({ all });
+    return {
+      stdout: `cleared shell and kcp state${all ? " and the unreadable-state backups" : " (unreadable-state backups kept; reset --all removes them)"}; reloading…\n`,
+      stderr: "",
+      exitCode: 0,
+    };
   });
 
   const ssh = defineCommand("ssh", (args, ctx) => runSsh(args, ctx));
@@ -2345,7 +2451,7 @@ function renderIdentity() {
   if (view.state === "signedIn") signIn.step = "idle";
   identityView = view;
   identitySignInEl.textContent = view.primary.label;
-  identitySignInEl.disabled = Boolean(view.primary.disabled);
+  identitySignInEl.disabled = !socialwebUIReady || Boolean(view.primary.disabled);
   identitySecondaryEl.hidden = !view.secondary;
   identitySecondaryEl.textContent = view.secondary?.label ?? "";
   identityHandleEl.disabled = view.busy;
@@ -2506,7 +2612,15 @@ function applyState(state) {
   }
 }
 
+// Bound at page init, before kcp boots (start()): the status feed can report
+// MarketIdentity Ready from restored state before kcp is ready, and a button
+// it enables must already have its listener (session 9xc9tc: a Request VM
+// click vanished). Until then applyComputeState and renderIdentity keep the
+// buttons disabled.
+let socialwebUIReady = false;
 function initSocialwebUI() {
+  if (socialwebUIReady) return;
+  socialwebUIReady = true;
   const storedMode = localStorage.getItem(identityPrefs.mode);
   identityModeEl.value = storedMode === "localRepo" ? "oauthBrowser" : (storedMode ?? "oauthBrowser");
   if (storedMode === "localRepo") {
@@ -2597,9 +2711,8 @@ const infraAutoReleased = new Set();
 let infraAutoSync = false;
 
 // socialwebCall invokes a page-only Go export through kcp_worker.js.
-function socialwebCall(fn, payload, timeoutMs = 30_000) {
-  const worker = kcpWorker;
-  if (!worker) return Promise.reject(new Error("kcp worker is not running"));
+async function socialwebCall(fn, payload, timeoutMs = 30_000) {
+  const worker = await kcpWorkerReady();
   const id = nextPageRequestID--;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -2681,7 +2794,7 @@ async function waitInfraRecord(name, did, timeoutMs = 60_000) {
 // object. Existing record bindings are repaired, and the record must be
 // synced before the caller adds its first contract (the first sync pulls an
 // existing record and would otherwise erase it).
-async function sessionInfra() {
+async function sessionInfra(onStep = () => {}) {
   const did = identityState?.phase === "Ready" ? identityState.did : "";
   if (!did) throw new Error("sign in before requesting a VM");
   try {
@@ -2728,6 +2841,7 @@ async function sessionInfra() {
     infra = await infraQueued(() => vmshell.createInfra({ rest: kcpREST, api: SOCIALWEB_API, name, spec }));
     addLog("info", `EphemeralInfra ${name} holds this tab's VMs`);
   }
+  onStep("syncing its record");
   const synced = await waitInfraRecord(name, did);
   addLog("info", `EphemeralInfra ${name} record ${vmshell.infraRecordURI(synced, did, name)}`);
   return synced;
@@ -2740,6 +2854,7 @@ async function sessionInfra() {
 // apply). Other origins' infras, this tab's own and ending ones are left
 // alone. A failed pass runs again a minute later.
 let infraGCState = "";
+const INFRA_GC_REBIND_MS = 30_000;
 async function collectOtherTabInfras(did) {
   if (infraGCState) return;
   infraGCState = "running";
@@ -2763,7 +2878,27 @@ async function collectOtherTabInfras(did) {
           await kcpREST("DELETE", `${SOCIALWEB_API}/ephemeralinfras/${step.name}`).catch((err) => {
             if (kcpStatus(err) !== 404) throw err;
           });
+          void flushKcpSoon("infra GC");
           addLog("info", `EphemeralInfra ${step.name} of another tab deleted: ${step.reason}`);
+        } else if (step.action === "rebind-delete") {
+          // Its record repo does not resolve: deleting now would orphan the
+          // PDS record. Rebind to this identity's repo, wait for the record,
+          // and delete only then.
+          const settled = await vmshell.rebindThenDelete({
+            rest: kcpREST,
+            api: SOCIALWEB_API,
+            name: step.name,
+            did,
+            serialize: infraQueued,
+            timeoutMs: INFRA_GC_REBIND_MS,
+            pollMs: INFRA_RECORD_POLL_MS,
+          });
+          void flushKcpSoon("infra GC");
+          if (settled) {
+            addLog("info", `EphemeralInfra ${step.name} of another tab deleted after rebinding its record: ${step.reason}`);
+          } else {
+            addLog("info", `EphemeralInfra ${step.name} of another tab kept: record unresolved (rebind did not resolve in ${INFRA_GC_REBIND_MS / 1000} s)`);
+          }
         } else if (step.action === "rebind") {
           const record = vmshell.infraRecordBinding(did);
           await infraQueued(() => vmshell.composeInfra({
@@ -2772,6 +2907,7 @@ async function collectOtherTabInfras(did) {
             infra: step.name,
             update: (spec) => (vmshell.infraRecordStale(spec.record) ? { ...spec, record } : null),
           }));
+          void flushKcpSoon("infra GC");
           addLog("info", `EphemeralInfra ${step.name} of another tab kept and its record rebound: ${step.reason}${live}`);
         } else {
           addLog("info", `EphemeralInfra ${step.name} of another tab left alone: ${step.reason}${live}`);
@@ -2851,6 +2987,24 @@ async function markFinishedInfraContracts(contracts) {
 }
 
 async function requestVM() {
+  addLog("info", "Request VM clicked");
+  if (!kcpWorker) {
+    // Identity Ready can arrive before kcp is (snapshot restore): queue the
+    // request visibly instead of failing or doing nothing.
+    computeBusy = true;
+    computeRequestEl.disabled = true;
+    setAppStatus(computeStatusEl, "kcp is still starting; the request runs once it is up", "warn");
+    addLog("info", "Request VM waits for kcp to be ready");
+    try {
+      await kcpWorkerReady();
+    } catch (err) {
+      computeBusy = false;
+      addLog("error", `Request VM failed: ${err instanceof Error ? err.message : err}`);
+      setAppStatus(computeStatusEl, String(err.message ?? err), "err");
+      return;
+    }
+    computeBusy = false;
+  }
   const association = vmshell.associationSubject(computeAssociateEl.value, identityState?.did ?? "");
   if (association.error) {
     setAppStatus(computeStatusEl, association.error, "err");
@@ -2864,7 +3018,10 @@ async function requestVM() {
     computeBusy = true;
     computeRequestEl.disabled = true;
     const sshKeys = [];
-    const infraName = (await sessionInfra()).metadata.name;
+    // The infra and its PDS record take a while (~18 s seen on dev); say so.
+    const progress = (step) => setAppStatus(computeStatusEl, `requesting a VM: ${step}…`, "warn");
+    progress("preparing this tab's infra");
+    const infraName = (await sessionInfra((step) => progress(step))).metadata.name;
     const short = vmshell.contractName();
     const name = vmshell.infraContractName(infraName, short);
     const wootty = await woottyServed();
@@ -2892,7 +3049,9 @@ async function requestVM() {
       });
     }
     const { contract, secret } = vmshell.infraContract({ infra: infraName, short, wootty, agent, sshKeys, association: association.subject, guestTools });
+    progress("creating the contract");
     await setInfraContract(infraName, contract, secret);
+    void flushKcpSoon("Request VM");
     setAppStatus(computeStatusEl, `${name} requested; waiting for bids`, "ok");
     addLog("ok", `ComputeContract ${name} requested from discovered bidders with ${shells}`);
     // Show what is in flight; the user can watch it go Held in the terminal.
@@ -2922,6 +3081,7 @@ async function releaseContract(name) {
       serialize: infraQueued,
     });
     computeReleaseAsked.set(name, requestedAt);
+    void flushKcpSoon("Release");
   } catch (err) {
     if (previous === undefined) computeReleaseAsked.delete(name);
     else computeReleaseAsked.set(name, previous);
@@ -3102,6 +3262,7 @@ function r2Action(contract) {
     button.disabled = true;
     try {
       await createContractEvent(webrtcGuest.r2StartEvent(name, Math.random().toString(36).slice(2, 8), { agent: computeAgentEl.checked }));
+      void flushKcpSoon("Start R2");
       addLog("info", `asked ${name} to start R2`);
     } catch (err) {
       button.disabled = false;
@@ -3208,9 +3369,10 @@ function servedSchema(resource) {
       if (!schema) return null;
       return await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha1/apiresourceschemas/${schema}`);
     })().catch((err) => {
+      // undefined (not null: "not served"): the next feed update asks again.
       servedSchemas.delete(resource);
-      addLog("warn", `could not read the ${resource} schema; the features it gates (wootty, agent, R2) stay off: ${err.message ?? err}`);
-      return null;
+      addLog("warn", `could not read the ${resource} schema; the features it gates (wootty, agent, R2) are off until it is read: ${err.message ?? err}`);
+      return undefined;
     }));
   }
   return servedSchemas.get(resource);
@@ -3427,8 +3589,16 @@ function renderPolicyEngine(engine) {
   if (engine) addLog("info", `PolicyEngine ${engine.name} ${engine.phase ?? "Pending"} ready=${Boolean(engine.ready)} fenced=${engine.fenced ?? "unset"}: ${engine.message ?? ""}`);
 }
 
+// The last contracts phase/step fingerprint (vmshell.contractTransitions).
+let lastContractTransitions = null;
 function applyComputeState(state) {
   lastFeedState = state;
+  // Session 5ne4ov: Held, written by the requester 2 s before a reload, sat
+  // in kcp's persist coalescer and was lost. A phase or step change is
+  // flushed once per feed update (flushKcpSoon coalesces).
+  const transitions = vmshell.contractTransitions(lastContractTransitions, state.contracts);
+  lastContractTransitions = transitions.key;
+  if (transitions.changed) void flushKcpSoon("contract status");
   renderPolicyEngine(state.policyEngine);
   for (const watcher of [...feedWatchers]) watcher(state);
   const contracts = state.contracts ?? [];
@@ -3438,12 +3608,16 @@ function applyComputeState(state) {
   if (computeBusy && active.length > 0) computeBusy = false;
   computeReleasing = seen.some(vmshell.releaseWorkPending);
   const ready = state.marketIdentity?.phase === "Ready";
-  computeRequestEl.disabled = computeBusy || !ready || active.length > 0;
+  computeRequestEl.disabled = !socialwebUIReady || computeBusy || !ready || active.length > 0;
   if (ready && computeAgentRowEl.hidden) void agentServed().then((served) => { computeAgentRowEl.hidden = !served; });
   if (ready && computeGuestToolsRowEl.hidden) void guestToolsServed().then((served) => { computeGuestToolsRowEl.hidden = !served; });
   if (ready && r2StartServed === null) {
     r2StartServed = false;
     void servedSchema("contractevents").then((schema) => {
+      if (schema === undefined) {
+        r2StartServed = null; // read failed: ask again on the next update
+        return;
+      }
       r2StartServed = webrtcGuest.schemaHasR2Start(schema);
       if (r2StartServed) applyComputeState(lastFeedState);
     });
@@ -3501,6 +3675,9 @@ async function start() {
   startDebugControl();
   // One kcp per origin: wait here while another tab of this browser runs it.
   await acquireKcpLock();
+  // Before kcp boots (its first persist): later writes of a tab that loses
+  // the state are refused.
+  await claimStateOwner();
   term.writeln(cyan("kcp-wasm") + dim(" loading real kcp.wasm…"));
   term.writeln(cyan("kubectl-wasm") + dim(lowMemory ? " loads on first use (low-memory mode)" : " loading kubectl.wasm…"));
   setStatus("loading kcp + kubectl…", "running");
@@ -3528,7 +3705,6 @@ async function start() {
 
   void poll();
   setInterval(() => void poll(), Math.max(intervalMs, 5000));
-  initSocialwebUI();
   void typeBootSteps(BOOT_STEPS);
 }
 
@@ -3732,13 +3908,17 @@ const debugHandle = {
   log: (message) => addLog("info", `debug: ${message}`),
   lock: () => kcpLock.state,
   banners: () => banners.ids().map((id) => [id, banners.text(id)]),
+  // Flushes kcp's held writes first (at most 3 s): a reload does not wait
+  // for the pagehide flush.
   reload: (query) => {
     debugSend("info", "debug: reloading");
     debugFlush();
-    setTimeout(() => {
-      if (query === undefined) location.reload();
-      else location.search = query;
-    }, 300);
+    const go = () =>
+      setTimeout(() => {
+        if (query === undefined) location.reload();
+        else location.search = query;
+      }, 300);
+    Promise.race([flushKcpSoon("reload"), sleep(3000)]).then(go, go);
     return "reloading";
   },
   // Wipe this origin's saved state (what "clear website data" would do for
@@ -3860,6 +4040,15 @@ window.addEventListener("resize", () => {
 });
 
 setStatus("starting…", "running");
+// Listeners first, outside start(), so no boot step that throws or hangs
+// (debug control, the kcp lock, kcp, restoreShell) can skip them: a click on
+// a button the feed enables early reaches requestVM / identityAction, which
+// wait for kcp (kcpWorkerReady).
+try {
+  initSocialwebUI();
+} catch (err) {
+  addLog("error", `binding the identity and compute buttons failed: ${err instanceof Error ? err.message : err}`);
+}
 start().catch((err) => {
   setStatus("failed", "disconnected");
   retryEl.hidden = false;

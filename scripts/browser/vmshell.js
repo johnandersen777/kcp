@@ -762,10 +762,40 @@ export function shellLink(contract, token) {
 // Every tab of an origin shares one kcp state, so infras of tabs that are gone
 // stay in it until their ttl. On boot the page collects those of its own
 // origin: an infra none of whose entries points at a live ComputeContract is
-// deleted; one with a live contract keeps running and gets its record binding
-// repaired as sessionInfra repairs the tab's own. An infra already ending
-// (deletionTimestamp or status.endedAt: the infra controller expires it) is
-// left to the controller.
+// deleted once it is history older than INFRA_HISTORY_MS (a new browser
+// session is a new tab id, and deleting the infra cascades to its Released
+// contracts, whose rows carry the "tokens: revoked" proof); one with a live
+// contract keeps running and gets its record binding repaired as sessionInfra
+// repairs the tab's own. An infra already ending (deletionTimestamp or
+// status.endedAt: the infra controller expires it) is left to the controller.
+
+/** How long another tab's finished infra stays as history rows (linux-kcp, rc130). */
+export const INFRA_HISTORY_MS = 24 * 3600 * 1000;
+
+/** The newest of the RFC 3339 times given, in ms (0 when none parses). */
+export function newestTime(...times) {
+  let newest = 0;
+  for (const t of times) {
+    const ms = typeof t === "string" && t ? Date.parse(t) : NaN;
+    if (Number.isFinite(ms) && ms > newest) newest = ms;
+  }
+  return newest;
+}
+
+/**
+ * When a ComputeContract last changed toward its end: the newest condition
+ * transition, release request or answer, or guest termination. A terminal
+ * contract has no separate end stamp; these are set on the way there.
+ */
+export function contractFinishedAt(obj) {
+  const status = obj?.status ?? {};
+  return newestTime(
+    ...(status.conditions ?? []).map((c) => c?.lastTransitionTime),
+    obj?.spec?.releaseRequestedAt,
+    status.release?.requestedAt,
+    status.contract?.termination?.observedAt,
+  );
+}
 
 /** The feed's view (statusfeed contract()) of a ComputeContract object, for the liveness rule. */
 export function feedContract(obj) {
@@ -786,6 +816,7 @@ export function feedContract(obj) {
     receiptOk: guest.receipt !== undefined && guest.receiptOk === true,
     terminated: guest.termination !== undefined,
     releaseOk: guest.release?.ok === true,
+    finishedAt: contractFinishedAt(obj),
   };
 }
 
@@ -802,6 +833,76 @@ export function contractLive(contract) {
   return releaseWorkPending(contract);
 }
 
+/** The DID of the infra's PDS record (status.record.uri, else spec.record.uri), or "". */
+export function infraRecordDid(infra) {
+  const uri = infra?.status?.record?.uri || infra?.spec?.record?.uri || "";
+  return /^at:\/\/(did:[^/]+)\//.exec(uri)?.[1] ?? "";
+}
+
+/**
+ * Whether the infra controller can reach the infra's PDS record, so deleting
+ * the infra also deletes the record: no RecordUnresolved=True (nor the older
+ * "repo.read handle" sync error) and spec.record.repoRef names did's current
+ * repo. An infra without a record binding has no record to orphan.
+ */
+export function infraRecordResolvable(infra, did) {
+  const binding = infra?.spec?.record;
+  if (!binding) return true;
+  if (infraCondition(infra, "RecordUnresolved")?.status === "True") return false;
+  if ((infra?.status?.conditions ?? []).some((c) => /repo\.read handle/.test(c?.message ?? ""))) return false;
+  return binding.repoRef?.name === infraRepoRef(did).name;
+}
+
+/**
+ * After a rebind written at generation: the controller has reconciled it
+ * (status.observedGeneration) and the record now resolves (no
+ * RecordUnresolved=True, the current repo, a record URI), so a delete also
+ * deletes the PDS record.
+ */
+export function infraRebindSettled(infra, did, generation) {
+  return Number(infra?.status?.observedGeneration ?? 0) >= Number(generation ?? 0) &&
+    infraRecordResolvable(infra, did) && Boolean(infra?.status?.record?.uri);
+}
+
+/**
+ * The GC's rebind-delete: rebinds infra name's spec.record to did's binding
+ * (composeInfra, the page's full-spec apply; serialize is the page's infra
+ * write queue), waits up to timeoutMs for infraRebindSettled, and only then
+ * deletes the infra so the controller deletes its PDS record. Returns true
+ * when deleted, false when it was kept (record still unresolved).
+ */
+export async function rebindThenDelete({
+  rest, api, name, did, serialize = (run) => run(), timeoutMs = 30_000, pollMs = 750,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = Date.now,
+}) {
+  const record = infraRecordBinding(did);
+  const written = await serialize(() => composeInfra({ rest, api, infra: name, update: (spec) => ({ ...spec, record }) }));
+  const generation = written?.metadata?.generation ?? 0;
+  const path = `${api}/ephemeralinfras/${name}`;
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    await sleep(pollMs);
+    if (infraRebindSettled(await rest("GET", path), did, generation)) {
+      await rest("DELETE", path).catch((err) => {
+        if (Number(err?.status ?? 0) !== 404) throw err;
+      });
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The contracts' phase/step fingerprint for a feed update and whether it
+ * moved since previous (null: the first update, which only sets the base).
+ * A move is a Go-side status write (Held, a release step) the page flushes
+ * at once instead of leaving it in kcp's persist coalescer for up to 10 s.
+ */
+export function contractTransitions(previous, contracts) {
+  const key = (contracts ?? []).map((c) => `${c?.name}:${c?.phase ?? ""}:${c?.step ?? ""}`).sort().join("|");
+  return { key, changed: previous !== null && previous !== undefined && previous !== key };
+}
+
 /** The tab id in name when it is an infra of origin (originInfraName), else null. */
 export function originInfraTab(origin, name) {
   const prefix = originInfraName(origin, "x").slice(0, -1);
@@ -815,7 +916,7 @@ export function originInfraTab(origin, name) {
  * origins' infras and the tab's own are not listed. contracts are
  * feedContract views; did is the signed-in identity (rebind target).
  */
-export function planInfraGC({ infras, contracts, origin, tabId, did }) {
+export function planInfraGC({ infras, contracts, origin, tabId, did, now = Date.now(), historyMs = INFRA_HISTORY_MS }) {
   const own = originInfraName(origin, tabId);
   const byName = new Map((contracts ?? []).map((c) => [c?.name, c]));
   const plan = [];
@@ -830,7 +931,32 @@ export function planInfraGC({ infras, contracts, origin, tabId, did }) {
       .map((entry) => infraContractName(name, entry?.name))
       .filter((cc) => contractLive(byName.get(cc)));
     if (live.length === 0) {
-      plan.push({ name, action: "delete", reason: "no live ComputeContract", live });
+      // The newest end among its contracts (and entries' release stamps),
+      // else the infra's creation: history younger than historyMs stays.
+      const entries = infra.spec?.contracts ?? [];
+      const ended = newestTime(
+        infra.status?.endedAt,
+        ...entries.map((entry) => entry?.releaseRequestedAt),
+        ...entries.map((entry) => {
+          const c = byName.get(infraContractName(name, entry?.name));
+          return c?.finishedAt ? new Date(c.finishedAt).toISOString() : "";
+        }),
+      ) || newestTime(infra.metadata?.creationTimestamp);
+      const hours = ended ? ((now - ended) / 3600_000).toFixed(1) : "unknown";
+      if (!ended || now - ended <= historyMs) {
+        plan.push({ name, action: "keep", reason: `history: finished ${hours} h ago`, live });
+      } else if (infraRecordResolvable(infra, did)) {
+        plan.push({ name, action: "delete", reason: `no live ComputeContract; finished ${hours} h ago`, live });
+      } else {
+        // Deleting it now would orphan its PDS record (the controller cannot
+        // reach the repo). The same DID's: rebind, wait for the record, then
+        // delete; anyone else's: keep.
+        const owner = infraRecordDid(infra);
+        const mine = owner ? owner === did : infra.spec?.record?.repoRef?.name === infraRepoRef(did).name;
+        plan.push(mine
+          ? { name, action: "rebind-delete", reason: `finished ${hours} h ago; record unresolved, rebinding first`, live }
+          : { name, action: "keep", reason: "kept: record unresolved", live });
+      }
       continue;
     }
     const binding = infra.spec?.record;
