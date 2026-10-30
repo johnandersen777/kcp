@@ -7,13 +7,21 @@
 // still has spec.tunnels[].shell, the wootty web terminal behind opentunnel
 // (plan 0032; a browser-made token in a vault bundle the guest fetches
 // through secretsRef). The webrtc shell is up ~2 s after Held; the wootty
-// address takes 70-165 s, waiting on its TLS certificate.
+// address takes 70-165 s, waiting on its TLS certificate. With the agent
+// (plan 0035, spec.agent) the bundle also holds an ATIRC_TOKEN placeholder
+// the requester fills with a minted atirc token; the guest starts the agent
+// on an events.guest.agentStart ContractEvent (the Agent button).
 
 export const WOOTTY_TAG = "wootty";
 export const WOOTTY_PORT = 7681;
 export const WOOTTY_ENV = "/etc/wootty/wootty.env";
+export const ATIRC_ENV = "/etc/atirc/atirc.env";
 export const SSH_TAG = "ssh";
 export const SECRETS_MOUNT = "requester";
+// The requester policy on every page contract, as the CLI's `run request`
+// defaults contract.policy (socialweb requester.DefaultPolicyWorkflow); the
+// PolicyEngine runs it in the fenced browser sandbox (plan 0037).
+export const REQUESTER_POLICY = "requester-tangled-vouch";
 
 /** The per-tab EphemeralInfra record lives long enough to outlast a page session. */
 export const ORIGIN_INFRA_TTL_SECONDS = 30 * 24 * 3600;
@@ -81,6 +89,29 @@ export function repoName(did) {
 
 export function infraRepoRef(did) {
   return { group: "socialweb.computer", kind: "AtprotoRepo", name: repoName(did) };
+}
+
+// The EventSources the page's compose runs: its MarketRequester has no relay
+// (createRoot), so socialweb's watchSources are the public jetstreams, and
+// the MarketRequester's watch selector links grant subscribing to them.
+export const INFRA_EVENT_SOURCES = ["jetstream-bsky-us-east", "jetstream-bsky-us-west"];
+
+/**
+ * The tab infra's spec.record: synced both ways with the signed-in repo and
+ * watched through the jetstream EventSources (without eventSourceRefs it takes
+ * a per-watch PDS source no link grants: "bus: link denied").
+ */
+export function infraRecordBinding(did) {
+  return {
+    repoRef: infraRepoRef(did),
+    sync: "Both",
+    eventSourceRefs: INFRA_EVENT_SOURCES.map((name) => ({ group: "events.socialweb.computer", kind: "EventSource", name })),
+  };
+}
+
+/** True when a live spec.record needs patching to infraRecordBinding. */
+export function infraRecordStale(binding) {
+  return !binding?.repoRef || (binding.sync && binding.sync !== "Both") || !(binding.eventSourceRefs?.length > 0);
 }
 
 export function infraCondition(infra, type) {
@@ -160,9 +191,16 @@ export function secretsPath(name) {
   return `contracts/${name}/secrets`;
 }
 
-/** The secrets bundle field: JSON text of [{path, value}]. */
-export function secretsBundle(token) {
-  return JSON.stringify([{ path: WOOTTY_ENV, value: `WOOTTY_AUTH_TOKEN=${token}\n` }]);
+/**
+ * The secrets bundle field: JSON text of [{path, value, mode?}]. The agent
+ * entry is an empty ATIRC_TOKEN the requester fills in after the RFP; it also
+ * keeps an agent-only bundle non-empty (both consumers reject an empty one).
+ */
+export function secretsBundle({ woottyToken, agent = false }) {
+  return JSON.stringify([
+    ...(woottyToken ? [{ path: WOOTTY_ENV, value: `WOOTTY_AUTH_TOKEN=${woottyToken}\n` }] : []),
+    ...(agent ? [{ path: ATIRC_ENV, value: "ATIRC_TOKEN=\n", mode: "0600" }] : []),
+  ]);
 }
 
 /**
@@ -183,19 +221,31 @@ export function sessionInfraManifest(name, ttlSeconds = ORIGIN_INFRA_TTL_SECONDS
   };
 }
 
+/**
+ * The Associate DID input: "" (no association) or a did:plc:/did:web: DID
+ * other than the signed-in identity's own (the requester refuses those too).
+ */
+export function associationSubject(text, selfDid = "") {
+  const subject = String(text ?? "").trim();
+  if (!subject) return { subject: "" };
+  if (!/^did:(plc|web):[A-Za-z0-9._:%-]+$/.test(subject)) return { error: "Associate DID: enter a did:plc: or did:web: DID" };
+  if (subject === selfDid) return { error: "Associate DID: that is your own DID" };
+  return { subject };
+}
+
 /** The ComputeContract the infra controller creates for contract short in infra. */
 export function infraContractName(infra, short) {
   return `einfra-${infra}-${short}`;
 }
 
 /**
- * One EphemeralInfra contract entry (and its secrets entry, with wootty) for
- * the VM short; cc is the ComputeContract name it becomes. The template is
- * the one contractManifest builds.
+ * One EphemeralInfra contract entry (and its secrets entry, with wootty or
+ * the agent) for the VM short; cc is the ComputeContract name it becomes.
+ * The template is the one contractManifest builds.
  */
-export function infraContract({ infra, short, wootty = false, sshKeys = [] }) {
+export function infraContract({ infra, short, wootty = false, agent = false, sshKeys = [], association = "" }) {
   const cc = infraContractName(infra, short);
-  const { spec } = contractManifest({ name: cc, wootty, sshKeys });
+  const { spec } = contractManifest({ name: cc, wootty, agent, sshKeys, association });
   const { secretsRef, ...template } = spec;
   return {
     cc,
@@ -206,15 +256,20 @@ export function infraContract({ infra, short, wootty = false, sshKeys = [] }) {
 
 /**
  * A ComputeContract for the page: the webrtc ssh tunnel (sshKeys must hold
- * the page's key) and, with wootty, the opentunnel wootty tunnel and the
- * secretsRef of its token bundle.
+ * the page's key), with wootty the opentunnel wootty tunnel, with agent the
+ * atirc agent, and with either the secretsRef of their bundle. association
+ * (a DID, plan 0036 P1) has the requester write a contract-scoped
+ * market.association for it; its ref file reaches the guest through the
+ * secrets bundle, so it needs the secretsRef too.
  */
-export function contractManifest({ name, ownerDid, wootty = false, sshKeys = [] }) {
+export function contractManifest({ name, ownerDid, wootty = false, agent = false, sshKeys = [], association = "" }) {
   // No bidderDids: the requester's discovery picks the bidders.
-  const spec = { vmName: name };
+  const spec = { vmName: name, policy: REQUESTER_POLICY };
   spec.tunnels = [{ tag: SSH_TAG, port: 22, transport: "webrtc" }];
+  if (wootty || agent || association) spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
+  if (association) spec.association = { subject: association };
+  if (agent) spec.agent = { envFile: ATIRC_ENV };
   if (wootty) {
-    spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
     spec.tunnels.unshift({ tag: WOOTTY_TAG, port: WOOTTY_PORT, transport: "opentunnel", shell: { envFile: WOOTTY_ENV } });
   }
   if (sshKeys.length > 0) spec.sshAuthorizedKeys = sshKeys;
@@ -231,6 +286,11 @@ export function contractManifest({ name, ownerDid, wootty = false, sshKeys = [] 
 export function schemaHasShell(schema) {
   return (schema?.spec?.versions ?? []).some((v) =>
     v.schema?.properties?.spec?.properties?.tunnels?.items?.properties?.shell !== undefined);
+}
+
+/** True when an APIResourceSchema's ComputeContract has spec.agent (plan 0035). */
+export function schemaHasAgent(schema) {
+  return (schema?.spec?.versions ?? []).some((v) => v.schema?.properties?.spec?.properties?.agent !== undefined);
 }
 
 /**

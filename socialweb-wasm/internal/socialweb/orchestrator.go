@@ -27,7 +27,6 @@ import (
 	"github.com/johnandersen777/socialweb-computer-kcp/api/v1alpha1"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/app/compose"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/app/marketrequester"
-	"github.com/johnandersen777/socialweb-computer-kcp/internal/sandbox/worker"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/atproto/oauth"
 	atpds "github.com/johnandersen777/socialweb-computer-kcp/internal/atproto/pds"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/atproto/pdsclient"
@@ -40,7 +39,7 @@ import (
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/infra"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketidentity"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketintents"
-	policyenginectl "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/policyengine"
+	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/policy"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/repos"
 	ctlruntime "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/runtime"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/runtime/kcpapply"
@@ -49,11 +48,11 @@ import (
 	contractexposure "github.com/johnandersen777/socialweb-computer-kcp/internal/exposure"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/marketidentity/atproto"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/oauthcallback"
-	pecontroller "github.com/johnandersen777/socialweb-computer-kcp/internal/policyengine/controller"
 
 	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserinfra/exposure"
 	bvault "github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserinfra/vault"
 	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserinfra/vaulthost"
+	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browsersandbox"
 )
 
 type Config struct {
@@ -312,17 +311,13 @@ func Start(parent context.Context, cfg Config) (*Orchestrator, error) {
 	}); err != nil {
 		return nil, err
 	}
-	engines := pecontroller.NewEngineManager(pecontroller.NewDefaultEngineFactory(pecontroller.Config{
-		Sandbox:        worker.New(),
-		DisableActions: true,
-		Log: func(level, msg string, meta map[string]any) {
-			log.Info(msg, "level", level)
-		},
-	}))
-	if _, err := policyenginectl.Register(mgr, policyenginectl.Options{
-		Bus: cfg.Bus, Engines: engines, Log: log,
+	// Policy runs in the page's fenced sandbox (plan 0037): the PolicyEngine's
+	// spec.sandbox.provider browser opens browsersandbox, whose probe sets the
+	// Fenced and Ready conditions.
+	if err := policy.Register(mgr, policy.Options{
+		Bus: cfg.Bus, OpenSandbox: browsersandbox.Open, Log: log,
 	}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("socialweb: policy controllers: %w", err)
 	}
 	if _, err := marketintents.Register(mgr, marketintents.Options{
 		Bus:     cfg.Bus,
@@ -531,6 +526,7 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 				WebRTC:   &v1alpha1.IngressWebRTCConfig{},
 			},
 			SecretsFallback: v1alpha1.SecretsFallbackSealed,
+			Components:      browserPolicySandbox(),
 		},
 	}
 	obj.APIVersion = v1alpha1.GroupVersion.String()
@@ -538,15 +534,16 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 	obj.Name = "app"
 	// Never overwrite an existing app: the UI edits spec.identity at runtime
 	// and the worker config may be empty on a reload with restored state.
-	// Only the comms mode and secrets fallback, which the page owns, are
-	// brought up to date (restored state from before Firehose).
+	// Only the comms mode, secrets fallback and policy sandbox, which the
+	// page owns, are brought up to date (restored state from before Firehose).
 	if cur, err := kube.Get[v1alpha1.MarketRequester](ctx, kc.Resource(v1alpha1.MarketRequesterGVR), "app"); err == nil {
 		if cur.Spec.Comms != nil && cur.Spec.Comms.Mode == obj.Spec.Comms.Mode &&
 			cur.Spec.RequesterIngress != nil && cur.Spec.RequesterIngress.ProviderName() == v1alpha1.IngressProviderWebRTC &&
-			cur.Spec.SecretsFallback == obj.Spec.SecretsFallback {
+			cur.Spec.SecretsFallback == obj.Spec.SecretsFallback && hasBrowserPolicySandbox(cur.Spec.Components) {
 			return nil
 		}
-		patch, err := json.Marshal(map[string]any{"spec": map[string]any{"comms": obj.Spec.Comms, "requesterIngress": obj.Spec.RequesterIngress, "secretsFallback": obj.Spec.SecretsFallback}})
+		patch, err := json.Marshal(map[string]any{"spec": map[string]any{"comms": obj.Spec.Comms, "requesterIngress": obj.Spec.RequesterIngress,
+			"secretsFallback": obj.Spec.SecretsFallback, "components": obj.Spec.Components}})
 		if err != nil {
 			return err
 		}
@@ -556,6 +553,26 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 	_, err = kube.Apply[*v1alpha1.MarketRequester](ctx, kc.Resource(v1alpha1.MarketRequesterGVR), obj,
 		kube.ApplyOptions{FieldManager: "socialweb-wasm", Force: true})
 	return err
+}
+
+// policyEngineKey names the PolicyEngine the requester app composes.
+var policyEngineKey = compose.ComponentKey(compose.ComponentKindPolicyEngine, compose.PolicyEngineComponent)
+
+// browserPolicySandbox makes the composed PolicyEngine run policy in the
+// page's fenced browser sandbox (plan 0037), as createRoot sets the webrtc
+// ingress provider: the page cannot run deno.
+func browserPolicySandbox() v1alpha1.ComponentOverrides {
+	return v1alpha1.ComponentOverrides{policyEngineKey: {Settings: &v1alpha1.ComponentSettings{
+		PolicyEngine: &v1alpha1.PolicyEngineSettings{
+			Sandbox: &v1alpha1.PolicyEngineSandboxSettings{Provider: policyv1alpha1.PolicySandboxProviderBrowser},
+		},
+	}}}
+}
+
+func hasBrowserPolicySandbox(components v1alpha1.ComponentOverrides) bool {
+	settings := components[policyEngineKey].Settings
+	return settings != nil && settings.PolicyEngine != nil && settings.PolicyEngine.Sandbox != nil &&
+		settings.PolicyEngine.Sandbox.Provider == policyv1alpha1.PolicySandboxProviderBrowser
 }
 
 func (o *Orchestrator) Close() error {

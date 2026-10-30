@@ -18,6 +18,7 @@
 
 export const NSID_PUBLIC_KEY = "com.publicdomainrelay.temp.compute.events.guest.publicKey";
 export const NSID_SIGNAL = "com.publicdomainrelay.temp.compute.events.guest.signalWebRTC";
+export const NSID_AGENT_START = "com.publicdomainrelay.temp.compute.events.guest.agentStart";
 export const ICE_SERVERS = [{ urls: "stun:stun.cloudflare.com:3478" }];
 export const SSH_TAG = "ssh";
 const AGE_URL = "https://esm.sh/age-encryption@0.3.1";
@@ -109,10 +110,17 @@ export const loadSSHKey = (name) => keyStore("readonly", (s) => s.get(name));
 export const deleteSSHKey = (name) => keyStore("readwrite", (s) => s.delete(name));
 
 export function contractEventManifest({ name, contract, nsid, kind, tag = SSH_TAG, key, ciphertext }) {
-  const spec = { contractRef: { name: contract }, direction: "outbound", nsid, kind, tag };
+  const spec = { contractRef: { name: contract }, direction: "outbound", nsid };
+  if (kind) spec.kind = kind;
+  if (tag) spec.tag = tag;
   if (key) spec.key = key;
   if (ciphertext) spec.ciphertext = ciphertext;
   return { apiVersion: "socialweb.computer/v1alpha1", kind: "ContractEvent", metadata: { name }, spec };
+}
+
+/** Asks the guest agent to start the contract's atirc agent unit (plan 0035); no kind, tag or payload. */
+export function agentStartEvent(contract, suffix) {
+  return contractEventManifest({ name: `${contract}-agent-${suffix}`, contract, nsid: NSID_AGENT_START, tag: "" });
 }
 
 /**

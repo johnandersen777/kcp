@@ -163,6 +163,14 @@ globalThis.__socialwebIngress = (json) => {
 const webRTCIngress = await import("./webrtc_ingress.js");
 if (webRTCIngress.supported()) globalThis.__socialwebWebRTC = webRTCIngress;
 
+// Fenced policy sandbox (policy_sandbox.js, plan 0037): the page's
+// opaque-origin frame runs socialweb policy programs, one Worker per run;
+// Go's browsersandbox runner reaches it through __socialwebSandbox and
+// probes the fence before the PolicyEngine is Ready.
+if (init.policySandboxPort) {
+  globalThis.__socialwebSandbox = (await import("./policy_sandbox.js")).connect(init.policySandboxPort);
+}
+
 // Socialweb vault state (OAuth session, pending PKCE, credentials) is small;
 // the page persists it under the "socialweb" IndexedDB key.
 globalThis.__socialwebPersist = (snapshot) => {
