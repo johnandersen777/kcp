@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	exposurev1alpha1 "github.com/johnandersen777/socialweb-computer-kcp/api/exposure/v1alpha1"
+	policyv1alpha1 "github.com/johnandersen777/socialweb-computer-kcp/api/policy/v1alpha1"
 	"github.com/johnandersen777/socialweb-computer-kcp/api/v1alpha1"
 )
 
@@ -47,6 +48,8 @@ type Resource struct {
 	Address  string         `json:"address,omitempty"`
 	Endpoint string         `json:"endpoint,omitempty"`
 	Pending  *PendingAction `json:"pendingAction,omitempty"`
+	// Fenced is the PolicyEngine's Fenced condition status (plan 0037).
+	Fenced string `json:"fenced,omitempty"`
 }
 
 // Contract is the compute-contract projection rendered by the page.
@@ -102,6 +105,7 @@ type State struct {
 	Exposures       []Resource      `json:"exposures,omitempty"`
 	Contracts       []Contract      `json:"contracts,omitempty"`
 	ContractEvents  []ContractEvent `json:"contractEvents,omitempty"`
+	PolicyEngine    *Resource       `json:"policyEngine,omitempty"`
 	CRDs            []string        `json:"crds,omitempty"`
 }
 
@@ -166,10 +170,13 @@ func Start(ctx context.Context, cfg *rest.Config, publish func([]byte)) error {
 	}
 	factory.Start(ctx.Done())
 	factory.WaitForCacheSync(ctx.Done())
-	// ContractEvent is newer than some served manifests: it starts after the
+	// ContractEvent (and PolicyEngine) is newer than some served manifests: it starts after the
 	// initial sync and is never waited on, so a kcp without the API still
 	// boots; its reflector lists again with backoff until the API appears.
 	if err := watch(v1alpha1.ContractEventGVR); err != nil {
+		return err
+	}
+	if err := watch(policyv1alpha1.PolicyEngineGVR); err != nil {
 		return err
 	}
 	factory.Start(ctx.Done())
@@ -242,6 +249,7 @@ func (f *Feed) build() State {
 		state.ContractEvents = append(state.ContractEvents, contractEvent(u))
 	}
 	sort.Slice(state.ContractEvents, func(i, j int) bool { return state.ContractEvents[i].Name < state.ContractEvents[j].Name })
+	state.PolicyEngine = first(f.objects(policyv1alpha1.PolicyEngineGVR), policyEngine)
 	for _, u := range f.objects(crdGVR) {
 		state.CRDs = append(state.CRDs, u.GetName())
 	}
@@ -333,6 +341,33 @@ func identityResource(u *unstructured.Unstructured) *Resource {
 	}
 	if r.Handle == "" {
 		r.Handle, _, _ = unstructured.NestedString(u.Object, "status", "handle")
+	}
+	return r
+}
+
+// policyEngine reports phase, ready and the Fenced condition; the message is
+// the Fenced reason and probe facts, else why the engine is not Ready.
+func policyEngine(u *unstructured.Unstructured) *Resource {
+	r := &Resource{Name: u.GetName()}
+	r.Phase, _, _ = unstructured.NestedString(u.Object, "status", "phase")
+	r.Ready, _, _ = unstructured.NestedBool(u.Object, "status", "ready")
+	conditions, _, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
+	notReady := ""
+	for _, raw := range conditions {
+		c, _ := raw.(map[string]any)
+		typ, _ := c["type"].(string)
+		status, _ := c["status"].(string)
+		reason, _ := c["reason"].(string)
+		message, _ := c["message"].(string)
+		switch {
+		case typ == policyv1alpha1.PolicyEngineConditionFenced:
+			r.Fenced, r.Message = status, reason+": "+message
+		case typ == "Ready" && status != "True":
+			notReady = reason + ": " + message
+		}
+	}
+	if r.Message == "" {
+		r.Message = notReady
 	}
 	return r
 }
