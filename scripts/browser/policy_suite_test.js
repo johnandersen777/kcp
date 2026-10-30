@@ -84,7 +84,11 @@ const vouched = (vouchedBy, operatorOf = { [self]: self, [bidder]: bidderOp }, t
 
 const spyFetch = (answer) => `globalThis.fetch = (url) => { console.error("__PE_SPY_FETCH__ " + url); return ${answer}; };`;
 const offline = spyFetch(`Promise.reject(new TypeError("offline"))`);
-const hanging = spyFetch(`new Promise(() => {})`);
+// A stall after the trust check: the action decides from a valid snapshot,
+// then its output write never returns, so only the deadline or a kill ends
+// the run (the action makes no network call once the host seeds trust).
+const stalledOutput = `{ const write = Deno.writeTextFile; Deno.writeTextFile = (path, ...rest) =>
+  String(path) === "/gh/output" ? new Promise(() => {}) : write(path, ...rest); }`;
 
 // [scenario, want allow, evidence the policy ran, opts]
 const cases = [
@@ -113,15 +117,22 @@ const cases = [
   ["trust-host-error-deny (fail-closed: malformed snapshot)", false, ["threw"], {
     trust: { ...vouched({ [self]: [bidder] }), "vouchedBy.json": { data: "{not json", encoding: "text" } },
   }],
-  // fail-closed: no snapshot, the action resolves over the network, which is down.
-  ["pds-outage-deny (fail-closed: no snapshot, network down)", false, ["fetched"], { prelude: offline }],
-  ["pds-outage-deny (fail-closed: half a snapshot, network down)", false, ["fetched"], {
+  // fail-closed/no-trust-snapshot (socialweb B2): trust comes only from the
+  // host snapshot; without a whole one the action denies at once and never
+  // touches the network (the offline spy records any fetch).
+  ["no-trust-snapshot-deny (fail-closed: no snapshot, no fetch)", false, ["decision", "!fetched"], { prelude: offline }],
+  ["no-trust-snapshot-deny (fail-closed: half a snapshot, no fetch)", false, ["decision", "!fetched"], {
     prelude: offline, trust: { "operatorOf.json": vouched({ [self]: [bidder] })["operatorOf.json"] },
   }],
-  // fail-closed: the network never answers; killed at the deadline or by
-  // kill, nothing answered.
-  ["timeout-deny (fail-closed: nothing answered)", false, ["unanswered"], { prelude: hanging, timeoutMs: 1_000 }],
-  ["cancelled-deny (fail-closed: nothing answered)", false, ["unanswered"], { prelude: hanging, timeoutMs: 60_000, kill: true }],
+  // fail-closed/deadline and /cancelled: an allowing snapshot, but the action
+  // stalls after deciding; killed at the deadline or cancelled, nothing is
+  // sent (no result line) and nothing fetched, so the run denies.
+  ["deadline-deny (fail-closed: stalled after an allow, killed at the deadline)", false, ["unanswered", "!decision", "!fetched"], {
+    prelude: offline + stalledOutput, trust: vouched({ [self]: [bidder] }, { [self]: self }), timeoutMs: 1_000,
+  }],
+  ["cancelled-deny (fail-closed: stalled after an allow, run cancelled)", false, ["unanswered", "!decision", "!fetched"], {
+    prelude: offline + stalledOutput, trust: vouched({ [self]: [bidder] }, { [self]: self }), timeoutMs: 60_000, kill: true,
+  }],
 ];
 
 for (const mode of ["scope", "full"]) {
@@ -130,7 +141,8 @@ for (const mode of ["scope", "full"]) {
       const before = runs;
       const r = await tangledVouch(mode, opts);
       assert(runs === before + 1, "the runner did not receive the policy program");
-      assert(evidence.every((e) => r.ran.has(e)), `ran=${[...r.ran]}, want ${evidence}: ${r.why}`);
+      // "x" must be in ran, "!x" must not.
+      assert(evidence.every((e) => e.startsWith("!") ? !r.ran.has(e.slice(1)) : r.ran.has(e)), `ran=${[...r.ran]}, want ${evidence}: ${r.why}`);
       assert(r.allow === want, `allow=${r.allow}, want ${want} (code=${r.code} timedOut=${r.timedOut}): ${r.why}`);
     } });
   }
