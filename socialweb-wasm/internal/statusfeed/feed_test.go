@@ -91,3 +91,14 @@ func TestR2Projection(t *testing.T) {
 		t.Fatalf("no R2: %+v", c)
 	}
 }
+
+func TestReleaseCascadeProjection(t *testing.T) {
+	c := contract(&unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "c"},
+		"status": map[string]any{"phase": "Releasing", "atircRevokes": "Pending",
+			"execution": map[string]any{"step": "releasingGuestRequester"}},
+	}})
+	if c.Step != "releasingGuestRequester" || c.AtircRevokes != "Pending" {
+		t.Fatalf("release cascade: %+v", c)
+	}
+}

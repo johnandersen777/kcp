@@ -65,6 +65,11 @@ type Contract struct {
 	// spec.association.fromGuest: the page's Start R2 button (plan 0036 A7).
 	GuestTools []string `json:"guestTools,omitempty"`
 	FromGuest  bool     `json:"fromGuest,omitempty"`
+	// Step is status.execution.step (e.g. releasingGuestRequester while the
+	// A8 cascade waits for the guest requester); AtircRevokes is
+	// status.atircRevokes (Pending|Done|Abandoned), run before Released.
+	Step         string `json:"step,omitempty"`
+	AtircRevokes string `json:"atircRevokes,omitempty"`
 
 	SecretsFetchedAt string    `json:"secretsFetchedAt,omitempty"`
 	Release          bool      `json:"release,omitempty"`
@@ -326,6 +331,8 @@ func contract(u *unstructured.Unstructured) Contract {
 	_, c.Agent, _ = unstructured.NestedMap(u.Object, "spec", "agent")
 	c.GuestTools, _, _ = unstructured.NestedStringSlice(u.Object, "spec", "guestTools")
 	c.FromGuest, _, _ = unstructured.NestedBool(u.Object, "spec", "association", "fromGuest")
+	c.Step, _, _ = unstructured.NestedString(u.Object, "status", "execution", "step")
+	c.AtircRevokes, _, _ = unstructured.NestedString(u.Object, "status", "atircRevokes")
 	networks, _, _ := unstructured.NestedSlice(u.Object, "status", "contract", "networks")
 	for _, raw := range networks {
 		n, _ := raw.(map[string]any)
