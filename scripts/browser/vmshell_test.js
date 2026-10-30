@@ -36,6 +36,8 @@ import {
   phaseLabel,
   releaseAnswered,
   finishedEntry,
+  RELEASE_FIELD_MANAGER,
+  releaseApply,
   latestStamp,
   releaseTimedOut,
   stampAfter,
@@ -444,6 +446,10 @@ function fakeKcp(cc, infra = null, conflicts = 0) {
       infra.metadata.resourceVersion = String(Number(infra.metadata.resourceVersion) + 1);
       return Promise.resolve(structuredClone(infra));
     }
+    if (method === "PATCH" && cc && path.startsWith(`${API}/computecontracts/${cc.metadata.name}?`)) {
+      cc.spec = { ...cc.spec, ...body.spec };
+      return Promise.resolve(structuredClone(cc));
+    }
     return Promise.reject(new Error(`unexpected ${method} ${path}`));
   };
   return { rest, calls, writes: () => calls.filter((c) => c.method !== "GET") };
@@ -487,6 +493,39 @@ Deno.test("release: Release merge-patches only the EphemeralInfra entry, never t
   assert(!k.calls.some((c) => c.method !== "GET" && c.path.includes("/computecontracts")), "no write to computecontracts");
   assert(infra.spec.contracts.length === 2 && infra.spec.secrets.length === 1, "the other entry and the secrets stay");
   assert(JSON.stringify(cc.spec) === JSON.stringify(sessionCC().spec), "the contract is untouched");
+});
+
+Deno.test("release: the ownerless SSA sets exactly spec.release and releaseRequestedAt under requester-release", () => {
+  const a = releaseApply(API, "vm1", T0);
+  assert(RELEASE_FIELD_MANAGER === "socialweb.computer/requester-release", RELEASE_FIELD_MANAGER);
+  assert(a.path === `${API}/computecontracts/vm1?fieldManager=socialweb.computer%2Frequester-release&force=true`, a.path);
+  assert(a.contentType === "application/apply-patch+yaml", a.contentType);
+  assert(JSON.stringify(a.body) === JSON.stringify({
+    apiVersion: "socialweb.computer/v1alpha1",
+    kind: "ComputeContract",
+    metadata: { name: "vm1" },
+    spec: { release: true, releaseRequestedAt: T0 },
+  }), JSON.stringify(a.body));
+});
+
+Deno.test("release: an ownerless contract gets the rc127 apply and nothing is written to the infra", async () => {
+  const cc = { metadata: { name: "vm1" }, spec: { vmName: "vm1" } };
+  const infra = sessionInfra();
+  const before = JSON.stringify(infra);
+  const k = fakeKcp(cc, infra);
+  const first = await requestRelease({ rest: k.rest, api: API, name: "vm1", now: new Date(T0) });
+  const again = await requestRelease({ rest: k.rest, api: API, name: "vm1", now: new Date(T0) });
+  assert(first === T0 && again === "2026-10-30T12:00:00.001Z", `${first} ${again}`);
+  const writes = k.writes();
+  assert(writes.length === 2 && writes.every((w) => w.method === "PATCH" && w.contentType === "application/apply-patch+yaml" &&
+    w.path === `${API}/computecontracts/vm1?fieldManager=socialweb.computer%2Frequester-release&force=true`), JSON.stringify(writes));
+  assert(JSON.stringify(writes.map((w) => w.body.spec)) === JSON.stringify([{ release: true, releaseRequestedAt: first }, { release: true, releaseRequestedAt: again }]),
+    "exactly the two fields, a newer stamp on Release again");
+  assert(!k.calls.some((c) => c.path.includes("/ephemeralinfras")) && JSON.stringify(infra) === before, "no infra read or write");
+  assert(cc.spec.release === true && cc.spec.releaseRequestedAt === again && cc.spec.vmName === "vm1", JSON.stringify(cc.spec));
+  const empty = fakeKcp({ metadata: { name: "vm2", ownerReferences: [] }, spec: {} });
+  await requestRelease({ rest: empty.rest, api: API, name: "vm2", now: new Date(T0) });
+  assert(empty.writes().length === 1 && empty.writes()[0].path.startsWith(`${API}/computecontracts/vm2?`), "an empty ownerReferences is ownerless");
 });
 
 Deno.test("release: Release again sends a newer stamp on the entry, after the entry's and the contract's", async () => {
@@ -549,10 +588,10 @@ Deno.test("release: a missing contract or entry is an error and no write", async
   await requestRelease({ rest: nul.rest, api: API, name: "vm1" }).catch((err) => failed = err.message);
   assert(failed === "ComputeContract vm1 not found", failed);
 
-  const plain = fakeKcp({ metadata: { name: "vm1" }, spec: {} });
+  const other = fakeKcp({ metadata: { name: "vm1", ownerReferences: [{ kind: "MarketIntent", name: "mi" }] }, spec: {} }, sessionInfra());
   failed = "";
-  await requestRelease({ rest: plain.rest, api: API, name: "vm1" }).catch((err) => failed = err.message);
-  assert(/belongs to no EphemeralInfra/.test(failed) && plain.writes().length === 0, failed);
+  await requestRelease({ rest: other.rest, api: API, name: "vm1" }).catch((err) => failed = err.message);
+  assert(/owned by MarketIntent\/mi, not an EphemeralInfra/.test(failed) && other.writes().length === 0, failed);
 
   const noEntry = sessionInfra();
   noEntry.spec.contracts.pop();

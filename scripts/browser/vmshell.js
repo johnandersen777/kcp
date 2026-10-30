@@ -203,9 +203,10 @@ export function releaseWorkPending(contract) {
 }
 
 // Release requests (socialweb r128 10558978, ephemeralinfras 11): the
-// composer is the only writer of a ComputeContract's spec, so the page never
-// writes the contract. Every Release (the button, Release again, d.release
-// and so the demo's leftover sweep) sets the tab's EphemeralInfra entry to
+// composer is the only writer of a ComputeContract's spec, so the page does
+// not write a contract an EphemeralInfra owns. Every Release (the button,
+// Release again, d.release and so the demo's leftover sweep) of such a
+// contract sets the EphemeralInfra entry to
 // {state: Released, releaseRequestedAt: now}; the infra controller copies
 // spec.release and the stamp onto the ComputeContract (manager
 // socialweb.computer/ephemeralinfra) and re-asks a Failed one for a newer
@@ -221,12 +222,35 @@ export function releaseWorkPending(contract) {
 // manager of the page's kcp client (Go-http-client, operation Update). The
 // patch carries the resourceVersion it read, so a concurrent writer is a 409
 // and a retry, never a lost entry or stamp.
+//
+// A contract with no ownerReferences at all (rc127 leftovers, `run request`
+// from the terminal) has no composer to ask, so the page releases it as
+// rc127 did (linux-kcp, rc128): a server-side apply of exactly
+// {spec.release, spec.releaseRequestedAt} under
+// socialweb.computer/requester-release, force, the manager socialweb's own
+// release intent used for these two fields. A contract owned by anything
+// else is refused.
+export const RELEASE_FIELD_MANAGER = "socialweb.computer/requester-release";
 
 /** spec.releaseRequestedAt for a Release now: strictly after previous, so a second Release always differs. */
 export function releaseRequestedAt(previous = "", now = new Date()) {
   const before = Date.parse(previous ?? "");
   const at = Number.isNaN(before) ? now.getTime() : Math.max(now.getTime(), before + 1);
   return new Date(at).toISOString();
+}
+
+/** The server-side apply that releases ownerless ComputeContract name. */
+export function releaseApply(api, name, requestedAt) {
+  return {
+    path: `${api}/computecontracts/${name}?fieldManager=${encodeURIComponent(RELEASE_FIELD_MANAGER)}&force=true`,
+    contentType: "application/apply-patch+yaml",
+    body: {
+      apiVersion: "socialweb.computer/v1alpha1",
+      kind: "ComputeContract",
+      metadata: { name },
+      spec: { release: true, releaseRequestedAt: requestedAt },
+    },
+  };
 }
 
 /** The later of RFC 3339 stamps ("" when none parses). */
@@ -290,18 +314,28 @@ export async function updateInfraEntry({ rest, api, infra, match, update, what =
 }
 
 /**
- * Releases ComputeContract name through its EphemeralInfra entry: state
- * Released with a fresh releaseRequestedAt (strictly after the entry's and
- * the contract's), and no write to the contract. rest(method, path, body,
- * contentType) is kcpREST; serialize(run) runs run in the page's infra write
- * queue. Returns the releaseRequestedAt sent.
+ * Releases ComputeContract name. Owned by an EphemeralInfra: through its
+ * entry (state Released with a fresh releaseRequestedAt, strictly after the
+ * entry's and the contract's), no write to the contract. No owner at all:
+ * the rc127 apply of spec.release + a fresh releaseRequestedAt on the
+ * contract (releaseApply), no infra write. Any other owner: refused.
+ * rest(method, path, body, contentType) is kcpREST; serialize(run) runs run
+ * in the page's infra write queue. Returns the releaseRequestedAt sent.
  */
 export async function requestRelease({ rest, api, name, serialize = (run) => run(), now = new Date() }) {
   const cc = await rest("GET", `${api}/computecontracts/${name}`);
   if (!cc) throw new Error(`ComputeContract ${name} not found`);
-  const owner = (cc.metadata?.ownerReferences ?? []).find((o) => o.kind === "EphemeralInfra");
+  const owners = cc.metadata?.ownerReferences ?? [];
+  if (owners.length === 0) {
+    const requestedAt = releaseRequestedAt(cc.spec?.releaseRequestedAt, now);
+    const apply = releaseApply(api, name, requestedAt);
+    await rest("PATCH", apply.path, apply.body, apply.contentType);
+    return requestedAt;
+  }
+  const owner = owners.find((o) => o.kind === "EphemeralInfra");
   if (!owner?.name) {
-    throw new Error(`ComputeContract ${name} belongs to no EphemeralInfra; the page releases only its infra entries (the composer writes the contract)`);
+    const kinds = owners.map((o) => `${o.kind ?? "?"}/${o.name ?? "?"}`).join(", ");
+    throw new Error(`ComputeContract ${name} is owned by ${kinds}, not an EphemeralInfra; its composer releases it, not the page`);
   }
   const short = cc.metadata?.labels?.["infra.socialweb.computer/contract"];
   const entry = await serialize(() => updateInfraEntry({
