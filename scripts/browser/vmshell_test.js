@@ -49,6 +49,7 @@ import {
   dropOwnersPatch,
   staleSpecOwners,
   releaseOffered,
+  guestMayRun,
   latestStamp,
   releaseTimedOut,
   stampAfter,
@@ -706,18 +707,28 @@ Deno.test("markFinished: finishedEntry stamps a fresh releaseRequestedAt and ski
   assert(!/setInfraContract\(/.test(mark), "and never writes the entry it read before queueing");
 });
 
-Deno.test("release: a plain Failed contract whose guest may still run offers Release", async () => {
-  const receiptOk = { name: "c", phase: "Failed", guestMayRun: true, message: "the guest stopped answering" };
-  assert(releaseOffered(receiptOk), "offered without ReleaseFailed");
-  assert(!releaseOffered({ ...receiptOk, guestMayRun: false }), "no live guest: nothing to release");
-  assert(!releaseOffered({ ...receiptOk, phase: "Released" }), "Released");
-  assert(releaseOffered({ name: "c", phase: "Held" }) && !releaseOffered({ name: "c", phase: "Held", release: true }), "active as before");
-  const sent = withReleaseSent(receiptOk, T0);
-  assert(!releaseOffered(sent), "not while this tab's request is unseen");
-  assert(!releaseOffered({ ...receiptOk, release: true, releaseRequestedAt: T0 }), "not while a request is unanswered");
-  assert(releaseOffered({ ...receiptOk, release: true, releaseRequestedAt: T0, releaseAnsweredAt: T0 }), "answered, guest still live: offered");
-  const failedRelease = { ...receiptOk, release: true, releaseFailed: true, releaseRequestedAt: T0, releaseAnsweredAt: T0 };
+Deno.test("release: Release is offered on a Failed contract exactly when the requester re-releases it", async () => {
+  const live = { name: "c", phase: "Failed", receiptOk: true, message: "the guest stopped answering" };
+  assert(guestMayRun(live) && releaseOffered(live), "Failed, receipt ok, not terminated, not acked: offered without ReleaseFailed");
+  // each condition that turns the offer off
+  assert(!releaseOffered({ ...live, receiptOk: false }) && !releaseOffered({ name: "c", phase: "Failed" }), "no valid receipt");
+  assert(!releaseOffered({ ...live, terminated: true }), "terminated");
+  assert(!releaseOffered({ ...live, releaseOk: true }), "released / acked by the bidder");
+  for (const phase of ["Released", "Releasing", "Pending"]) assert(!releaseOffered({ ...live, phase, release: true }), phase);
+  assert(!releaseOffered(withReleaseSent(live, T0)), "this tab's newer request is not seen yet");
+  assert(!releaseOffered({ ...live, release: true, releaseRequestedAt: T0 }), "a request is pending (unanswered)");
+  const failedRelease = { ...live, release: true, releaseFailed: true, releaseRequestedAt: T0, releaseAnsweredAt: T0 };
   assert(canReleaseAgain(failedRelease) && !releaseOffered(failedRelease), "a failed release offers Release again instead");
+  // still offered once the earlier request is answered and the guest may still run
+  assert(releaseOffered({ ...live, release: true, releaseRequestedAt: T0, releaseAnsweredAt: T0 }), "answered, guest still live");
+  assert(releaseOffered({ name: "c", phase: "Held" }) && !releaseOffered({ name: "c", phase: "Held", release: true }), "active as before");
+
+  // the newer stamp it sends shows as pending (the requester restarts it) until answered
+  const sent = withReleaseSent(live, T0);
+  assert(releasePending(sent) && phaseLabel(sent).text === ` Releasing · release requested ${T0}`, phaseLabel(sent).text);
+  assert(!releasePending({ ...sent, receiptOk: false }), "no receipt and no ReleaseFailed: the requester does not restart it");
+  assert(!releasePending({ ...sent, releaseAnsweredAt: T0 }), "answered");
+
   // an ownerless one releases with the rc127 apply
   const k = fakeKcp({ metadata: { name: "c" }, spec: {} });
   await requestRelease({ rest: k.rest, api: API, name: "c", now: new Date(T0) });
@@ -725,7 +736,6 @@ Deno.test("release: a plain Failed contract whose guest may still run offers Rel
   const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
   assert(/if \(vmshell\.releaseOffered\(contract\) && !computeReleaseAsked\.has\(name\)\)/.test(app), "the row's Release button uses releaseOffered");
 });
-
 Deno.test("composeInfra: a migrated infra is taken over and Go-http-client's co-ownership dropped before a prune", async () => {
   const goOwns = { manager: "Go-http-client", operation: "Update", fieldsV1: { "f:spec": { "f:contracts": {},
     "f:secrets": { "k:{\"contract\":\"vmshell-ab\"}": {}, "k:{\"contract\":\"vmshell-zz\"}": {} } } } };
