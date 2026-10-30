@@ -23,8 +23,11 @@ Deno.test("loadScope reads the generated scope file and falls back without it", 
   try {
     const file = `${dir}/requester-scope.txt`;
     if (await loadScope(file) !== DEFAULT_SCOPE) throw new Error("missing file should fall back");
-    if (!DEFAULT_SCOPE.split(" ").includes("rpc:chat.atirc.mint?aud=did:web:irc.fedfork.com%23atirc")) {
-      throw new Error("the fallback scope lacks chat.atirc.mint");
+    for (const want of [
+      "rpc:chat.atirc.mint?aud=did:web:irc.fedfork.com%23atirc",
+      "repo:com.publicdomainrelay.temp.compute.events.guest.agentStart?action=create&action=update",
+    ]) {
+      if (!DEFAULT_SCOPE.split(" ").includes(want)) throw new Error(`the fallback scope lacks ${want}`);
     }
     await Deno.writeTextFile(file, "atproto\n  repo:a?action=create \n");
     const got = await loadScope(file);
