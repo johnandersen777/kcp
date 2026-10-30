@@ -195,6 +195,7 @@ const assets = new Map<string, string>([
   ["/debug_link.js", "debug_link.js"],
   ["/kcp_lock.js", "kcp_lock.js"],
   ["/page_banner.js", "page_banner.js"],
+  ["/ready_gate.js", "ready_gate.js"],
 ]);
 // Every relative "./x.js" a served page file references must be served too:
 // a missing one hangs the page at "waiting for kcp" (webrtc_ingress.js).

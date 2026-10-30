@@ -43,6 +43,7 @@ import {
   unreadableMessage,
 } from "./state_store.js";
 import { createBanners } from "./page_banner.js";
+import { createReadyGate } from "./ready_gate.js";
 import { BUSY_MESSAGE, createKcpLock, FORCE_WARNING, TAKEN_OVER_MESSAGE } from "./kcp_lock.js";
 import * as vmshell from "./vmshell.js";
 import * as webrtcGuest from "./webrtc_guest.js";
@@ -511,15 +512,23 @@ function serializeQueue() {
 // --- kcp worker ------------------------------------------------------------
 
 let kcpWorker = null;
+// Opens with the worker once kcp is ready (spawnKcp). With a snapshot restore
+// the status feed says MarketIdentity Ready before that, so kcp calls wait
+// here rather than fail and switch features off (rc130 boot race).
+const kcpGate = createReadyGate();
+async function kcpWorkerReady() {
+  if (kcpWorker) return kcpWorker;
+  if (kcpGate.state === "open") throw new Error("kcp worker is not running");
+  return await kcpGate.wait();
+}
 const pendingBridges = new Map();
 const pendingPageRequests = new Map();
 let nextPageRequestID = -1;
 
 // Send a request straight to the kcp/socialweb bridge. kubectl has its own
 // worker; the identity callback needs this page-origin path.
-function kcpPageRequest(request, timeoutMs = 60_000) {
-  const worker = kcpWorker;
-  if (!worker) return Promise.reject(new Error("kcp worker is not running"));
+async function kcpPageRequest(request, timeoutMs = 60_000) {
+  const worker = await kcpWorkerReady();
   const id = nextPageRequestID--;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -853,6 +862,7 @@ async function yieldKcp(why) {
   worker?.terminate();
   kcpWorker = null;
   kcpWorkerBooting = null;
+  kcpGate.fail(new Error(TAKEN_OVER_MESSAGE));
   setStatus("taken over by another tab", "disconnected");
   banners.show("lock", {
     text: TAKEN_OVER_MESSAGE,
@@ -1040,6 +1050,11 @@ async function spawnKcp(useSnapshot = true) {
   }
   logBootKind(ready, spawnStarted);
   kcpWorker = worker;
+  kcpGate.open(worker);
+  // Whatever the feed's identity Ready started before kcp was ready (feature
+  // probes, the infra GC) waited for this; run the handler again in case one
+  // gave up meanwhile.
+  if (lastFeedState) queueMicrotask(() => applyState(lastFeedState));
   worker.postMessage({ type: "state-subscribe" });
 }
 
@@ -2688,9 +2703,8 @@ const infraAutoReleased = new Set();
 let infraAutoSync = false;
 
 // socialwebCall invokes a page-only Go export through kcp_worker.js.
-function socialwebCall(fn, payload, timeoutMs = 30_000) {
-  const worker = kcpWorker;
-  if (!worker) return Promise.reject(new Error("kcp worker is not running"));
+async function socialwebCall(fn, payload, timeoutMs = 30_000) {
+  const worker = await kcpWorkerReady();
   const id = nextPageRequestID--;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -2964,6 +2978,24 @@ async function markFinishedInfraContracts(contracts) {
 }
 
 async function requestVM() {
+  addLog("info", "Request VM clicked");
+  if (!kcpWorker) {
+    // Identity Ready can arrive before kcp is (snapshot restore): queue the
+    // request visibly instead of failing or doing nothing.
+    computeBusy = true;
+    computeRequestEl.disabled = true;
+    setAppStatus(computeStatusEl, "kcp is still starting; the request runs once it is up", "warn");
+    addLog("info", "Request VM waits for kcp to be ready");
+    try {
+      await kcpWorkerReady();
+    } catch (err) {
+      computeBusy = false;
+      addLog("error", `Request VM failed: ${err instanceof Error ? err.message : err}`);
+      setAppStatus(computeStatusEl, String(err.message ?? err), "err");
+      return;
+    }
+    computeBusy = false;
+  }
   const association = vmshell.associationSubject(computeAssociateEl.value, identityState?.did ?? "");
   if (association.error) {
     setAppStatus(computeStatusEl, association.error, "err");
@@ -3324,9 +3356,10 @@ function servedSchema(resource) {
       if (!schema) return null;
       return await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha1/apiresourceschemas/${schema}`);
     })().catch((err) => {
+      // undefined (not null: "not served"): the next feed update asks again.
       servedSchemas.delete(resource);
-      addLog("warn", `could not read the ${resource} schema; the features it gates (wootty, agent, R2) stay off: ${err.message ?? err}`);
-      return null;
+      addLog("warn", `could not read the ${resource} schema; the features it gates (wootty, agent, R2) are off until it is read: ${err.message ?? err}`);
+      return undefined;
     }));
   }
   return servedSchemas.get(resource);
@@ -3560,6 +3593,10 @@ function applyComputeState(state) {
   if (ready && r2StartServed === null) {
     r2StartServed = false;
     void servedSchema("contractevents").then((schema) => {
+      if (schema === undefined) {
+        r2StartServed = null; // read failed: ask again on the next update
+        return;
+      }
       r2StartServed = webrtcGuest.schemaHasR2Start(schema);
       if (r2StartServed) applyComputeState(lastFeedState);
     });
