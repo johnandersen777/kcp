@@ -55,7 +55,7 @@ repo:com.publicdomainrelay.temp.compute.events.guest.agentStart?action=create&ac
 
 The `repo:` line (found by wasm-page, atirc seq 617): the requester publishes `guest.agentStart` as a record in its own repo, like `guest.publicKey`/`guest.signalWebRTC`/`guest.secrets`, which each have the same `repo:…?action=create&action=update` scope (`collectionScope`, beside `CollectionGuestSecrets` in `scope.go`); `market.event` is already granted.
 
-Decided (linux-kcp + atirc-dev, 2026-10-30, atirc seq 587-588): exact aud, `rpc:chat.atirc.mint?aud=did:web:irc.fedfork.com%23atirc`; the requester calls getServiceAuth with aud `did:web:irc.fedfork.com#atirc` (same string; atirc verify accepts it and the bare DID). Proven at PAR/consent (2026-10-30 07:16:44Z, atirc seq 690): bsky.social granted the qr.fedfork.com client metadata holding this exact string plus the guest.agentStart repo scope (alice CLI sign-in). Still to prove after section 4 lands: getServiceAuth with aud `did:web:irc.fedfork.com#atirc` → atirc mint; fall back to `aud=*` only if that is refused. The build regenerates `requester-scope.txt`; existing sessions become `ScopeChanged` → fresh sign-in. Do not touch `internal/app/compose/atprotoscope.go`.
+Decided (linux-kcp + atirc-dev, 2026-10-30, atirc seq 587-588): exact aud, `rpc:chat.atirc.mint?aud=did:web:irc.fedfork.com%23atirc`; the requester calls getServiceAuth with aud `did:web:irc.fedfork.com#atirc` (same string; atirc verify accepts it and the bare DID). Proven at PAR/consent (2026-10-30 07:16:44Z, atirc seq 690): bsky.social granted the qr.fedfork.com client metadata holding this exact string plus the guest.agentStart repo scope (alice CLI sign-in). Proven end to end 2026-10-30 08:45:26Z (headless page run, socialweb 0ae1b2fd page build, rc120 bidders): the page requester's getServiceAuth with aud `did:web:irc.fedfork.com#atirc` minted `aliceoa-3mz3fcnzk3b2k.aliceoa.bsky.social` (`requester_atirc_minted`); no `aud=*` fallback needed. The build regenerates `requester-scope.txt`; existing sessions become `ScopeChanged` → fresh sign-in. Do not touch `internal/app/compose/atprotoscope.go`.
 
 ### 3. API: `spec.agent` (socialweb; request linux-kcp)
 
@@ -230,3 +230,9 @@ Option B (on-demand start through `events.guest.agentStart`) over boot-start. Co
 - The token is minted at request time even if Agent is never clicked: it must be in the bundle before the guest's one secrets fetch at boot, and a sealed bundle is never sent unasked. Opt-in (the checkbox) bounds it.
 - The guest agent must be running for the event to land; `agent.json` guarantees it is installed even on an XRPC requester without webrtc/sealed secrets.
 - A guest reboot leaves the unit stopped (not enabled) and the event is not replayed (persisted cursor); click Agent again.
+
+## Results
+
+- 2026-10-30 headless page run (drives-oauth, dev page atirc-agent @ socialweb 0ae1b2fd, bidders rc120 tangled-vouch): sign-in with full scopes, Agent row default on, RFP → hat-7 bid allowed by policy, `requester_atirc_minted` 08:45:26Z, Held in 40.0 s, Agent click → `guest.agentStart` ContractEvent published 08:45:55.4Z and submitted to the bidder 08:45:55.9Z, Released 08:45:59.96Z, vm.terminated, no orphan. Page side PASS.
+- Not yet observed: guest `atirc-agent.service` start and the agent nick joining atirc (the driver released 3 s after the click). Covered next by linux-kcp's CLI `--agent` run; a page rerun waits for the nick join event, not the row text.
+
