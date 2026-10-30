@@ -16,12 +16,12 @@ spec:
         crd: {}
     - group: socialweb.computer
       name: infras
-      schema: v1alpha1-7.infras.socialweb.computer
+      schema: v1alpha1-8.infras.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
       name: ephemeralinfras
-      schema: v1alpha1-7.ephemeralinfras.socialweb.computer
+      schema: v1alpha1-8.ephemeralinfras.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer

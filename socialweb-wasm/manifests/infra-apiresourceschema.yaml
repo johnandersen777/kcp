@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-7.infras.socialweb.computer
+  name: v1alpha1-8.infras.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -113,6 +113,16 @@ spec:
                         envFile:
                           type: string
                           default: /etc/atirc/atirc.env
+                    association:
+                      type: object
+                      properties:
+                        subject:
+                          type: string
+                        refFile:
+                          type: string
+                          default: /etc/socialweb-computer/association-ref
+                      required:
+                        - subject
                   required:
                     - name
               secrets:
