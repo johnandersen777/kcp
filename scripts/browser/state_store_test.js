@@ -11,6 +11,7 @@ import {
   assembleSnapshot,
   createIndexedDBBackend,
   createMemoryBackend,
+  createPersister,
   openBestBackend,
   snapshotRecords,
   StateStoreError,
@@ -165,4 +166,134 @@ Deno.test("per-key records round-trip full snapshots and deltas", async () => {
   assertEquals(Object.keys(compacted.stores.main.items).length, 0);
   assertEquals(compacted.stores.main.resourceVersion, 9);
   assertEquals(compacted.files, undefined);
+});
+
+// --- createPersister (socialweb vault snapshot durability, rc127) ---
+
+// A memory backend whose writes wait for release(), recording what landed.
+function gatedBackend() {
+  const store = createMemoryBackend();
+  const gates = [];
+  const writes = [];
+  const gate = (op) => new Promise((resolve) => gates.push(() => resolve(op())));
+  return {
+    store,
+    writes,
+    gates,
+    backend: () => Promise.resolve({
+      save: (key, value) => gate(() => { writes.push([key, value]); return store.save(key, value); }),
+      apply: (ops) => gate(() => { writes.push(...ops.puts.map(([k, v]) => [k, String(v)])); return store.apply(ops); }),
+    }),
+    async releaseAll() {
+      while (gates.length) {
+        gates.shift()();
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    },
+  };
+}
+
+// Timers that only fire when the test says so.
+function manualTimers() {
+  const live = new Map();
+  let next = 1;
+  return {
+    live,
+    setTimeout: (fn, ms) => { const id = next++; live.set(id, { fn, ms }); return id; },
+    clearTimeout: (id) => live.delete(id),
+    fireAll() {
+      const all = [...live.values()];
+      live.clear();
+      for (const t of all) t.fn();
+    },
+  };
+}
+
+Deno.test("persister: an immediate key saves at once with its seq, no timer", async () => {
+  const store = createMemoryBackend();
+  const timers = manualTimers();
+  const p = createPersister({ backend: () => Promise.resolve(store), immediate: ["socialweb"], timers });
+  await p.schedule("socialweb", '{"vault":"revoke-marker"}', 7);
+  assertEquals(await store.load("socialweb"), '{"vault":"revoke-marker"}');
+  assertEquals(String(await store.load("socialweb-seq")), "7");
+  assertEquals(timers.live.size, 0);
+  assertEquals(p.pending(), 0);
+});
+
+Deno.test("persister: other keys stay debounced until the timer", async () => {
+  const store = createMemoryBackend();
+  const timers = manualTimers();
+  const p = createPersister({ backend: () => Promise.resolve(store), immediate: ["socialweb"], timers, delayMs: 250 });
+  await p.schedule("other", "a");
+  await p.schedule("other", "b");
+  assertEquals(timers.live.size, 1);
+  assertEquals(await store.load("other"), null);
+  timers.fireAll();
+  await p.flushAll();
+  assertEquals(await store.load("other"), "b");
+});
+
+Deno.test("persister: concurrent saves are serialized and the newest snapshot wins", async () => {
+  const g = gatedBackend();
+  const p = createPersister({ backend: g.backend, immediate: ["socialweb"], timers: manualTimers() });
+  const first = p.schedule("socialweb", "s1", 1);
+  await new Promise((r) => setTimeout(r, 0));
+  // s1 is in flight; s2 and s3 arrive before it lands: s3 replaces s2.
+  const second = p.schedule("socialweb", "s2", 2);
+  const third = p.schedule("socialweb", "s3", 3);
+  assertEquals(g.gates.length, 1);
+  await g.releaseAll();
+  await Promise.all([first, second, third]);
+  assertEquals(await g.store.load("socialweb"), "s3");
+  assertEquals(String(await g.store.load("socialweb-seq")), "3");
+  const saved = g.writes.filter(([k]) => k === "socialweb").map(([, v]) => v);
+  assertEquals(saved.join(","), "s1,s3");
+});
+
+Deno.test("persister: a save failure is reported and the next snapshot still lands", async () => {
+  const store = createMemoryBackend();
+  let fail = true;
+  const errors = [];
+  const backend = () => Promise.resolve({
+    apply: (ops) => {
+      if (fail) {
+        fail = false;
+        return Promise.reject(new Error("quota"));
+      }
+      return store.apply(ops);
+    },
+  });
+  const p = createPersister({ backend, immediate: ["socialweb"], timers: manualTimers(), onError: (k, e) => errors.push(`${k}: ${e.message}`) });
+  await p.schedule("socialweb", "s1", 1);
+  await p.schedule("socialweb", "s2", 2);
+  assertEquals(errors.join(), "socialweb: quota");
+  assertEquals(await store.load("socialweb"), "s2");
+});
+
+Deno.test("persister: flushAll (hidden, pagehide) starts every pending save at once", async () => {
+  const g = gatedBackend();
+  const timers = manualTimers();
+  const p = createPersister({ backend: g.backend, immediate: ["socialweb"], timers, delayMs: 250 });
+  await p.schedule("a", "a1");
+  await p.schedule("b", "b1", 4);
+  assertEquals(timers.live.size, 2);
+  const flushed = p.flushAll();
+  assertEquals(timers.live.size, 0);
+  await new Promise((r) => setTimeout(r, 0));
+  assertEquals(g.gates.length, 2);
+  await g.releaseAll();
+  await flushed;
+  assertEquals(await g.store.load("a"), "a1");
+  assertEquals(await g.store.load("b"), "b1");
+  assertEquals(p.pending(), 0);
+  await p.flushAll();
+});
+
+Deno.test("persister: the page saves socialweb immediately and flushes on hidden and pagehide", async () => {
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  assert(/createPersister\(\{[\s\S]*?immediate: \[socialwebStateKey\]/.test(app), "socialweb key is immediate");
+  assert(/"socialweb-persist"\) \{\s*void persister\.schedule\(socialwebStateKey/.test(app), "socialweb-persist goes to the persister");
+  assert(/addEventListener\("pagehide", \(\) => void persister\.flushAll\(\)\)/.test(app), "pagehide flushes");
+  assert(/visibilityState !== "hidden"\) return;\s*void persister\.flushAll\(\)/.test(app), "hidden flushes");
+  assert(!/schedulePersist/.test(app), "the old debounced path is gone");
 });
