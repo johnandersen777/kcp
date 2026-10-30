@@ -125,20 +125,23 @@ export function agentStartEvent(contract, suffix) {
 }
 
 /**
- * Asks the guest's socialweb-computer to start R2 (plan 0036 A7 draft): the
- * record is {name, agent, hold, createdAt}. ponytail: spec.r2Start is the
- * draft carrier until A7's ContractEvent field lands; rebase onto its shape.
+ * Asks the guest's socialweb-computer to start R2 (plan 0036 A7): an outbound
+ * guest.r2Start ContractEvent with spec.r2Start {name (a DNS label), agent,
+ * hold}. Throws on a name that is not a DNS label.
  */
-export function r2StartEvent(contract, suffix, { agent = false, now = new Date() } = {}) {
+export function r2StartEvent(contract, suffix, { name = "r2", agent = false, hold = true } = {}) {
+  if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(name)) throw new Error(`R2 name ${JSON.stringify(name)} is not a DNS label`);
   const manifest = contractEventManifest({ name: `${contract}-r2-${suffix}`, contract, nsid: NSID_R2_START, tag: "" });
-  manifest.spec.r2Start = { name: "r2", agent: Boolean(agent), hold: true, createdAt: now.toISOString() };
+  manifest.spec.r2Start = { name, agent: Boolean(agent), hold: Boolean(hold) };
   return manifest;
 }
 
-/** True when the served ContractEvent schema's nsid enum has guest.r2Start. */
+/** True when the served ContractEvent schema has the guest.r2Start nsid and the spec.r2Start field. */
 export function schemaHasR2Start(schema) {
-  return (schema?.spec?.versions ?? []).some((v) =>
-    (v.schema?.properties?.spec?.properties?.nsid?.enum ?? []).includes(NSID_R2_START));
+  return (schema?.spec?.versions ?? []).some((v) => {
+    const spec = v.schema?.properties?.spec?.properties;
+    return (spec?.nsid?.enum ?? []).includes(NSID_R2_START) && spec?.r2Start !== undefined;
+  });
 }
 
 /**

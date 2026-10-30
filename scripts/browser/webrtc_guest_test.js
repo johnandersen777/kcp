@@ -138,21 +138,32 @@ Deno.test("dialGuest: no answer or no open channel is a connectivity error", asy
   }
 });
 
-Deno.test("r2StartEvent: an outbound guest.r2Start with {name r2, agent, hold, createdAt}", () => {
-  const now = new Date("2026-10-30T12:00:00Z");
-  const m = r2StartEvent("einfra-s1-vm", "ab12", { agent: true, now });
+Deno.test("r2StartEvent: an outbound guest.r2Start with spec.r2Start {name, agent, hold}", () => {
+  const m = r2StartEvent("einfra-s1-vm", "ab12", { agent: true });
   if (m.kind !== "ContractEvent" || m.metadata.name !== "einfra-s1-vm-r2-ab12") throw new Error(JSON.stringify(m.metadata));
   if (m.spec.contractRef.name !== "einfra-s1-vm" || m.spec.direction !== "outbound" || m.spec.nsid !== NSID_R2_START || m.spec.tag !== undefined) {
     throw new Error(JSON.stringify(m.spec));
   }
-  if (JSON.stringify(m.spec.r2Start) !== JSON.stringify({ name: "r2", agent: true, hold: true, createdAt: "2026-10-30T12:00:00.000Z" })) {
+  if (JSON.stringify(m.spec.r2Start) !== JSON.stringify({ name: "r2", agent: true, hold: true })) {
     throw new Error(JSON.stringify(m.spec.r2Start));
   }
   if (r2StartEvent("c", "x").spec.r2Start.agent !== false) throw new Error("agent defaults off");
+  if (r2StartEvent("c", "x", { name: "r2-b", hold: false }).spec.r2Start.name !== "r2-b") throw new Error("named");
+  for (const bad of ["", "R2", "r2_x", "-r2", "r2-", "a".repeat(64), "r2.x"]) {
+    let threw = false;
+    try {
+      r2StartEvent("c", "x", { name: bad });
+    } catch {
+      threw = true;
+    }
+    if (!threw) throw new Error(`accepted ${JSON.stringify(bad)}`);
+  }
 });
 
-Deno.test("schemaHasR2Start reads the ContractEvent nsid enum", () => {
-  const schema = (nsids) => ({ spec: { versions: [{ schema: { properties: { spec: { properties: { nsid: { enum: nsids } } } } } }] } });
-  if (!schemaHasR2Start(schema(["x", NSID_R2_START]))) throw new Error("served");
-  if (schemaHasR2Start(schema(["com.publicdomainrelay.temp.compute.events.guest.agentStart"])) || schemaHasR2Start(null)) throw new Error("not served");
+Deno.test("schemaHasR2Start needs the nsid enum value and the spec.r2Start field", () => {
+  const schema = (nsids, extra = {}) => ({ spec: { versions: [{ schema: { properties: { spec: { properties: { nsid: { enum: nsids }, ...extra } } } } }] } });
+  if (!schemaHasR2Start(schema(["x", NSID_R2_START], { r2Start: { type: "object" } }))) throw new Error("served");
+  if (schemaHasR2Start(schema(["x", NSID_R2_START]))) throw new Error("enum without the field");
+  if (schemaHasR2Start(schema(["x"], { r2Start: {} }))) throw new Error("field without the enum");
+  if (schemaHasR2Start(null)) throw new Error("no schema");
 });
