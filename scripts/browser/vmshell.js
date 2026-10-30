@@ -338,23 +338,70 @@ export async function createInfra({ rest, api, name, spec }) {
 }
 
 /**
+ * Update-operation managedFields entries that co-own the page's spec fields:
+ * the merge patches of earlier pages (Go-http-client) and the create POST
+ * (INFRA_FIELD_MANAGER, operation Update). While one of them co-owns an
+ * entry, the page's apply cannot remove it: a pruned secret or entry would
+ * stay. Seen live on a migrated infra: Go-http-client owned every
+ * spec.secrets key (a list map since before rev 12) and kept a pruned one.
+ */
+export function staleSpecOwners(obj) {
+  return (obj?.metadata?.managedFields ?? []).filter((m) => m?.operation === "Update" &&
+    (m.manager === "Go-http-client" || m.manager === INFRA_FIELD_MANAGER) &&
+    INFRA_PAGE_FIELDS.some((field) => m.fieldsV1?.["f:spec"]?.[`f:${field}`] !== undefined));
+}
+
+/** The JSON patch that drops stale managedFields entries from obj, guarded by its resourceVersion. */
+export function dropOwnersPatch(obj, stale) {
+  const kept = (obj?.metadata?.managedFields ?? []).filter((m) => !stale.includes(m));
+  return [
+    { op: "test", path: "/metadata/resourceVersion", value: obj?.metadata?.resourceVersion },
+    { op: "replace", path: "/metadata/managedFields", value: kept },
+  ];
+}
+
+/**
  * One composer write of EphemeralInfra infra: reads it, update(spec, live)
  * returns the page's full desired spec from the fresh page spec (null: no
  * write), and that is applied whole (infraApply) with the resourceVersion
  * read (409: read again, 3 attempts). Returns the object kcp answers, or
  * null without a write.
+ *
+ * An infra other writers still co-own (staleSpecOwners) is first taken
+ * over: the page's spec as read is applied unchanged, so the page owns all
+ * of it, and the stale entries are dropped from managedFields; only then
+ * the update is applied, so whatever it prunes really goes.
  */
 export async function composeInfra({ rest, api, infra, update }) {
   const path = `${api}/ephemeralinfras/${infra}`;
+  let tookOver = false;
   for (let attempt = 1; ; attempt++) {
     const live = await rest("GET", path);
-    const next = update(pageInfraSpec(live?.spec), live);
-    if (!next) return null;
-    const apply = infraApply(api, infra, next, live?.metadata?.resourceVersion ?? "");
     try {
+      if (!tookOver && staleSpecOwners(live).length > 0) {
+        tookOver = true;
+        const take = infraApply(api, infra, pageInfraSpec(live?.spec), live?.metadata?.resourceVersion ?? "");
+        const owned = await rest("PATCH", take.path, take.body, take.contentType);
+        try {
+          await rest("PATCH", `${path}?fieldManager=${encodeURIComponent(INFRA_FIELD_MANAGER)}`,
+            dropOwnersPatch(owned, staleSpecOwners(owned)), "application/json-patch+json");
+        } catch (err) {
+          // 409/422 (the test op): someone wrote meanwhile; read again and take over again
+          if (![409, 422].includes(Number(err?.status ?? 0))) throw err;
+          tookOver = false;
+          if (attempt >= INFRA_WRITE_ATTEMPTS) throw err;
+          continue;
+        }
+        attempt--;
+        continue;
+      }
+      const next = update(pageInfraSpec(live?.spec), live);
+      if (!next) return null;
+      const apply = infraApply(api, infra, next, live?.metadata?.resourceVersion ?? "");
       return await rest("PATCH", apply.path, apply.body, apply.contentType);
     } catch (err) {
       if (Number(err?.status ?? 0) !== 409 || attempt >= INFRA_WRITE_ATTEMPTS) throw err;
+      tookOver = false;
     }
   }
 }
