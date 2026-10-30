@@ -7,11 +7,15 @@
 // still has spec.tunnels[].shell, the wootty web terminal behind opentunnel
 // (plan 0032; a browser-made token in a vault bundle the guest fetches
 // through secretsRef). The webrtc shell is up ~2 s after Held; the wootty
-// address takes 70-165 s, waiting on its TLS certificate.
+// address takes 70-165 s, waiting on its TLS certificate. With the agent
+// (plan 0035, spec.agent) the bundle also holds an ATIRC_TOKEN placeholder
+// the requester fills with a minted atirc token; the guest starts the agent
+// on an events.guest.agentStart ContractEvent (the Agent button).
 
 export const WOOTTY_TAG = "wootty";
 export const WOOTTY_PORT = 7681;
 export const WOOTTY_ENV = "/etc/wootty/wootty.env";
+export const ATIRC_ENV = "/etc/atirc/atirc.env";
 export const SSH_TAG = "ssh";
 export const SECRETS_MOUNT = "requester";
 
@@ -160,9 +164,16 @@ export function secretsPath(name) {
   return `contracts/${name}/secrets`;
 }
 
-/** The secrets bundle field: JSON text of [{path, value}]. */
-export function secretsBundle(token) {
-  return JSON.stringify([{ path: WOOTTY_ENV, value: `WOOTTY_AUTH_TOKEN=${token}\n` }]);
+/**
+ * The secrets bundle field: JSON text of [{path, value, mode?}]. The agent
+ * entry is an empty ATIRC_TOKEN the requester fills in after the RFP; it also
+ * keeps an agent-only bundle non-empty (both consumers reject an empty one).
+ */
+export function secretsBundle({ woottyToken, agent = false }) {
+  return JSON.stringify([
+    ...(woottyToken ? [{ path: WOOTTY_ENV, value: `WOOTTY_AUTH_TOKEN=${woottyToken}\n` }] : []),
+    ...(agent ? [{ path: ATIRC_ENV, value: "ATIRC_TOKEN=\n", mode: "0600" }] : []),
+  ]);
 }
 
 /**
@@ -189,13 +200,13 @@ export function infraContractName(infra, short) {
 }
 
 /**
- * One EphemeralInfra contract entry (and its secrets entry, with wootty) for
- * the VM short; cc is the ComputeContract name it becomes. The template is
- * the one contractManifest builds.
+ * One EphemeralInfra contract entry (and its secrets entry, with wootty or
+ * the agent) for the VM short; cc is the ComputeContract name it becomes.
+ * The template is the one contractManifest builds.
  */
-export function infraContract({ infra, short, wootty = false, sshKeys = [] }) {
+export function infraContract({ infra, short, wootty = false, agent = false, sshKeys = [] }) {
   const cc = infraContractName(infra, short);
-  const { spec } = contractManifest({ name: cc, wootty, sshKeys });
+  const { spec } = contractManifest({ name: cc, wootty, agent, sshKeys });
   const { secretsRef, ...template } = spec;
   return {
     cc,
@@ -206,15 +217,16 @@ export function infraContract({ infra, short, wootty = false, sshKeys = [] }) {
 
 /**
  * A ComputeContract for the page: the webrtc ssh tunnel (sshKeys must hold
- * the page's key) and, with wootty, the opentunnel wootty tunnel and the
- * secretsRef of its token bundle.
+ * the page's key), with wootty the opentunnel wootty tunnel, with agent the
+ * atirc agent, and with either the secretsRef of their bundle.
  */
-export function contractManifest({ name, ownerDid, wootty = false, sshKeys = [] }) {
+export function contractManifest({ name, ownerDid, wootty = false, agent = false, sshKeys = [] }) {
   // No bidderDids: the requester's discovery picks the bidders.
   const spec = { vmName: name };
   spec.tunnels = [{ tag: SSH_TAG, port: 22, transport: "webrtc" }];
+  if (wootty || agent) spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
+  if (agent) spec.agent = { envFile: ATIRC_ENV };
   if (wootty) {
-    spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
     spec.tunnels.unshift({ tag: WOOTTY_TAG, port: WOOTTY_PORT, transport: "opentunnel", shell: { envFile: WOOTTY_ENV } });
   }
   if (sshKeys.length > 0) spec.sshAuthorizedKeys = sshKeys;
@@ -231,6 +243,11 @@ export function contractManifest({ name, ownerDid, wootty = false, sshKeys = [] 
 export function schemaHasShell(schema) {
   return (schema?.spec?.versions ?? []).some((v) =>
     v.schema?.properties?.spec?.properties?.tunnels?.items?.properties?.shell !== undefined);
+}
+
+/** True when an APIResourceSchema's ComputeContract has spec.agent (plan 0035). */
+export function schemaHasAgent(schema) {
+  return (schema?.spec?.versions ?? []).some((v) => v.schema?.properties?.spec?.properties?.agent !== undefined);
 }
 
 /**

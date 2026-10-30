@@ -4,6 +4,7 @@
 // deno test --allow-net scripts/browser/webrtc_guest_test.js
 
 import {
+  agentStartEvent,
   authorizedKey,
   contractEventManifest,
   dialGuest,
@@ -53,6 +54,16 @@ Deno.test("contractEventManifest", () => {
   const m = contractEventManifest({ name: "n", contract: "c", nsid: NSID_SIGNAL, kind: "offer", ciphertext: "x" });
   assert(m.kind === "ContractEvent" && m.spec.contractRef.name === "c" && m.spec.direction === "outbound", "shape");
   assert(m.spec.tag === "ssh" && m.spec.ciphertext === "x" && !("key" in m.spec), "fields");
+});
+
+Deno.test("agentStartEvent is an outbound agentStart with no kind, tag or payload", () => {
+  const m = agentStartEvent("c", "s1");
+  assert(m.kind === "ContractEvent" && m.metadata.name === "c-agent-s1", "name");
+  assert(JSON.stringify(m.spec) === JSON.stringify({
+    contractRef: { name: "c" },
+    direction: "outbound",
+    nsid: "com.publicdomainrelay.temp.compute.events.guest.agentStart",
+  }), JSON.stringify(m.spec));
 });
 
 Deno.test("seal and open round trip (typage from esm.sh)", async () => {

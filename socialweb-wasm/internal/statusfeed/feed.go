@@ -56,6 +56,8 @@ type Contract struct {
 	Message   string `json:"message,omitempty"`
 	ChosenDID string `json:"chosenDid,omitempty"`
 	Bids      int    `json:"bids,omitempty"`
+	// Agent is spec.agent being set (plan 0035): the page offers its Agent button.
+	Agent bool `json:"agent,omitempty"`
 
 	SecretsFetchedAt string    `json:"secretsFetchedAt,omitempty"`
 	Release          bool      `json:"release,omitempty"`
@@ -86,6 +88,7 @@ type ContractEvent struct {
 	Key        string `json:"key,omitempty"`
 	Ciphertext string `json:"ciphertext,omitempty"`
 	Phase      string `json:"phase,omitempty"`
+	Message    string `json:"message,omitempty"`
 	CreatedAt  string `json:"createdAt,omitempty"`
 }
 
@@ -282,6 +285,7 @@ func contract(u *unstructured.Unstructured) Contract {
 	}
 	c.SecretsFetchedAt, _, _ = unstructured.NestedString(u.Object, "status", "secretsFetchedAt")
 	c.Release, _, _ = unstructured.NestedBool(u.Object, "spec", "release")
+	_, c.Agent, _ = unstructured.NestedMap(u.Object, "spec", "agent")
 	networks, _, _ := unstructured.NestedSlice(u.Object, "status", "contract", "networks")
 	for _, raw := range networks {
 		n, _ := raw.(map[string]any)
@@ -313,6 +317,7 @@ func contractEvent(u *unstructured.Unstructured) ContractEvent {
 	e.Tag, _, _ = unstructured.NestedString(u.Object, "spec", "tag")
 	e.Key, _, _ = unstructured.NestedString(u.Object, "spec", "key")
 	e.Phase, _, _ = unstructured.NestedString(u.Object, "status", "phase")
+	e.Message, _, _ = unstructured.NestedString(u.Object, "status", "message")
 	// Only inbound ciphertext is for the page; outbound ones are its own.
 	if e.Direction == "inbound" {
 		e.Ciphertext, _, _ = unstructured.NestedString(u.Object, "spec", "ciphertext")
