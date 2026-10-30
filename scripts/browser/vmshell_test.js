@@ -45,6 +45,7 @@ import {
   infraApply,
   pageInfraSpec,
   withInfraContract,
+  releaseOffered,
   latestStamp,
   releaseTimedOut,
   stampAfter,
@@ -662,11 +663,14 @@ Deno.test("release: a missing contract or entry is an error and no write", async
   assert(/EphemeralInfra t has no entry for einfra-t-vmshell-ab/.test(failed) && k.writes().length === 0, failed);
 });
 
-Deno.test("markFinished: finishedEntry keeps releaseRequestedAt and skips an entry a Release already wrote", async () => {
+Deno.test("markFinished: finishedEntry stamps a fresh releaseRequestedAt and skips an entry a Release already wrote", async () => {
   assert(finishedEntry({ name: "a", state: "Released", releaseRequestedAt: T0 }) === null, "already Released: no write");
   assert(finishedEntry({ name: "a", state: "Staged" }) === null, "Staged");
-  const kept = finishedEntry({ name: "a", state: "Requested", policy: "p", releaseRequestedAt: T0 });
-  assert(kept.state === "Released" && kept.releaseRequestedAt === T0 && kept.policy === "p", JSON.stringify(kept));
+  const now = new Date(T0);
+  const fresh = finishedEntry({ name: "a", state: "Requested", policy: "p" }, "", now);
+  assert(fresh.state === "Released" && fresh.releaseRequestedAt === T0 && fresh.policy === "p", JSON.stringify(fresh));
+  const later = finishedEntry({ name: "a", state: "Requested", releaseRequestedAt: T0 }, "2026-10-30T12:30:00.000Z", now);
+  assert(later.releaseRequestedAt === "2026-10-30T12:30:00.001Z", `newer than the entry's and the contract's: ${later.releaseRequestedAt}`);
 
   // markFinished read the infra before a Release was queued; the queued
   // update reads it again, so the Release's stamp survives.
@@ -674,22 +678,49 @@ Deno.test("markFinished: finishedEntry keeps releaseRequestedAt and skips an ent
   const k = fakeKcp(sessionCC(), infra);
   const stale = structuredClone(infra.spec.contracts[1]);
   await requestRelease({ rest: k.rest, api: API, name: "einfra-t-vmshell-ab", now: new Date(T0) });
-  const wrote = await updateInfraEntry({ rest: k.rest, api: API, infra: "t", match: (c) => c.name === stale.name, update: finishedEntry });
+  const wrote = await updateInfraEntry({ rest: k.rest, api: API, infra: "t", match: (c) => c.name === stale.name,
+    update: (current) => finishedEntry(current, "", new Date("2026-10-30T13:00:00.000Z")) });
   assert(wrote === null && k.writes().length === 1, "no second write");
   assert(infra.spec.contracts[1].releaseRequestedAt === T0 && infra.spec.contracts[1].state === "Released", JSON.stringify(infra.spec.contracts[1]));
 
-  // a Requested entry is marked Released with every other field (and the other entries) intact
+  // a Requested entry (a Failed contract, guest maybe live) is marked Released with a fresh stamp,
+  // every other field and the other entries intact
   const k2 = fakeKcp(sessionCC(), sessionInfra({ releaseRequestedAt: T0 }));
-  const done = await updateInfraEntry({ rest: k2.rest, api: API, infra: "t", match: (c) => c.name === "vmshell-ab", update: finishedEntry });
+  const done = await updateInfraEntry({ rest: k2.rest, api: API, infra: "t", match: (c) => c.name === "vmshell-ab",
+    update: (current) => finishedEntry(current, "", now) });
   const [w] = k2.writes();
   assert(done.state === "Released" && w.contentType === "application/apply-patch+yaml" && w.path === INFRA_APPLY_PATH, JSON.stringify(w));
-  assert(w.body.spec.contracts[1].releaseRequestedAt === T0 && w.body.spec.contracts[0].state === "Requested", JSON.stringify(w.body));
+  assert(w.body.spec.contracts[1].releaseRequestedAt === "2026-10-30T12:00:00.001Z", "strictly after the stored stamp");
+  assert(JSON.stringify(w.body.spec.contracts[1]) === JSON.stringify({ ...OWN_ENTRY, releaseRequestedAt: "2026-10-30T12:00:00.001Z", state: "Released" }),
+    JSON.stringify(w.body.spec.contracts[1]));
+  assert(JSON.stringify(w.body.spec.contracts[0]) === JSON.stringify(OTHER_ENTRY), "the other entry stays whole");
 
   const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
   const mark = app.match(/async function markFinishedInfraContracts[\s\S]*?\n}\n/)?.[0] ?? "";
-  assert(/infraQueued\(\(\) => vmshell\.updateInfraEntry\(/.test(mark) && /update: vmshell\.finishedEntry/.test(mark),
-    "markFinishedInfraContracts updates the fresh entry inside the queue");
+  assert(/infraQueued\(\(\) => vmshell\.updateInfraEntry\(/.test(mark) &&
+    /update: \(current\) => vmshell\.finishedEntry\(current, pending\.find\(\(c\) => c\.name === child\)\?\.releaseRequestedAt\)/.test(mark),
+    "markFinishedInfraContracts stamps the fresh entry inside the queue, after the contract's stamp");
   assert(!/setInfraContract\(/.test(mark), "and never writes the entry it read before queueing");
+});
+
+Deno.test("release: a plain Failed contract whose guest may still run offers Release", async () => {
+  const receiptOk = { name: "c", phase: "Failed", guestMayRun: true, message: "the guest stopped answering" };
+  assert(releaseOffered(receiptOk), "offered without ReleaseFailed");
+  assert(!releaseOffered({ ...receiptOk, guestMayRun: false }), "no live guest: nothing to release");
+  assert(!releaseOffered({ ...receiptOk, phase: "Released" }), "Released");
+  assert(releaseOffered({ name: "c", phase: "Held" }) && !releaseOffered({ name: "c", phase: "Held", release: true }), "active as before");
+  const sent = withReleaseSent(receiptOk, T0);
+  assert(!releaseOffered(sent), "not while this tab's request is unseen");
+  assert(!releaseOffered({ ...receiptOk, release: true, releaseRequestedAt: T0 }), "not while a request is unanswered");
+  assert(releaseOffered({ ...receiptOk, release: true, releaseRequestedAt: T0, releaseAnsweredAt: T0 }), "answered, guest still live: offered");
+  const failedRelease = { ...receiptOk, release: true, releaseFailed: true, releaseRequestedAt: T0, releaseAnsweredAt: T0 };
+  assert(canReleaseAgain(failedRelease) && !releaseOffered(failedRelease), "a failed release offers Release again instead");
+  // an ownerless one releases with the rc127 apply
+  const k = fakeKcp({ metadata: { name: "c" }, spec: {} });
+  await requestRelease({ rest: k.rest, api: API, name: "c", now: new Date(T0) });
+  assert(k.writes().length === 1 && k.writes()[0].body.spec.release === true, JSON.stringify(k.writes()));
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  assert(/if \(vmshell\.releaseOffered\(contract\) && !computeReleaseAsked\.has\(name\)\)/.test(app), "the row's Release button uses releaseOffered");
 });
 
 Deno.test("release: until the contract carries this tab's stamp the row says release requested", () => {

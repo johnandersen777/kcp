@@ -2563,9 +2563,11 @@ function setInfraContract(infraName, entry, secret) {
 // A VM that ends without the Release button (guest exit, bidder release or
 // failure) still leaves state Requested in the record. Mark it Released once
 // so the record says terminated and the next reconcile does not request it
-// again. Each entry is read again inside the write queue and only a
-// Requested one is changed (vmshell.finishedEntry), so a Release queued
-// meanwhile keeps its releaseRequestedAt.
+// again. It is marked like a Release, with a fresh releaseRequestedAt, so
+// the infra controller re-asks a Failed contract whose guest may still run
+// (the requester's guestMayRun) instead of leaving it held. Each entry is
+// read again inside the write queue and only a Requested one is changed
+// (vmshell.finishedEntry), so a Release queued meanwhile keeps its stamp.
 async function markFinishedInfraContracts(contracts) {
   if (infraAutoSync || !contracts?.length) return;
   const pending = contracts.filter((contract) =>
@@ -2593,7 +2595,7 @@ async function markFinishedInfraContracts(contracts) {
         api: SOCIALWEB_API,
         infra: name,
         match: (c) => c?.name === entry.name,
-        update: vmshell.finishedEntry,
+        update: (current) => vmshell.finishedEntry(current, pending.find((c) => c.name === child)?.releaseRequestedAt),
         what: entry.name,
       }));
       infraAutoReleased.add(child);
@@ -2727,7 +2729,7 @@ function computeRow(fed) {
     });
     head.append(again);
   }
-  if (vmshell.isActive(contract) && !computeReleaseAsked.has(name)) {
+  if (vmshell.releaseOffered(contract) && !computeReleaseAsked.has(name)) {
     const release = document.createElement("button");
     release.type = "button";
     release.textContent = "Release";
