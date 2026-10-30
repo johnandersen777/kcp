@@ -16,7 +16,7 @@ spec:
         crd: {}
     - group: policy.socialweb.computer
       name: policyworkflowruns
-      schema: v1alpha1-1.policyworkflowruns.policy.socialweb.computer
+      schema: v1alpha1-3.policyworkflowruns.policy.socialweb.computer
       storage:
         crd: {}
     - group: policy.socialweb.computer

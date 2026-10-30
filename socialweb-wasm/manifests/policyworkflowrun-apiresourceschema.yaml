@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-1.policyworkflowruns.policy.socialweb.computer
+  name: v1alpha1-3.policyworkflowruns.policy.socialweb.computer
 spec:
   group: policy.socialweb.computer
   names:
@@ -83,6 +83,28 @@ spec:
                 required:
                   - uri
                   - cid
+              association:
+                type: object
+                properties:
+                  kinds:
+                    type: array
+                    items:
+                      type: string
+                      enum:
+                        - claim
+                        - association
+                        - bskyPost
+                        - delvePost
+                    x-kubernetes-list-type: set
+                  postTemplate:
+                    type: string
+                  maxDepth:
+                    type: integer
+                    format: int32
+                    minimum: 1
+                    maximum: 1
+                  requireContract:
+                    type: boolean
               cache:
                 type: object
                 additionalProperties:

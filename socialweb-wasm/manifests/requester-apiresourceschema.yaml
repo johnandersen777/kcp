@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-23.requesters.socialweb.computer
+  name: v1alpha1-25.requesters.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -452,6 +452,28 @@ spec:
                 format: int32
                 default: 120
                 minimum: 1
+              association:
+                type: object
+                properties:
+                  kinds:
+                    type: array
+                    items:
+                      type: string
+                      enum:
+                        - claim
+                        - association
+                        - bskyPost
+                        - delvePost
+                    x-kubernetes-list-type: set
+                  postTemplate:
+                    type: string
+                  maxDepth:
+                    type: integer
+                    format: int32
+                    minimum: 1
+                    maximum: 1
+                  requireContract:
+                    type: boolean
               oauthScopes:
                 type: array
                 items:
