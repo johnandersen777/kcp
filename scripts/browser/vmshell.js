@@ -214,14 +214,19 @@ export function releaseWorkPending(contract) {
 // status.release.requestedAt (the feed's releaseAnsweredAt), and a newer
 // request restarts a Failed contract whose ReleaseFailed condition is True.
 //
-// spec.contracts has no x-kubernetes-list-type, so it is an atomic list: a
-// server-side apply of one entry replaces the whole list (the other VMs'
-// entries are gone). The page therefore writes the whole list, read-modify-
-// write, as a JSON merge patch like every other page write of spec.contracts
-// (setInfraContract), so the list keeps its one owner: the default field
-// manager of the page's kcp client (Go-http-client, operation Update). The
-// patch carries the resourceVersion it read, so a concurrent writer is a 409
-// and a retry, never a lost entry or stamp.
+// The page is its EphemeralInfra's composer (linux-kcp, rc128 option A;
+// ephemeralinfras 12 makes spec.contracts a list map keyed by name). Every
+// infra write (create, add an entry, a record rebind, Release,
+// markFinished) is one server-side apply of the page's FULL desired spec
+// (INFRA_PAGE_FIELDS: every entry with every field, the secrets, the record
+// binding, description, ttl and endWhen) under INFRA_FIELD_MANAGER with
+// force, built from a fresh read and re-applied whole (composeInfra). An
+// apply that omits something its manager applied before removes it, so a
+// partial apply would drop entries or fields; the full spec never does. The
+// first apply takes over the entries earlier pages wrote by merge patch
+// (Go-http-client, Update). The apply carries the resourceVersion it read,
+// so a concurrent writer is a 409 and a fresh read, never a lost entry or
+// stamp. All of it runs in the page's infra write queue.
 //
 // A contract with no ownerReferences at all (rc127 leftovers, `run request`
 // from the terminal) has no composer to ask, so the page releases it as
@@ -231,6 +236,32 @@ export function releaseWorkPending(contract) {
 // release intent used for these two fields. A contract owned by anything
 // else is refused.
 export const RELEASE_FIELD_MANAGER = "socialweb.computer/requester-release";
+
+/** The field manager of every page write of its EphemeralInfra. */
+export const INFRA_FIELD_MANAGER = "socialweb.computer/page";
+
+/** The EphemeralInfra spec fields the page composes (sessionInfraManifest, addContract, the secrets). */
+export const INFRA_PAGE_FIELDS = ["description", "ttlSeconds", "endWhen", "record", "contracts", "secrets"];
+
+/** The page's part of an EphemeralInfra spec: INFRA_PAGE_FIELDS that are set, deep-copied. */
+export function pageInfraSpec(spec) {
+  const out = {};
+  for (const field of INFRA_PAGE_FIELDS) {
+    if (spec?.[field] !== undefined && spec[field] !== null) out[field] = structuredClone(spec[field]);
+  }
+  return out;
+}
+
+/** The server-side apply of the page's full EphemeralInfra spec (resourceVersion: the one read, "" on create). */
+export function infraApply(api, name, spec, resourceVersion = "") {
+  const metadata = { name };
+  if (resourceVersion) metadata.resourceVersion = resourceVersion;
+  return {
+    path: `${api}/ephemeralinfras/${name}?fieldManager=${encodeURIComponent(INFRA_FIELD_MANAGER)}&force=true`,
+    contentType: "application/apply-patch+yaml",
+    body: { apiVersion: "socialweb.computer/v1alpha1", kind: "EphemeralInfra", metadata, spec },
+  };
+}
 
 /** spec.releaseRequestedAt for a Release now: strictly after previous, so a second Release always differs. */
 export function releaseRequestedAt(previous = "", now = new Date()) {
@@ -287,30 +318,67 @@ export function finishedEntry(entry) {
 const INFRA_WRITE_ATTEMPTS = 3;
 
 /**
- * Read-modify-write of one spec.contracts entry of EphemeralInfra infra:
- * update(current) returns the new entry (null: no write). The whole list goes
- * back as a merge patch with the resourceVersion read (409: read again).
- * Returns the entry written, or null.
+ * One composer write of EphemeralInfra infra: reads it, update(spec, live)
+ * returns the page's full desired spec from the fresh page spec (null: no
+ * write), and that is applied whole (infraApply) with the resourceVersion
+ * read (409: read again, 3 attempts). Returns the object kcp answers, or
+ * null without a write.
  */
-export async function updateInfraEntry({ rest, api, infra, match, update, what = "the contract" }) {
+export async function composeInfra({ rest, api, infra, update }) {
   const path = `${api}/ephemeralinfras/${infra}`;
   for (let attempt = 1; ; attempt++) {
     const live = await rest("GET", path);
-    const contracts = live?.spec?.contracts ?? [];
-    const current = contracts.find(match);
-    if (!current) throw new Error(`EphemeralInfra ${infra} has no entry for ${what}`);
-    const next = update(current);
+    const next = update(pageInfraSpec(live?.spec), live);
     if (!next) return null;
-    const patch = { spec: { contracts: contracts.map((entry) => entry === current ? next : entry) } };
-    const resourceVersion = live?.metadata?.resourceVersion;
-    if (resourceVersion) patch.metadata = { resourceVersion };
+    const apply = infraApply(api, infra, next, live?.metadata?.resourceVersion ?? "");
     try {
-      await rest("PATCH", path, patch, "application/merge-patch+json");
-      return next;
+      return await rest("PATCH", apply.path, apply.body, apply.contentType);
     } catch (err) {
       if (Number(err?.status ?? 0) !== 409 || attempt >= INFRA_WRITE_ATTEMPTS) throw err;
     }
   }
+}
+
+/**
+ * One spec.contracts entry of EphemeralInfra infra through composeInfra:
+ * update(current) returns the new entry (null: no write); every other entry
+ * and spec field is applied as read. Returns the entry written, or null.
+ */
+export async function updateInfraEntry({ rest, api, infra, match, update, what = "the contract" }) {
+  let written = null;
+  await composeInfra({
+    rest,
+    api,
+    infra,
+    update: (spec) => {
+      const contracts = spec.contracts ?? [];
+      const current = contracts.find(match);
+      if (!current) throw new Error(`EphemeralInfra ${infra} has no entry for ${what}`);
+      written = update(current);
+      if (!written) return null;
+      return { ...spec, contracts: contracts.map((entry) => entry === current ? written : entry) };
+    },
+  });
+  return written;
+}
+
+/**
+ * Request VM's update: contract entry added (or replaced) with addContract,
+ * and its secrets entry (secret, or null) set; the secrets of entries
+ * addContract pruned go too.
+ */
+export function withInfraContract(spec, entry, secret = null) {
+  const { contracts, dropped } = addContract(spec?.contracts ?? [], entry);
+  const next = { ...spec, contracts };
+  if (secret) {
+    next.secrets = [
+      ...(spec?.secrets ?? []).filter((x) => !dropped.includes(x.contract) && x.contract !== secret.contract),
+      secret,
+    ];
+  } else if (dropped.length > 0) {
+    next.secrets = (spec?.secrets ?? []).filter((x) => !dropped.includes(x.contract));
+  }
+  return next;
 }
 
 /**
