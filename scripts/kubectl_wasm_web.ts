@@ -194,6 +194,18 @@ const assets = new Map<string, string>([
   ["/kcp_hibernate.js", "kcp_hibernate.js"],
   ["/debug_link.js", "debug_link.js"],
 ]);
+// Every relative "./x.js" a served page file references must be served too:
+// a missing one hangs the page at "waiting for kcp" (webrtc_ingress.js).
+const unserved = new Set<string>();
+for (const file of new Set(assets.values())) {
+  for (const [, ref] of (await Deno.readTextFile(new URL(file, browserDir))).matchAll(/["']\.\/([\w.-]+\.js)["']/g)) {
+    if (!assets.has(`/${ref}`)) unserved.add(ref);
+  }
+}
+if (unserved.size > 0) {
+  console.error(`page files import files missing from the asset list in kubectl_wasm_web.ts: ${[...unserved].join(" ")}`);
+  Deno.exit(1);
+}
 
 const wasmModules = new Map<string, string>([
   ["/kcp.wasm", kcpWasmPath],
