@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-13.nodeclaims.socialweb.computer
+  name: v1alpha1-15.nodeclaims.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -422,6 +422,47 @@ spec:
                           - cid
                     required:
                       - appliedAt
+                      - event
+                      - payload
+                  guestRequester:
+                    type: object
+                    properties:
+                      did:
+                        type: string
+                      state:
+                        type: string
+                        enum:
+                          - Pending
+                          - Verified
+                          - Refused
+                      message:
+                        type: string
+                      reportedAt:
+                        type: string
+                      event:
+                        type: object
+                        properties:
+                          uri:
+                            type: string
+                          cid:
+                            type: string
+                        required:
+                          - uri
+                          - cid
+                      payload:
+                        type: object
+                        properties:
+                          uri:
+                            type: string
+                          cid:
+                            type: string
+                        required:
+                          - uri
+                          - cid
+                    required:
+                      - did
+                      - state
+                      - reportedAt
                       - event
                       - payload
                   outcome:

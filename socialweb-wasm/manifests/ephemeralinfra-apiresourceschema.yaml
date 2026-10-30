@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-8.ephemeralinfras.socialweb.computer
+  name: v1alpha1-10.ephemeralinfras.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -118,11 +118,18 @@ spec:
                       properties:
                         subject:
                           type: string
+                        fromGuest:
+                          type: boolean
                         refFile:
                           type: string
                           default: /etc/socialweb-computer/association-ref
-                      required:
-                        - subject
+                    guestTools:
+                      type: array
+                      items:
+                        type: string
+                        enum:
+                          - socialweb-computer
+                      x-kubernetes-list-type: set
                   required:
                     - name
               secrets:
