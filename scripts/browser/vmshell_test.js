@@ -10,6 +10,8 @@ import {
   finishedInfraContracts,
   fnv1a64,
   infraContract,
+  infraRecordBinding,
+  infraRecordStale,
   infraRecordURI,
   infraRepoRef,
   originInfraName,
@@ -251,4 +253,16 @@ Deno.test("associationSubject: empty, valid, invalid and own DID", () => {
     assert(associationSubject(bad, self).error, `rejects ${bad}`);
   }
   assert(/own DID/.test(associationSubject(self, self).error), "own DID rejected");
+});
+
+Deno.test("infra record binding watches through the jetstream EventSources", () => {
+  const b = infraRecordBinding("did:plc:me");
+  assert(b.sync === "Both" && b.repoRef.kind === "AtprotoRepo", "repo, both ways");
+  assert(JSON.stringify(b.eventSourceRefs.map((r) => [r.group, r.kind, r.name])) ===
+    JSON.stringify([["events.socialweb.computer", "EventSource", "jetstream-bsky-us-east"],
+      ["events.socialweb.computer", "EventSource", "jetstream-bsky-us-west"]]), "sources");
+  assert(!infraRecordStale(b), "current binding");
+  const { eventSourceRefs: _, ...old } = b;
+  assert(infraRecordStale(old), "a saved binding without eventSourceRefs is repaired");
+  assert(infraRecordStale({ ...b, sync: "Publish" }) && infraRecordStale(null), "publish-only or missing");
 });
