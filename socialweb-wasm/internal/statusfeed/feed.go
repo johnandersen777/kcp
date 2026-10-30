@@ -61,6 +61,10 @@ type Contract struct {
 	Bids      int    `json:"bids,omitempty"`
 	// Agent is spec.agent being set (plan 0035): the page offers its Agent button.
 	Agent bool `json:"agent,omitempty"`
+	// GuestTools and FromGuest are spec.guestTools and
+	// spec.association.fromGuest: the page's Start R2 button (plan 0036 A7).
+	GuestTools []string `json:"guestTools,omitempty"`
+	FromGuest  bool     `json:"fromGuest,omitempty"`
 
 	SecretsFetchedAt string    `json:"secretsFetchedAt,omitempty"`
 	Release          bool      `json:"release,omitempty"`
@@ -320,6 +324,8 @@ func contract(u *unstructured.Unstructured) Contract {
 	}
 	c.Release, _, _ = unstructured.NestedBool(u.Object, "spec", "release")
 	_, c.Agent, _ = unstructured.NestedMap(u.Object, "spec", "agent")
+	c.GuestTools, _, _ = unstructured.NestedStringSlice(u.Object, "spec", "guestTools")
+	c.FromGuest, _, _ = unstructured.NestedBool(u.Object, "spec", "association", "fromGuest")
 	networks, _, _ := unstructured.NestedSlice(u.Object, "status", "contract", "networks")
 	for _, raw := range networks {
 		n, _ := raw.(map[string]any)

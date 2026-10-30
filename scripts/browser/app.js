@@ -2768,7 +2768,7 @@ function shellAction(contract) {
   if (!s.webrtc && !s.link) {
     el.className = "detail";
     if (contract.phase === "Held") el.textContent = "Held; the shells are starting…";
-    el.append(...agentAction(contract));
+    el.append(...agentAction(contract), ...r2Action(contract));
     return el;
   }
   // SSH over WebRTC runs in the page terminal and falls back to the web shell
@@ -2795,7 +2795,7 @@ function shellAction(contract) {
   const note = document.createElement("span");
   note.className = "detail";
   note.textContent = s.link ? "" : s.wootty ? " web shell starting (usually 1-3 min after Held)" : "";
-  el.append(note, ...agentAction(contract));
+  el.append(note, ...agentAction(contract), ...r2Action(contract));
   return el;
 }
 
@@ -2828,6 +2828,38 @@ function agentAction(contract) {
   const note = document.createElement("span");
   note.className = "detail";
   note.textContent = last ? ` agent ${last.phase ?? "Pending"}${last.message ? `: ${last.message}` : ""}` : "";
+  return [button, note];
+}
+
+// The Start R2 button (plan 0036 A7): on a Held contract running R2 that
+// associates itself, an outbound guest.r2Start ContractEvent asks the guest's
+// socialweb-computer to start R2 (with the agent when the Agent box is
+// checked). Shown only once the served ContractEvent schema has the NSID.
+function r2Action(contract) {
+  const name = contract.name;
+  if (!r2StartServed || !vmshell.r2StartShown(contract) || computeReleaseAsked.has(name)) return [];
+  const last = (lastFeedState?.contractEvents ?? [])
+    .filter((e) => e.contract === name && e.direction === "outbound" && e.nsid === webrtcGuest.NSID_R2_START)
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || a.name.localeCompare(b.name))
+    .at(-1);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Start R2";
+  button.title = "start socialweb-computer (R2) on the VM";
+  button.disabled = Boolean(last) && (last.phase ?? "Pending") === "Pending";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await createContractEvent(webrtcGuest.r2StartEvent(name, Math.random().toString(36).slice(2, 8), { agent: computeAgentEl.checked }));
+      addLog("info", `asked ${name} to start R2`);
+    } catch (err) {
+      button.disabled = false;
+      setAppStatus(computeStatusEl, `${name}: starting R2 failed: ${err.message ?? err}`, "err");
+    }
+  });
+  const note = document.createElement("span");
+  note.className = "detail";
+  note.textContent = last ? ` R2 ${last.phase ?? "Pending"}${last.message ? `: ${last.message}` : ""}` : "";
   return [button, note];
 }
 
@@ -2914,21 +2946,27 @@ function toastReadyShells(contracts) {
 // (socialweb rc109 dropped spec.tunnels[].shell; the lead's rc110 restores
 // it next to webrtc) and whether the agent can (plan 0035 spec.agent). Read
 // once through kcpREST, retried after an error.
-let contractSchemaPromise = null;
-function contractSchema() {
+// The ContractEvent schema (same export) gates the Start R2 button.
+const servedSchemas = new Map();
+function servedSchema(resource) {
   const provider = "/clusters/root:socialweb-provider";
-  contractSchemaPromise ??= (async () => {
-    const exported = await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha2/apiexports/computecontracts`);
-    const schema = (exported?.spec?.resources ?? []).find((r) => r.name === "computecontracts")?.schema;
-    if (!schema) return null;
-    return await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha1/apiresourceschemas/${schema}`);
-  })().catch((err) => {
-    contractSchemaPromise = null;
-    addLog("warn", `could not read the ComputeContract schema; requesting without wootty or the agent: ${err.message ?? err}`);
-    return null;
-  });
-  return contractSchemaPromise;
+  if (!servedSchemas.has(resource)) {
+    servedSchemas.set(resource, (async () => {
+      const exported = await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha2/apiexports/computecontracts`);
+      const schema = (exported?.spec?.resources ?? []).find((r) => r.name === resource)?.schema;
+      if (!schema) return null;
+      return await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha1/apiresourceschemas/${schema}`);
+    })().catch((err) => {
+      servedSchemas.delete(resource);
+      addLog("warn", `could not read the ${resource} schema; the features it gates (wootty, agent, R2) stay off: ${err.message ?? err}`);
+      return null;
+    }));
+  }
+  return servedSchemas.get(resource);
 }
+const contractSchema = () => servedSchema("computecontracts");
+// null until the served ContractEvent schema was read once.
+let r2StartServed = null;
 async function woottyServed() {
   return vmshell.schemaHasShell(await contractSchema());
 }
@@ -3151,6 +3189,13 @@ function applyComputeState(state) {
   computeRequestEl.disabled = computeBusy || !ready || active.length > 0;
   if (ready && computeAgentRowEl.hidden) void agentServed().then((served) => { computeAgentRowEl.hidden = !served; });
   if (ready && computeGuestToolsRowEl.hidden) void guestToolsServed().then((served) => { computeGuestToolsRowEl.hidden = !served; });
+  if (ready && r2StartServed === null) {
+    r2StartServed = false;
+    void servedSchema("contractevents").then((schema) => {
+      r2StartServed = webrtcGuest.schemaHasR2Start(schema);
+      if (r2StartServed) applyComputeState(lastFeedState);
+    });
+  }
   if (!computeBusy && !computeStatusEl.classList.contains("err")) {
     setAppStatus(computeStatusEl,
       !ready ? "sign in to request a VM"

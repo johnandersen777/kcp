@@ -78,3 +78,16 @@ func TestGuestRequesterProjection(t *testing.T) {
 		t.Fatalf("guestRequester: %+v", c.GuestRequester)
 	}
 }
+
+func TestR2Projection(t *testing.T) {
+	c := contract(&unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "c"},
+		"spec":     map[string]any{"guestTools": []any{"socialweb-computer"}, "association": map[string]any{"fromGuest": true}},
+	}})
+	if len(c.GuestTools) != 1 || c.GuestTools[0] != "socialweb-computer" || !c.FromGuest {
+		t.Fatalf("R2 spec: %+v", c)
+	}
+	if c := contract(&unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "c"}}}); c.GuestTools != nil || c.FromGuest {
+		t.Fatalf("no R2: %+v", c)
+	}
+}

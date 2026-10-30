@@ -312,6 +312,12 @@ export function schemaHasAgent(schema) {
   return (schema?.spec?.versions ?? []).some((v) => v.schema?.properties?.spec?.properties?.agent !== undefined);
 }
 
+/** The Start R2 button: a Held contract that runs R2 and lets it associate itself. */
+export function r2StartShown(contract) {
+  return contract?.phase === "Held" && (contract.guestTools ?? []).includes(GUEST_TOOL) && contract.fromGuest === true &&
+    !contract.release;
+}
+
 /** True when an APIResourceSchema's ComputeContract has spec.guestTools (R2). */
 export function schemaHasGuestTools(schema) {
   return (schema?.spec?.versions ?? []).some((v) => v.schema?.properties?.spec?.properties?.guestTools !== undefined);
