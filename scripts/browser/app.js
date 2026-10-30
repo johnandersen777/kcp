@@ -2380,6 +2380,13 @@ computeAgentEl.checked = localStorage.getItem("socialweb.compute.agent") !== "0"
 computeAgentEl.addEventListener("change", () => {
   localStorage.setItem("socialweb.compute.agent", computeAgentEl.checked ? "1" : "0");
 });
+// R2 guest tools: shown once the served schema has spec.guestTools; off by default.
+const computeGuestToolsRowEl = document.getElementById("compute-guesttools-row");
+const computeGuestToolsEl = document.getElementById("compute-guesttools");
+computeGuestToolsEl.checked = localStorage.getItem("socialweb.compute.guestTools") === "1";
+computeGuestToolsEl.addEventListener("change", () => {
+  localStorage.setItem("socialweb.compute.guestTools", computeGuestToolsEl.checked ? "1" : "0");
+});
 // Associate DID (plan 0036 P1): optional, remembered per viewer.
 const computeAssociateEl = document.getElementById("compute-associate");
 try {
@@ -2627,8 +2634,9 @@ async function requestVM() {
     const name = vmshell.infraContractName(infraName, short);
     const wootty = await woottyServed();
     const agent = computeAgentEl.checked && await agentServed();
+    const guestTools = computeGuestToolsEl.checked && await guestToolsServed();
     const shells = (wootty ? "ssh over WebRTC and wootty" : "ssh over WebRTC (no wootty in this socialweb)") +
-      (agent ? ", and the atirc agent" : "") + (association.subject ? `, associated with ${association.subject}` : "");
+      (agent ? ", and the atirc agent" : "") + (guestTools ? ", with socialweb-computer in the VM" : "") + (association.subject ? `, associated with ${association.subject}` : "");
     addLog("info", `requesting ComputeContract ${name} from discovered bidders with ${shells}`);
     const key = await webrtcGuest.newSSHKey();
     await webrtcGuest.saveSSHKey(name, key);
@@ -2647,7 +2655,7 @@ async function requestVM() {
         bundle: vmshell.secretsBundle({ woottyToken, agent }),
       });
     }
-    const { contract, secret } = vmshell.infraContract({ infra: infraName, short, wootty, agent, sshKeys, association: association.subject });
+    const { contract, secret } = vmshell.infraContract({ infra: infraName, short, wootty, agent, sshKeys, association: association.subject, guestTools });
     await setInfraContract(infraName, contract, secret);
     setAppStatus(computeStatusEl, `${name} requested; waiting for bids`, "ok");
     addLog("ok", `ComputeContract ${name} requested from discovered bidders with ${shells}`);
@@ -2722,6 +2730,9 @@ function computeRow(contract) {
   detail.textContent = [
     contract.chosenDid ? `bidder ${contract.chosenDid}` : "",
     contract.association ? `Associated ${contract.association}` : "",
+    contract.associationMessage ? `association: ${contract.associationMessage}` : "",
+    contract.guestRequester ? `R2: ${contract.guestRequester.did} ${contract.guestRequester.state ?? "Pending"}` +
+      `${contract.guestRequester.message ? ` (${contract.guestRequester.message})` : ""}` : "",
     contract.secretsFetchedAt ? `secrets fetched ${contract.secretsFetchedAt}` : "",
     contract.message ?? "",
   ].filter(Boolean).join(" · ");
@@ -2918,6 +2929,9 @@ async function woottyServed() {
 }
 async function agentServed() {
   return vmshell.schemaHasAgent(await contractSchema());
+}
+async function guestToolsServed() {
+  return vmshell.schemaHasGuestTools(await contractSchema());
 }
 
 /** Resolves with fn's first truthy result over the current and later feed snapshots. */
@@ -3133,6 +3147,7 @@ function applyComputeState(state) {
   const ready = state.marketIdentity?.phase === "Ready";
   computeRequestEl.disabled = computeBusy || !ready || active.length > 0;
   if (ready && computeAgentRowEl.hidden) void agentServed().then((served) => { computeAgentRowEl.hidden = !served; });
+  if (ready && computeGuestToolsRowEl.hidden) void guestToolsServed().then((served) => { computeGuestToolsRowEl.hidden = !served; });
   if (!computeBusy && !computeStatusEl.classList.contains("err")) {
     setAppStatus(computeStatusEl,
       !ready ? "sign in to request a VM"
