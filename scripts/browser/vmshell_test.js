@@ -367,12 +367,15 @@ Deno.test("A8 release notes: cascade wait, request phase and token revokes", () 
   assert(releaseNotes({ name: "c", phase: "Held" }, [{ ...ev, contract: "other" }]).length === 0, "nothing for a plain contract");
 });
 
-Deno.test("A8 release notes from status.contract.r2Release (rc127), unknown phases raw", () => {
+Deno.test("A8 release notes from status.contract.r2Release (rc127 phases)", () => {
   const c = (r2Release) => ({ name: "c", phase: "Releasing", step: "releasingGuestRequester", r2Release });
-  assert(releaseNotes(c({ phase: "Requested", requestedAt: "t1" }))[0] === "R2 release: asked t1, waiting [Requested]", "waiting");
-  assert(releaseNotes(c({ phase: "Released", ok: true, requestedAt: "t1", answeredAt: "t2" }))[0] === "R2 release: guest released (t2) [Released]", "ok");
-  assert(releaseNotes(c({ phase: "TimedOut", ok: false, message: "no answer in 12m0s" }))[0] ===
-    "R2 release: FAILED/TIMED OUT: no answer in 12m0s [TimedOut]", "failed");
-  assert(releaseNotes(c({ phase: "SomethingNew", requestedAt: "t1" }))[0].includes("[SomethingNew]"), "unknown phase shown raw");
-  assert(releaseNotes(c({ requestedAt: "t1" })).length === 1, "the answer replaces the wait line");
+  const note = (r2) => releaseNotes(c(r2))[0];
+  assert(note({ phase: "Requested", requestedAt: "t1" }) === "R2 release: asked t1, waiting (up to 12 min)", "requested");
+  assert(note({ phase: "Released", ok: true, requestedAt: "t1", answeredAt: "t2" }) === "R2 release: guest released t2", "released");
+  assert(note({ phase: "Failed", message: "socialweb-r2-release.service failed", answeredAt: "t2" }) ===
+    "R2 release: FAILED: socialweb-r2-release.service failed", "failed (ok omitted)");
+  assert(note({ phase: "TimedOut", message: "no r2Released in 12m0s" }) ===
+    "R2 release: TIMED OUT after 12 min; bidder backstop releases R2's VMs after the association expires", "timed out");
+  assert(note({ phase: "SomethingNew", message: "m" }) === "R2 release: [SomethingNew] m", "unknown phase raw");
+  assert(releaseNotes(c({ phase: "Requested", requestedAt: "t1" })).length === 1, "the status replaces the wait line");
 });
