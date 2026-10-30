@@ -833,6 +833,65 @@ export function contractLive(contract) {
   return releaseWorkPending(contract);
 }
 
+/** The DID of the infra's PDS record (status.record.uri, else spec.record.uri), or "". */
+export function infraRecordDid(infra) {
+  const uri = infra?.status?.record?.uri || infra?.spec?.record?.uri || "";
+  return /^at:\/\/(did:[^/]+)\//.exec(uri)?.[1] ?? "";
+}
+
+/**
+ * Whether the infra controller can reach the infra's PDS record, so deleting
+ * the infra also deletes the record: no RecordUnresolved=True (nor the older
+ * "repo.read handle" sync error) and spec.record.repoRef names did's current
+ * repo. An infra without a record binding has no record to orphan.
+ */
+export function infraRecordResolvable(infra, did) {
+  const binding = infra?.spec?.record;
+  if (!binding) return true;
+  if (infraCondition(infra, "RecordUnresolved")?.status === "True") return false;
+  if ((infra?.status?.conditions ?? []).some((c) => /repo\.read handle/.test(c?.message ?? ""))) return false;
+  return binding.repoRef?.name === infraRepoRef(did).name;
+}
+
+/**
+ * After a rebind written at generation: the controller has reconciled it
+ * (status.observedGeneration) and the record now resolves (no
+ * RecordUnresolved=True, the current repo, a record URI), so a delete also
+ * deletes the PDS record.
+ */
+export function infraRebindSettled(infra, did, generation) {
+  return Number(infra?.status?.observedGeneration ?? 0) >= Number(generation ?? 0) &&
+    infraRecordResolvable(infra, did) && Boolean(infra?.status?.record?.uri);
+}
+
+/**
+ * The GC's rebind-delete: rebinds infra name's spec.record to did's binding
+ * (composeInfra, the page's full-spec apply; serialize is the page's infra
+ * write queue), waits up to timeoutMs for infraRebindSettled, and only then
+ * deletes the infra so the controller deletes its PDS record. Returns true
+ * when deleted, false when it was kept (record still unresolved).
+ */
+export async function rebindThenDelete({
+  rest, api, name, did, serialize = (run) => run(), timeoutMs = 30_000, pollMs = 750,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = Date.now,
+}) {
+  const record = infraRecordBinding(did);
+  const written = await serialize(() => composeInfra({ rest, api, infra: name, update: (spec) => ({ ...spec, record }) }));
+  const generation = written?.metadata?.generation ?? 0;
+  const path = `${api}/ephemeralinfras/${name}`;
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    await sleep(pollMs);
+    if (infraRebindSettled(await rest("GET", path), did, generation)) {
+      await rest("DELETE", path).catch((err) => {
+        if (Number(err?.status ?? 0) !== 404) throw err;
+      });
+      return true;
+    }
+  }
+  return false;
+}
+
 /** The tab id in name when it is an infra of origin (originInfraName), else null. */
 export function originInfraTab(origin, name) {
   const prefix = originInfraName(origin, "x").slice(0, -1);
@@ -875,8 +934,17 @@ export function planInfraGC({ infras, contracts, origin, tabId, did, now = Date.
       const hours = ended ? ((now - ended) / 3600_000).toFixed(1) : "unknown";
       if (!ended || now - ended <= historyMs) {
         plan.push({ name, action: "keep", reason: `history: finished ${hours} h ago`, live });
-      } else {
+      } else if (infraRecordResolvable(infra, did)) {
         plan.push({ name, action: "delete", reason: `no live ComputeContract; finished ${hours} h ago`, live });
+      } else {
+        // Deleting it now would orphan its PDS record (the controller cannot
+        // reach the repo). The same DID's: rebind, wait for the record, then
+        // delete; anyone else's: keep.
+        const owner = infraRecordDid(infra);
+        const mine = owner ? owner === did : infra.spec?.record?.repoRef?.name === infraRepoRef(did).name;
+        plan.push(mine
+          ? { name, action: "rebind-delete", reason: `finished ${hours} h ago; record unresolved, rebinding first`, live }
+          : { name, action: "keep", reason: "kept: record unresolved", live });
       }
       continue;
     }
