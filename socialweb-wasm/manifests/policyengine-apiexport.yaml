@@ -6,7 +6,7 @@ spec:
   resources:
     - group: policy.socialweb.computer
       name: policyengines
-      schema: v1alpha1-1.policyengines.policy.socialweb.computer
+      schema: v1alpha1-2.policyengines.policy.socialweb.computer
       storage:
         crd: {}
     - group: policy.socialweb.computer
