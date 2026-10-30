@@ -71,6 +71,9 @@ type Contract struct {
 	// Association is status.association.uri, the contract-scoped
 	// market.association the requester wrote (plan 0036 P1).
 	Association string `json:"association,omitempty"`
+	// AssociationMessage is status.associationMessage: why an association
+	// was not written (plan 0036 A5).
+	AssociationMessage string `json:"associationMessage,omitempty"`
 }
 
 // Network is one tagged guest address from status.contract.networks (plan
@@ -296,6 +299,7 @@ func contract(u *unstructured.Unstructured) Contract {
 	}
 	c.SecretsFetchedAt, _, _ = unstructured.NestedString(u.Object, "status", "secretsFetchedAt")
 	c.Association, _, _ = unstructured.NestedString(u.Object, "status", "association", "uri")
+	c.AssociationMessage, _, _ = unstructured.NestedString(u.Object, "status", "associationMessage")
 	c.Release, _, _ = unstructured.NestedBool(u.Object, "spec", "release")
 	_, c.Agent, _ = unstructured.NestedMap(u.Object, "spec", "agent")
 	networks, _, _ := unstructured.NestedSlice(u.Object, "status", "contract", "networks")

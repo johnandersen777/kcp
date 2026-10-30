@@ -2730,6 +2730,7 @@ function computeRow(contract) {
   detail.textContent = [
     contract.chosenDid ? `bidder ${contract.chosenDid}` : "",
     contract.association ? `Associated ${contract.association}` : "",
+    contract.associationMessage ? `association: ${contract.associationMessage}` : "",
     contract.secretsFetchedAt ? `secrets fetched ${contract.secretsFetchedAt}` : "",
     contract.message ?? "",
   ].filter(Boolean).join(" · ");
