@@ -2731,6 +2731,8 @@ function computeRow(contract) {
     contract.chosenDid ? `bidder ${contract.chosenDid}` : "",
     contract.association ? `Associated ${contract.association}` : "",
     contract.associationMessage ? `association: ${contract.associationMessage}` : "",
+    contract.guestRequester ? `R2: ${contract.guestRequester.did} ${contract.guestRequester.state ?? "Pending"}` +
+      `${contract.guestRequester.message ? ` (${contract.guestRequester.message})` : ""}` : "",
     contract.secretsFetchedAt ? `secrets fetched ${contract.secretsFetchedAt}` : "",
     contract.message ?? "",
   ].filter(Boolean).join(" · ");
