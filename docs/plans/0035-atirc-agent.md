@@ -49,10 +49,13 @@ Unchanged from rev 3, still needed: the page's requester (Go in wasm, browser fe
 `internal/atproto/oauth/scope.go`: add to `RequesterOAuthScope`:
 
 ```
-rpc:chat.atirc.mint?aud=*
+rpc:chat.atirc.mint?aud=did:web:irc.fedfork.com%23atirc
+repo:com.publicdomainrelay.temp.compute.events.guest.agentStart?action=create&action=update
 ```
 
-Decided (linux-kcp + atirc-dev, 2026-10-30, atirc seq 587-588): exact aud, `rpc:chat.atirc.mint?aud=did:web:irc.fedfork.com%23atirc`; the requester calls getServiceAuth with aud `did:web:irc.fedfork.com#atirc` (same string; atirc verify accepts it and the bare DID). drives-oauth proves it after deploy; fall back to `aud=*` only if the PDS refuses. The build regenerates `requester-scope.txt`; existing sessions become `ScopeChanged` → fresh sign-in. Do not touch `internal/app/compose/atprotoscope.go`.
+The `repo:` line (found by wasm-page, atirc seq 617): the requester publishes `guest.agentStart` as a record in its own repo, like `guest.publicKey`/`guest.signalWebRTC`/`guest.secrets`, which each have the same `repo:…?action=create&action=update` scope (`collectionScope`, beside `CollectionGuestSecrets` in `scope.go`); `market.event` is already granted.
+
+Decided (linux-kcp + atirc-dev, 2026-10-30, atirc seq 587-588): exact aud, `rpc:chat.atirc.mint?aud=did:web:irc.fedfork.com%23atirc`; the requester calls getServiceAuth with aud `did:web:irc.fedfork.com#atirc` (same string; atirc verify accepts it and the bare DID). Proven at PAR/consent (2026-10-30 07:16:44Z, atirc seq 690): bsky.social granted the qr.fedfork.com client metadata holding this exact string plus the guest.agentStart repo scope (alice CLI sign-in). Still to prove after section 4 lands: getServiceAuth with aud `did:web:irc.fedfork.com#atirc` → atirc mint; fall back to `aud=*` only if that is refused. The build regenerates `requester-scope.txt`; existing sessions become `ScopeChanged` → fresh sign-in. Do not touch `internal/app/compose/atprotoscope.go`.
 
 ### 3. API: `spec.agent` (socialweb; request linux-kcp)
 
