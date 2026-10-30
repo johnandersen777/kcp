@@ -2455,13 +2455,17 @@ function kcpStatus(err) {
   return Number(err?.status ?? 0);
 }
 
-// Serialize page-side infra PATCHes: release and terminal reconciliation both
-// replace spec.contracts whole, so two concurrent read-modify-writes lose VMs.
-function patchInfra(path, patch) {
-  const run = () => kcpREST("PATCH", path, patch, "application/merge-patch+json");
+// Serialize page-side infra writes: Request VM, Release and terminal
+// reconciliation all replace spec.contracts whole (an atomic list), so two
+// concurrent read-modify-writes lose VMs or a release stamp.
+function infraQueued(run) {
   const next = infraPatchQueue.then(run, run);
   infraPatchQueue = next.catch(() => {});
   return next;
+}
+
+function patchInfra(path, patch) {
+  return infraQueued(() => kcpREST("PATCH", path, patch, "application/merge-patch+json"));
 }
 
 async function waitInfraGone(path, timeoutMs = 120_000) {
@@ -2567,15 +2571,15 @@ function setInfraContract(infraName, entry, secret) {
     }
     await kcpREST("PATCH", path, patch, "application/merge-patch+json");
   };
-  const next = infraPatchQueue.then(run, run);
-  infraPatchQueue = next.catch(() => {});
-  return next;
+  return infraQueued(run);
 }
 
 // A VM that ends without the Release button (guest exit, bidder release or
 // failure) still leaves state Requested in the record. Mark it Released once
 // so the record says terminated and the next reconcile does not request it
-// again.
+// again. Each entry is read again inside the write queue and only a
+// Requested one is changed (vmshell.finishedEntry), so a Release queued
+// meanwhile keeps its releaseRequestedAt.
 async function markFinishedInfraContracts(contracts) {
   if (infraAutoSync || !contracts?.length) return;
   const pending = contracts.filter((contract) =>
@@ -2598,7 +2602,14 @@ async function markFinishedInfraContracts(contracts) {
     for (const entry of vmshell.finishedInfraContracts(infra, pending)) {
       const child = vmshell.infraContractName(name, entry.name);
       matched.add(child);
-      await setInfraContract(name, { ...entry, state: "Released" }, null);
+      await infraQueued(() => vmshell.updateInfraEntry({
+        rest: kcpREST,
+        api: SOCIALWEB_API,
+        infra: name,
+        match: (c) => c?.name === entry.name,
+        update: vmshell.finishedEntry,
+        what: entry.name,
+      }));
       infraAutoReleased.add(child);
     }
     for (const contract of pending) {
@@ -2667,8 +2678,9 @@ async function requestVM() {
 }
 
 // Every Release (button, Release again, d.release, the demo's leftover
-// sweep) applies spec.release with a fresh spec.releaseRequestedAt, then
-// marks a session-infra entry Released (vmshell.requestRelease).
+// sweep) sets the contract's EphemeralInfra entry to Released with a fresh
+// releaseRequestedAt; the infra controller copies both onto the contract
+// (vmshell.requestRelease). The page never writes the ComputeContract.
 async function releaseContract(name) {
   const previous = computeReleaseAsked.get(name);
   computeReleaseAsked.set(name, new Date().toISOString()); // hides Release again while in flight
@@ -2679,7 +2691,7 @@ async function releaseContract(name) {
       rest: kcpREST,
       api: SOCIALWEB_API,
       name,
-      setInfraContract: (infra, entry) => setInfraContract(infra, entry, null),
+      serialize: infraQueued,
     });
     computeReleaseAsked.set(name, requestedAt);
   } catch (err) {
@@ -2689,7 +2701,7 @@ async function releaseContract(name) {
     return;
   }
   computeLastRender = "";
-  addLog("info", `ComputeContract ${name} released (releaseRequestedAt ${requestedAt})`);
+  addLog("info", `ComputeContract ${name} release requested in its EphemeralInfra entry (releaseRequestedAt ${requestedAt})`);
   void webrtcGuest.deleteSSHKey(name).catch(() => {});
 }
 
@@ -2704,8 +2716,10 @@ addEventListener("beforeunload", (event) => {
   event.returnValue = "";
 });
 
-function computeRow(contract) {
-  const name = contract.name;
+function computeRow(fed) {
+  const name = fed.name;
+  // A Release this tab sent shows as requested until the contract carries it.
+  const contract = vmshell.withReleaseSent(fed, computeReleaseAsked.get(name));
   const li = document.createElement("li");
   const head = document.createElement("div");
   const title = document.createElement("strong");
@@ -3191,9 +3205,10 @@ function applyComputeState(state) {
   for (const watcher of [...feedWatchers]) watcher(state);
   const contracts = state.contracts ?? [];
   void markFinishedInfraContracts(contracts);
-  const active = contracts.filter(vmshell.isActive);
+  const seen = contracts.map((c) => vmshell.withReleaseSent(c, computeReleaseAsked.get(c?.name)));
+  const active = seen.filter(vmshell.isActive);
   if (computeBusy && active.length > 0) computeBusy = false;
-  computeReleasing = contracts.some(vmshell.releaseWorkPending);
+  computeReleasing = seen.some(vmshell.releaseWorkPending);
   const ready = state.marketIdentity?.phase === "Ready";
   computeRequestEl.disabled = computeBusy || !ready || active.length > 0;
   if (ready && computeAgentRowEl.hidden) void agentServed().then((served) => { computeAgentRowEl.hidden = !served; });
