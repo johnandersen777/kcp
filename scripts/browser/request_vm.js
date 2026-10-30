@@ -13,13 +13,13 @@
 /**
  * @param {{getBusy: () => boolean, setBusy: (busy: boolean) => void,
  *   kcpUp: () => boolean, waitKcp: () => Promise<unknown>,
- *   identityReadyFor: (did: string) => boolean, refresh: () => void,
+ *   identityReadyFor: (did: string, gen: number) => boolean, refresh: () => void,
  *   status: (text: string, kind: string) => void, log: (level: string, message: string) => void}} deps
- * @returns {(click: {did: string, prepare: () => Promise<{error?: string} | unknown>,
+ * @returns {(click: {did: string, gen?: number, prepare: () => Promise<{error?: string} | unknown>,
  *   request: (prepared: unknown) => Promise<boolean>}) => Promise<"busy"|"refused"|"failed"|"requested">}
  */
 export function createRequestRunner({ getBusy, setBusy, kcpUp, waitKcp, identityReadyFor, refresh, status, log }) {
-  return async function run({ did, prepare, request }) {
+  return async function run({ did, gen, prepare, request }) {
     log("info", "Request VM clicked");
     if (getBusy()) {
       log("info", "Request VM is already running");
@@ -34,7 +34,7 @@ export function createRequestRunner({ getBusy, setBusy, kcpUp, waitKcp, identity
         log("info", "Request VM waits for kcp to be ready");
         await waitKcp();
       }
-      if (!identityReadyFor(did)) throw new Error("signed out while the request waited; sign in and request again");
+      if (!identityReadyFor(did, gen)) throw new Error("signed out while the request waited; sign in and request again");
       const prepared = await prepare();
       if (prepared?.error) {
         status(prepared.error, "err");
