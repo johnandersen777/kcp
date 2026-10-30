@@ -174,6 +174,24 @@ Deno.test("page wiring: the lock is taken before kcp boots; persists stop once t
   assert(/why === "takeover"/.test(yieldFn), "a stolen tab does not write");
 });
 
+Deno.test("kcp lock: a holder stuck handing over stops owning the state once forced", async () => {
+  const locks = new FakeLocks();
+  const open = channelHub();
+  const events = [];
+  let finish;
+  const a = tab("a", locks, open, events, () => new Promise((resolve) => (finish = resolve)));
+  const b = tab("b", locks, open, events);
+  await a.acquire();
+  assertEquals(await b.takeover({ ackMs: 1000, releaseMs: 40 }), "timeout");
+  assertEquals(a.state, "yielding", "a acked and is flushing");
+  assertEquals(await b.force(), "held");
+  await sleep(0);
+  assertEquals(a.state, "stolen", "a stops owning the state before its flush returns");
+  finish();
+  await sleep(0);
+  assertEquals([a.state, b.state], ["taken-over", "held"]);
+});
+
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
