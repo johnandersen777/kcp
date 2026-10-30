@@ -23,6 +23,7 @@ export const SECRETS_MOUNT = "requester";
 // PolicyEngine runs it in the fenced browser sandbox (plan 0037).
 export const REQUESTER_POLICY = "requester-tangled-vouch";
 export const GUEST_TOOL = "socialweb-computer";
+export const R2_ASSOCIATES_ITSELF = "R2 associates itself; leave Associate DID empty";
 
 /** The per-tab EphemeralInfra record lives long enough to outlast a page session. */
 export const ORIGIN_INFRA_TTL_SECONDS = 30 * 24 * 3600;
@@ -276,11 +277,16 @@ export function contractManifest({ name, ownerDid, wootty = false, agent = false
   // No bidderDids: the requester's discovery picks the bidders.
   const spec = { vmName: name, policy: REQUESTER_POLICY };
   spec.tunnels = [{ tag: SSH_TAG, port: 22, transport: "webrtc" }];
-  if (wootty || agent || association) spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
+  if (association && guestTools) throw new Error(R2_ASSOCIATES_ITSELF);
+  if (wootty || agent || association || guestTools) spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
   if (association) spec.association = { subject: association };
   // R2: socialweb-computer in the guest (linux/amd64 bidders only; others
-  // fail their bid with GuestToolsUnserved).
-  if (guestTools) spec.guestTools = [GUEST_TOOL];
+  // fail their bid with GuestToolsUnserved). It associates itself: with
+  // fromGuest the requester writes association-request.json into the bundle.
+  if (guestTools) {
+    spec.guestTools = [GUEST_TOOL];
+    spec.association = { fromGuest: true };
+  }
   if (agent) spec.agent = { envFile: ATIRC_ENV };
   if (wootty) {
     spec.tunnels.unshift({ tag: WOOTTY_TAG, port: WOOTTY_PORT, transport: "opentunnel", shell: { envFile: WOOTTY_ENV } });

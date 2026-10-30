@@ -2625,6 +2625,10 @@ async function requestVM() {
     setAppStatus(computeStatusEl, association.error, "err");
     return;
   }
+  if (association.subject && computeGuestToolsEl.checked && await guestToolsServed()) {
+    setAppStatus(computeStatusEl, vmshell.R2_ASSOCIATES_ITSELF, "err");
+    return;
+  }
   try {
     computeBusy = true;
     computeRequestEl.disabled = true;
@@ -2642,8 +2646,9 @@ async function requestVM() {
     await webrtcGuest.saveSSHKey(name, key);
     sshKeys.unshift(key.authorized);
     localStorage.setItem(computePrefs.transport(name), "webrtc");
-    // The association ref file reaches the guest through the same bundle.
-    if (wootty || agent || association.subject) {
+    // The association ref file (or R2's association request) reaches the
+    // guest through the same bundle.
+    if (wootty || agent || association.subject || guestTools) {
       const woottyToken = wootty ? vmshell.randomToken() : "";
       if (woottyToken) localStorage.setItem(computePrefs.token(name), woottyToken);
       // The requester reads the bundle once and fails a contract whose

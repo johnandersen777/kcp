@@ -317,7 +317,24 @@ Deno.test("guest tools: on adds guestTools [socialweb-computer] to the template,
   assert(addContract([], out.contract).contracts[0].guestTools.length === 1, "addContract accepts it");
 });
 
+Deno.test("guest tools: R2 asks for its own association with a secretsRef", () => {
+  const m = contractManifest({ name: "vmshell-r2a", guestTools: true });
+  assert(JSON.stringify(m.spec.association) === '{"fromGuest":true}', "fromGuest");
+  assert(m.spec.secretsRef?.path === "contracts/vmshell-r2a/secrets" && m.spec.agent === undefined, "secretsRef without agent");
+  const out = infraContract({ infra: "s1", short: "r2a", guestTools: true });
+  assert(out.contract.association?.fromGuest === true && out.secret?.secretsRef, "template and secrets entry");
+  let refused = "";
+  try {
+    contractManifest({ name: "vmshell-r2b", guestTools: true, association: "did:plc:x" });
+  } catch (err) {
+    refused = err.message;
+  }
+  assert(refused === "R2 associates itself; leave Associate DID empty", `refused: ${refused}`);
+});
+
 Deno.test("guest tools: off sends no field", () => {
+  const off = contractManifest({ name: "vmshell-x" });
+  assert(off.spec.association === undefined && off.spec.secretsRef === undefined, "no association, no secretsRef");
   assert(contractManifest({ name: "vmshell-x" }).spec.guestTools === undefined, "default off");
   assert(contractManifest({ name: "vmshell-x", guestTools: false }).spec.guestTools === undefined, "off");
   assert(infraContract({ infra: "s1", short: "x" }).contract.guestTools === undefined, "template off");
