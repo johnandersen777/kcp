@@ -177,6 +177,22 @@ if (init.policySandboxPort) {
   globalThis.__socialwebSandbox = (await import("./policy_sandbox.js")).connect(init.policySandboxPort);
 }
 
+// Go calls this when the saved state of channel ("kcp" or "socialweb") could
+// not be read. It then never persists that channel, so nothing is saved over
+// the stored value; the page backs that value up and shows the error. A
+// hibernation capture of such a program would hide the error on the next
+// load, so capture stays off.
+let restoreUnreadable = false;
+let hibernation = null;
+globalThis.__kcpRestoreFailed = (channel, message) => {
+  restoreUnreadable = true;
+  self.postMessage({ type: "restore-unreadable", channel: String(channel), message: String(message) });
+  if (hibernation) {
+    hibernation.discard().catch(() => {});
+    hibernation = null;
+  }
+};
+
 // Socialweb vault state (OAuth session, pending PKCE, credentials) is small;
 // the page persists it under the "socialweb" IndexedDB key.
 globalThis.__socialwebPersist = (snapshot) => {
@@ -299,6 +315,14 @@ log("ok", "real kcp bridge registered");
 self.onmessage = (event) => {
   const { type, id, request } = event.data ?? {};
   if (handleHibernateMessage(type)) return;
+  // Before the page hands kcp to another tab: persist the writes the
+  // coalescer still holds (they reach the page as "persist" first).
+  if (type === "persist-flush") {
+    callGo("kcpPersistFlush", {}, 8000)
+      .then((out) => self.postMessage({ type: "persist-flushed", flushed: Boolean(out?.flushed) }))
+      .catch((err) => self.postMessage({ type: "persist-flushed", flushed: false, error: String(err?.message ?? err) }));
+    return;
+  }
   if (type === "state-subscribe") {
     if (latestState) self.postMessage({ type: "state", state: latestState });
     return;
@@ -338,7 +362,6 @@ self.onmessage = (event) => {
   }
 };
 
-let hibernation = null;
 if (restored) await finishRestore();
 // The restored program announced its ingress Exposures to a worker that is
 // gone; ask for the current list to reopen the relay subscriptions.
@@ -350,7 +373,7 @@ if (restored && typeof globalThis.socialwebIngressList === "function") {
 const readyMs = Math.round(performance.now() - started);
 log("ok", `kcp ready in ${readyMs}ms`);
 self.postMessage({ type: "ready", restored: restored?.stats ?? null, compileMs, readyMs });
-hibernation = startHibernationLoop();
+hibernation = restoreUnreadable ? null : startHibernationLoop();
 
 // --- hibernation ---------------------------------------------------------------
 

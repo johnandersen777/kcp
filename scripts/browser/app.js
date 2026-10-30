@@ -30,7 +30,17 @@ import {
 import { buildDiagram, nodeID } from "./diagram.js";
 import { cancelOAuthPopup, OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
 import { GRACE_MS, normalizeHandle, signInURL, signInView } from "./identity_ui.js";
-import { assembleSnapshot, createPersister, openBestBackend, snapshotRecords } from "./state_store.js";
+import {
+  assembleSnapshot,
+  backendNotice,
+  backupUnreadable,
+  createPersister,
+  openBestBackend,
+  snapshotRecords,
+  unreadableMessage,
+} from "./state_store.js";
+import { createBanners } from "./page_banner.js";
+import { BUSY_MESSAGE, createKcpLock, FORCE_WARNING, TAKEN_OVER_MESSAGE } from "./kcp_lock.js";
 import * as vmshell from "./vmshell.js";
 import * as webrtcGuest from "./webrtc_guest.js";
 import * as sshCmd from "./ssh_cmd.js";
@@ -55,6 +65,7 @@ const maxLogEntries = 500;
 const homeDir = "/home/user";
 
 const statusEl = document.getElementById("status");
+const banners = createBanners(document.getElementById("banners"));
 const retryEl = document.getElementById("retry");
 retryEl.addEventListener("click", () => location.reload());
 const serverEl = document.getElementById("server");
@@ -189,17 +200,20 @@ if (debugLog) {
 
 // --- activity log ----------------------------------------------------------
 
-function addLog(level, message) {
+// pinned rows (the state backend line, which probes read) are never trimmed.
+function addLog(level, message, { pinned = false } = {}) {
   const nearBottom =
     logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
   const row = document.createElement("div");
-  row.className = `log-${level}`;
+  row.className = `log-${level}${pinned ? " log-pinned" : ""}`;
   const time = new Date().toLocaleTimeString(undefined, { hour12: false });
   row.textContent = `${time} ${message}`;
   debugSend(level, message);
   logEl.appendChild(row);
   while (logEl.childElementCount > maxLogEntries) {
-    logEl.firstElementChild.remove();
+    const oldest = logEl.querySelector(":scope > div:not(.log-pinned)");
+    if (!oldest) break;
+    oldest.remove();
   }
   if (nearBottom) logEl.scrollTop = logEl.scrollHeight;
 }
@@ -605,9 +619,15 @@ function attachKcp(worker) {
         request: { response: data.response, error: data.error },
       });
     } else if (data.type === "persist") {
+      if (!kcpStateOwned()) return;
       persistKcp(data.snapshot, data.seq);
     } else if (data.type === "socialweb-persist") {
+      if (!kcpStateOwned()) return;
       void persister.schedule(socialwebStateKey, data.snapshot, data.seq);
+    } else if (data.type === "restore-unreadable") {
+      void restoreUnreadable(data.channel, data.message);
+    } else if (data.type === "persist-flushed") {
+      for (const resolve of persistFlushWaiters.splice(0)) resolve(Boolean(data.flushed));
     } else if (data.type === "socialweb-started") {
       recordKcpBuild();
     } else if (data.type === "log") {
@@ -628,9 +648,14 @@ function stateBackend() {
   if (!stateBackendPromise) {
     stateBackendPromise = openBestBackend({ dbName: stateDB, maxBytes: stateMaxBytes })
       .then(({ backend, kind, reason }) => {
-        addLog("info", `kcp state backend: ${kind}`);
-        if (kind === "memory" && reason) {
-          addLog("warn", `IndexedDB unavailable (${reason.message ?? reason}); state will not survive reload`);
+        // Always in #log at a level that is never filtered (probes read it).
+        // Memory: a visible banner and console.warn; minting is not blocked
+        // (open with the owner).
+        const notice = backendNotice({ kind, reason });
+        addLog(notice.level, notice.line, { pinned: true });
+        if (notice.banner) {
+          banners.show("memory", { text: notice.banner, level: "warn" });
+          console.warn(notice.warn);
         }
         return backend;
       });
@@ -666,6 +691,7 @@ async function loadKcpState() {
 let kcpPersistQueue = Promise.resolve();
 function persistKcp(snapshot, seq) {
   kcpPersistQueue = kcpPersistQueue.then(async () => {
+    if (!kcpStateOwned()) return;
     const message = JSON.parse(snapshot);
     const backend = await stateBackend();
     if (!message.stores) {
@@ -695,6 +721,138 @@ const persister = createPersister({
   onError: (key, err) => addLog("warn", `state save failed (${key}): ${err instanceof Error ? err.message : err}`),
 });
 addEventListener("pagehide", () => void persister.flushAll());
+
+// --- saved state this build cannot read (rc129) -------------------------------
+// Go reports a kcp or socialweb value it could not read and never persists
+// that channel then, so nothing is saved over it. The raw value is copied to
+// <channel>-unreadable-<time> first, then the error is shown.
+let restoredRaw = { kcp: "", socialweb: "" };
+async function restoreUnreadable(channel, message) {
+  const raw = restoredRaw[channel] ?? "";
+  let backup = null;
+  try {
+    backup = await backupUnreadable(await stateBackend(), channel, raw);
+  } catch (err) {
+    addLog("error", `backing up the unreadable ${channel} state failed: ${err instanceof Error ? err.message : err}`);
+  }
+  const text = `${unreadableMessage(channel)}${backup ? ` (a copy is saved as ${backup})` : ""}. ` +
+    "This session runs without saving it; reload with a build that reads it, or reset.";
+  addLog("error", `${unreadableMessage(channel)}: ${message}${backup ? `; backed up as ${backup}` : backup === "" ? "; already backed up" : ""}`);
+  console.error(`${unreadableMessage(channel)}: ${message}`);
+  banners.show(`unreadable-${channel}`, { text, level: "error" });
+}
+
+// --- one kcp per origin (kcp_lock.js) -------------------------------------------
+// The tab boots kcp only while it holds the Web Lock "kcp-state"; another tab
+// of this browser asks it to hand over (Take over), or steals it from a tab
+// that does not answer. After that this tab must never write the shared
+// state again: kcpStateOwned() gates every kcp and socialweb persist.
+let kcpWorkerBooting = null;
+const persistFlushWaiters = [];
+const kcpLock = createKcpLock({ log: (level, message) => addLog(level, message), onYield: yieldKcp });
+
+// "yielding": a take over is flushing; those last writes must land.
+function kcpStateOwned() {
+  return ["held", "yielding", "unsupported", "idle"].includes(kcpLock.state);
+}
+
+// Has the kcp worker persist what its coalescer still holds; resolves once
+// that message is queued (it arrives before the answer), or false.
+function flushKcpWorker(worker, timeoutMs = 8000) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    persistFlushWaiters.push((ok) => {
+      clearTimeout(timer);
+      resolve(ok);
+    });
+    worker.postMessage({ type: "persist-flush" });
+  });
+}
+
+// The holder's half of a take over: save everything (only when asked; a tab
+// whose lock was stolen must not write over the new owner), stop kcp, show it.
+async function yieldKcp(why) {
+  ready = false;
+  const worker = kcpWorker ?? kcpWorkerBooting;
+  if (why === "takeover") {
+    if (worker) {
+      const flushed = await flushKcpWorker(worker);
+      addLog(flushed ? "info" : "warn", flushed ? "kcp writes flushed for the other tab" : "kcp flush unanswered; saving what arrived");
+    }
+    await kcpPersistQueue;
+    await persister.flushAll();
+  }
+  persister.stop();
+  worker?.terminate();
+  kcpWorker = null;
+  kcpWorkerBooting = null;
+  setStatus("taken over by another tab", "disconnected");
+  banners.show("lock", {
+    text: TAKEN_OVER_MESSAGE,
+    level: "warn",
+    actions: [{
+      label: "Take over",
+      onClick: () => {
+        try {
+          sessionStorage.setItem("kcp.takeover", "1");
+        } catch {
+          // no sessionStorage: the reload offers Take over instead
+        }
+        location.reload();
+      },
+    }],
+  });
+}
+
+// Resolves once this tab may boot kcp. Another tab running it shows the
+// choice (Retry, Take over; Force take over after no answer) and waits.
+async function acquireKcpLock() {
+  let takeover = false;
+  try {
+    takeover = sessionStorage.getItem("kcp.takeover") === "1";
+    sessionStorage.removeItem("kcp.takeover");
+  } catch {
+    // no sessionStorage
+  }
+  let outcome = takeover ? await kcpLock.takeover() : await kcpLock.acquire();
+  if (outcome === "unsupported") {
+    addLog("warn", "navigator.locks is not available; booting kcp without the one-kcp-per-origin check");
+    return;
+  }
+  while (outcome !== "held") outcome = await kcpLockChoice(outcome);
+  banners.hide("lock");
+  addLog("ok", "kcp lock held: this tab runs kcp");
+}
+
+function kcpLockChoice(outcome) {
+  setStatus("kcp is running in another tab", "disconnected");
+  addLog("warn", `kcp lock: ${outcome}`);
+  return new Promise((resolve) => {
+    const run = (label, step) => ({
+      label,
+      onClick: () => {
+        banners.show("lock", { text: `${label}…`, level: "info" });
+        step().then(resolve, (err) => {
+          addLog("error", `kcp lock: ${err instanceof Error ? err.message : err}`);
+          resolve("busy");
+        });
+      },
+    });
+    const retry = run("Retry", () => kcpLock.acquire());
+    const takeOver = run("Take over", () => kcpLock.takeover());
+    const force = run("Force take over", () => kcpLock.force());
+    const choices = {
+      busy: { text: BUSY_MESSAGE, actions: [retry, takeOver] },
+      "no-answer": { text: FORCE_WARNING, actions: [force, takeOver, retry] },
+      timeout: {
+        text: "The other tab answered but is still saving. Wait again, or force take over (unsaved changes there may be lost).",
+        actions: [takeOver, force],
+      },
+    };
+    const choice = choices[outcome] ?? choices.busy;
+    banners.show("lock", { text: choice.text, level: "warn", actions: choice.actions });
+  });
+}
 
 // socialweb skips its provider manifests when the restored kcp state already
 // has Ready APIBindings, so state saved by an older kcp.wasm would keep that
@@ -765,7 +923,10 @@ async function spawnKcp(useSnapshot = true) {
   ]);
   const policySandboxPort = sandboxFrame ? connectFrame(sandboxFrame) : undefined;
   if (buildChanged && initialState) addLog("info", "kcp.wasm changed since the saved state; re-applying the socialweb manifests");
+  // The values handed to Go, for a backup if it cannot read them.
+  restoredRaw = { kcp: initialState, socialweb: socialwebSnapshot };
   const worker = new Worker("/kcp_worker.js", { type: "module" });
+  kcpWorkerBooting = worker;
   attachKcp(worker);
   const readyPromise = waitReady(worker);
   worker.postMessage({
@@ -800,6 +961,12 @@ async function spawnKcp(useSnapshot = true) {
     policySandboxPort,
   }, policySandboxPort ? [policySandboxPort] : []);
   const ready = await readyPromise;
+  kcpWorkerBooting = null;
+  if (!kcpStateOwned()) {
+    // Taken over while booting: yieldKcp already stopped it and shows why.
+    worker.terminate();
+    await new Promise(() => {});
+  }
   if (ready?.restart) {
     worker.terminate();
     return spawnKcp(false);
@@ -2302,6 +2469,7 @@ function applyState(state) {
   applyComputeState(state);
   requesterSeen = Boolean(state.marketRequester);
   identityState = state.marketIdentity ?? null;
+  if (identityState?.phase === "Ready" && identityState.did) void collectOtherTabInfras(identityState.did);
   if (!requesterSeen) {
     renderIdentity();
     return;
@@ -2557,6 +2725,62 @@ async function sessionInfra() {
   const synced = await waitInfraRecord(name, did);
   addLog("info", `EphemeralInfra ${name} record ${vmshell.infraRecordURI(synced, did, name)}`);
   return synced;
+}
+
+// Other tabs' EphemeralInfras of this origin (vmshell.planInfraGC), once per
+// load after the identity is Ready: an infra without a live ComputeContract
+// is deleted; one with a live contract keeps running and gets its record
+// binding repaired as sessionInfra does (composeInfra, the page's full-spec
+// apply). Other origins' infras, this tab's own and ending ones are left
+// alone. A failed pass runs again a minute later.
+let infraGCState = "";
+async function collectOtherTabInfras(did) {
+  if (infraGCState) return;
+  infraGCState = "running";
+  try {
+    const [infras, contracts] = await Promise.all([
+      kcpREST("GET", `${SOCIALWEB_API}/ephemeralinfras`),
+      kcpREST("GET", `${SOCIALWEB_API}/computecontracts`),
+    ]);
+    const plan = vmshell.planInfraGC({
+      infras: infras?.items ?? [],
+      contracts: (contracts?.items ?? []).map(vmshell.feedContract),
+      origin: location.origin,
+      tabId: infraTabId(),
+      did,
+    });
+    if (plan.length === 0) addLog("debug", "no other tabs' EphemeralInfras to collect");
+    for (const step of plan) {
+      const live = step.live.length ? ` (${step.live.join(", ")})` : "";
+      try {
+        if (step.action === "delete") {
+          await kcpREST("DELETE", `${SOCIALWEB_API}/ephemeralinfras/${step.name}`).catch((err) => {
+            if (kcpStatus(err) !== 404) throw err;
+          });
+          addLog("info", `EphemeralInfra ${step.name} of another tab deleted: ${step.reason}`);
+        } else if (step.action === "rebind") {
+          const record = vmshell.infraRecordBinding(did);
+          await infraQueued(() => vmshell.composeInfra({
+            rest: kcpREST,
+            api: SOCIALWEB_API,
+            infra: step.name,
+            update: (spec) => (vmshell.infraRecordStale(spec.record) ? { ...spec, record } : null),
+          }));
+          addLog("info", `EphemeralInfra ${step.name} of another tab kept and its record rebound: ${step.reason}${live}`);
+        } else {
+          addLog("info", `EphemeralInfra ${step.name} of another tab left alone: ${step.reason}${live}`);
+        }
+      } catch (err) {
+        addLog("warn", `EphemeralInfra ${step.name} ${step.action} failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    infraGCState = "done";
+  } catch (err) {
+    addLog("warn", `collecting other tabs' EphemeralInfras failed: ${err instanceof Error ? err.message : err}`);
+    setTimeout(() => {
+      infraGCState = "";
+    }, 60_000);
+  }
 }
 
 // Sets the state of contract short in the session infra (Requested adds it).
@@ -3269,6 +3493,8 @@ function renderIngress(entries) {
 
 async function start() {
   startDebugControl();
+  // One kcp per origin: wait here while another tab of this browser runs it.
+  await acquireKcpLock();
   term.writeln(cyan("kcp-wasm") + dim(" loading real kcp.wasm…"));
   term.writeln(cyan("kubectl-wasm") + dim(lowMemory ? " loads on first use (low-memory mode)" : " loading kubectl.wasm…"));
   setStatus("loading kcp + kubectl…", "running");
@@ -3498,6 +3724,8 @@ const debugHandle = {
     return out.join("\n");
   },
   log: (message) => addLog("info", `debug: ${message}`),
+  lock: () => kcpLock.state,
+  banners: () => banners.ids().map((id) => [id, banners.text(id)]),
   reload: (query) => {
     debugSend("info", "debug: reloading");
     debugFlush();
