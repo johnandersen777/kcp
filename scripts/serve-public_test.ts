@@ -26,6 +26,7 @@ Deno.test("loadScope reads the generated scope file and falls back without it", 
     for (const want of [
       "rpc:chat.atirc.mint?aud=did:web:irc.fedfork.com%23atirc",
       "repo:com.publicdomainrelay.temp.compute.events.guest.agentStart?action=create&action=update",
+      "repo:com.publicdomainrelay.temp.market.association?action=create&action=update&action=delete",
     ]) {
       if (!DEFAULT_SCOPE.split(" ").includes(want)) throw new Error(`the fallback scope lacks ${want}`);
     }
