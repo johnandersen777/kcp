@@ -78,3 +78,72 @@ func TestGuestRequesterProjection(t *testing.T) {
 		t.Fatalf("guestRequester: %+v", c.GuestRequester)
 	}
 }
+
+func TestR2Projection(t *testing.T) {
+	c := contract(&unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "c"},
+		"spec":     map[string]any{"guestTools": []any{"socialweb-computer"}, "association": map[string]any{"fromGuest": true}},
+	}})
+	if len(c.GuestTools) != 1 || c.GuestTools[0] != "socialweb-computer" || !c.FromGuest {
+		t.Fatalf("R2 spec: %+v", c)
+	}
+	if c := contract(&unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "c"}}}); c.GuestTools != nil || c.FromGuest {
+		t.Fatalf("no R2: %+v", c)
+	}
+}
+
+func TestReleaseCascadeProjection(t *testing.T) {
+	c := contract(&unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "c"},
+		"status": map[string]any{"phase": "Releasing", "atircRevokes": "Pending",
+			"execution": map[string]any{"step": "releasingGuestRequester"}},
+	}})
+	if c.Step != "releasingGuestRequester" || c.AtircRevokes != "Pending" {
+		t.Fatalf("release cascade: %+v", c)
+	}
+}
+
+func TestReleaseRequestProjection(t *testing.T) {
+	c := contract(&unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "c"},
+		"spec":     map[string]any{"release": true, "releaseRequestedAt": "2026-10-30T12:00:01.000Z"},
+		"status": map[string]any{
+			"phase":   "Failed",
+			"release": map[string]any{"attempts": int64(3), "requestedAt": "2026-10-30T11:00:00.000Z"},
+			"conditions": []any{
+				map[string]any{"type": "Ready", "status": "False"},
+				map[string]any{"type": "ReleaseFailed", "status": "True"},
+			},
+		},
+	}})
+	if !c.Release || c.ReleaseRequestedAt != "2026-10-30T12:00:01.000Z" || c.ReleaseAnsweredAt != "2026-10-30T11:00:00.000Z" || !c.ReleaseFailed {
+		t.Fatalf("release request: %+v", c)
+	}
+	plain := contract(&unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "c"},
+		"status":   map[string]any{"conditions": []any{map[string]any{"type": "ReleaseFailed", "status": "False"}}},
+	}})
+	if plain.ReleaseRequestedAt != "" || plain.ReleaseAnsweredAt != "" || plain.ReleaseFailed {
+		t.Fatalf("no release: %+v", plain)
+	}
+}
+
+func TestR2ReleaseProjection(t *testing.T) {
+	with := func(rel map[string]any) Contract {
+		return contract(&unstructured.Unstructured{Object: map[string]any{
+			"metadata": map[string]any{"name": "c"},
+			"status":   map[string]any{"contract": map[string]any{"r2Release": rel}},
+		}})
+	}
+	waiting := with(map[string]any{"phase": "Requested", "requestedAt": "t1"})
+	if waiting.R2Release == nil || waiting.R2Release.OK != nil || waiting.R2Release.RequestedAt != "t1" || waiting.R2Release.Phase != "Requested" {
+		t.Fatalf("waiting: %+v", waiting.R2Release)
+	}
+	done := with(map[string]any{"phase": "Answered", "ok": false, "message": "timed out", "requestedAt": "t1", "answeredAt": "t2"})
+	if done.R2Release.OK == nil || *done.R2Release.OK || done.R2Release.Message != "timed out" || done.R2Release.AnsweredAt != "t2" {
+		t.Fatalf("answered: %+v", done.R2Release)
+	}
+	if c := contract(&unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "c"}}}); c.R2Release != nil {
+		t.Fatalf("absent: %+v", c.R2Release)
+	}
+}

@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-27.computecontracts.socialweb.computer
+  name: v1alpha1-30.computecontracts.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -141,6 +141,8 @@ spec:
                   - path
               release:
                 type: boolean
+              releaseRequestedAt:
+                type: string
               ownerDid:
                 type: string
               adopt:
@@ -609,6 +611,26 @@ spec:
                       - reportedAt
                       - event
                       - payload
+                  r2Release:
+                    type: object
+                    properties:
+                      phase:
+                        type: string
+                        enum:
+                          - Requested
+                          - Released
+                          - Failed
+                          - TimedOut
+                      ok:
+                        type: boolean
+                      message:
+                        type: string
+                      requestedAt:
+                        type: string
+                      answeredAt:
+                        type: string
+                    required:
+                      - phase
                   outcome:
                     type: string
                     enum:
@@ -733,6 +755,8 @@ spec:
                     type: integer
                   lastError:
                     type: string
+                  requestedAt:
+                    type: string
               pendingEvents:
                 type: array
                 items:
@@ -760,6 +784,12 @@ spec:
                   - cid
               associationMessage:
                 type: string
+              atircRevokes:
+                type: string
+                enum:
+                  - Pending
+                  - Done
+                  - Abandoned
       additionalPrinterColumns:
         - name: Phase
           type: string

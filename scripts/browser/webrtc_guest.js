@@ -19,6 +19,7 @@
 export const NSID_PUBLIC_KEY = "com.publicdomainrelay.temp.compute.events.guest.publicKey";
 export const NSID_SIGNAL = "com.publicdomainrelay.temp.compute.events.guest.signalWebRTC";
 export const NSID_AGENT_START = "com.publicdomainrelay.temp.compute.events.guest.agentStart";
+export const NSID_R2_START = "com.publicdomainrelay.temp.compute.events.guest.r2Start";
 export const ICE_SERVERS = [{ urls: "stun:stun.cloudflare.com:3478" }];
 export const SSH_TAG = "ssh";
 const AGE_URL = "https://esm.sh/age-encryption@0.3.1";
@@ -121,6 +122,26 @@ export function contractEventManifest({ name, contract, nsid, kind, tag = SSH_TA
 /** Asks the guest agent to start the contract's atirc agent unit (plan 0035); no kind, tag or payload. */
 export function agentStartEvent(contract, suffix) {
   return contractEventManifest({ name: `${contract}-agent-${suffix}`, contract, nsid: NSID_AGENT_START, tag: "" });
+}
+
+/**
+ * Asks the guest's socialweb-computer to start R2 (plan 0036 A7): an outbound
+ * guest.r2Start ContractEvent with spec.r2Start {name (a DNS label), agent,
+ * hold}. Throws on a name that is not a DNS label.
+ */
+export function r2StartEvent(contract, suffix, { name = "r2", agent = false, hold = true } = {}) {
+  if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(name)) throw new Error(`R2 name ${JSON.stringify(name)} is not a DNS label`);
+  const manifest = contractEventManifest({ name: `${contract}-r2-${suffix}`, contract, nsid: NSID_R2_START, tag: "" });
+  manifest.spec.r2Start = { name, agent: Boolean(agent), hold: Boolean(hold) };
+  return manifest;
+}
+
+/** True when the served ContractEvent schema has the guest.r2Start nsid and the spec.r2Start field. */
+export function schemaHasR2Start(schema) {
+  return (schema?.spec?.versions ?? []).some((v) => {
+    const spec = v.schema?.properties?.spec?.properties;
+    return (spec?.nsid?.enum ?? []).includes(NSID_R2_START) && spec?.r2Start !== undefined;
+  });
 }
 
 /**

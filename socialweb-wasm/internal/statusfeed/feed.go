@@ -61,9 +61,30 @@ type Contract struct {
 	Bids      int    `json:"bids,omitempty"`
 	// Agent is spec.agent being set (plan 0035): the page offers its Agent button.
 	Agent bool `json:"agent,omitempty"`
+	// GuestTools and FromGuest are spec.guestTools and
+	// spec.association.fromGuest: the page's Start R2 button (plan 0036 A7).
+	GuestTools []string `json:"guestTools,omitempty"`
+	FromGuest  bool     `json:"fromGuest,omitempty"`
+	// Step is status.execution.step (e.g. releasingGuestRequester while the
+	// A8 cascade waits for the guest requester); AtircRevokes is
+	// status.atircRevokes (Pending|Done|Abandoned), run before Released.
+	Step         string `json:"step,omitempty"`
+	AtircRevokes string `json:"atircRevokes,omitempty"`
+	// R2Release is status.contract.r2Release: the A8 cascade's guest answer
+	// (phase Requested|Released|Failed|TimedOut; ok is omitted when false).
+	R2Release *R2Release `json:"r2Release,omitempty"`
 
 	SecretsFetchedAt string    `json:"secretsFetchedAt,omitempty"`
 	Release          bool      `json:"release,omitempty"`
+	// ReleaseRequestedAt is spec.releaseRequestedAt (computecontracts 30):
+	// the page sets it with spec.release on every Release.
+	ReleaseRequestedAt string `json:"releaseRequestedAt,omitempty"`
+	// ReleaseAnsweredAt is status.release.requestedAt: the request the
+	// release outcome answers (current only when equal to ReleaseRequestedAt).
+	ReleaseAnsweredAt string `json:"releaseAnsweredAt,omitempty"`
+	// ReleaseFailed is the ReleaseFailed condition being True: a newer
+	// releaseRequestedAt restarts that release.
+	ReleaseFailed bool `json:"releaseFailed,omitempty"`
 	Networks         []Network `json:"networks,omitempty"`
 	// HostKeys are status.contract.hostKeys as authorized_keys lines, the
 	// pins for the page's WebRTC SSH client.
@@ -77,6 +98,16 @@ type Contract struct {
 	// GuestRequester is status.contract.guestRequester: the DID the guest's
 	// socialweb-computer (R2) reported and whether the requester verified it.
 	GuestRequester *GuestRequester `json:"guestRequester,omitempty"`
+}
+
+// R2Release is the guest requester's answer to guest.r2Release; the phase
+// decides (OK is nil unless true).
+type R2Release struct {
+	Phase       string `json:"phase,omitempty"`
+	OK          *bool  `json:"ok,omitempty"`
+	Message     string `json:"message,omitempty"`
+	RequestedAt string `json:"requestedAt,omitempty"`
+	AnsweredAt  string `json:"answeredAt,omitempty"`
 }
 
 // GuestRequester is the R2 guest's reported requester DID.
@@ -319,7 +350,31 @@ func contract(u *unstructured.Unstructured) Contract {
 		}
 	}
 	c.Release, _, _ = unstructured.NestedBool(u.Object, "spec", "release")
+	c.ReleaseRequestedAt, _, _ = unstructured.NestedString(u.Object, "spec", "releaseRequestedAt")
+	c.ReleaseAnsweredAt, _, _ = unstructured.NestedString(u.Object, "status", "release", "requestedAt")
+	conditions, _, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
+	for _, raw := range conditions {
+		cond, _ := raw.(map[string]any)
+		if cond["type"] == "ReleaseFailed" && cond["status"] == "True" {
+			c.ReleaseFailed = true
+		}
+	}
 	_, c.Agent, _ = unstructured.NestedMap(u.Object, "spec", "agent")
+	c.GuestTools, _, _ = unstructured.NestedStringSlice(u.Object, "spec", "guestTools")
+	c.FromGuest, _, _ = unstructured.NestedBool(u.Object, "spec", "association", "fromGuest")
+	c.Step, _, _ = unstructured.NestedString(u.Object, "status", "execution", "step")
+	c.AtircRevokes, _, _ = unstructured.NestedString(u.Object, "status", "atircRevokes")
+	if rel, ok, _ := unstructured.NestedMap(u.Object, "status", "contract", "r2Release"); ok {
+		r := &R2Release{}
+		r.Phase, _ = rel["phase"].(string)
+		r.Message, _ = rel["message"].(string)
+		r.RequestedAt, _ = rel["requestedAt"].(string)
+		r.AnsweredAt, _ = rel["answeredAt"].(string)
+		if answer, ok := rel["ok"].(bool); ok {
+			r.OK = &answer
+		}
+		c.R2Release = r
+	}
 	networks, _, _ := unstructured.NestedSlice(u.Object, "status", "contract", "networks")
 	for _, raw := range networks {
 		n, _ := raw.(map[string]any)
