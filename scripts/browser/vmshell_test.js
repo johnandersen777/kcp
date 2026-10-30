@@ -268,23 +268,27 @@ Deno.test("infra record binding watches through the jetstream EventSources", () 
   assert(infraRecordStale({ ...b, sync: "Publish" }) && infraRecordStale(null), "publish-only or missing");
 });
 
-Deno.test("policy always: addContract refuses an active entry without requester-tangled-vouch", () => {
+Deno.test("always-run/empty-policy-default-tangled-vouch: addContract refuses an active entry without requester-tangled-vouch", () => {
   const { contract } = infraContract({ infra: "s1", short: "ok" });
   assert(addContract([], contract).contracts[0].policy === "requester-tangled-vouch", "page entry carries it");
+  // decision follows: a refusal returns nothing to PATCH (setInfraContract
+  // writes only what addContract returns) and leaves the record as it was.
+  const record = [{ name: "keep", state: "Held", policy: "requester-tangled-vouch" }];
+  const before = JSON.stringify(record);
   for (const policy of [undefined, "", "open", "requester-only-me"]) {
-    let threw = false;
+    let threw = false, out;
     try {
-      addContract([], { ...contract, policy });
+      out = addContract(record, { ...contract, policy });
     } catch (err) {
       threw = /refusing contract/.test(err.message);
     }
-    assert(threw, `refused policy ${policy}`);
+    assert(threw && out === undefined && JSON.stringify(record) === before, `refused policy ${policy}, nothing written`);
   }
   const released = { name: "old", state: "Released" };
   assert(addContract([], released).contracts[0].policy === undefined, "a release needs no policy");
 });
 
-Deno.test("policy always: other active entries in the record are written back with the policy", () => {
+Deno.test("always-run/empty-policy-default-tangled-vouch: other active entries in the record are written back with the policy", () => {
   const { contract } = infraContract({ infra: "s1", short: "new" });
   const record = [
     { name: "legacy", state: "Requested" },
@@ -297,7 +301,7 @@ Deno.test("policy always: other active entries in the record are written back wi
   assert(by.done === undefined && record[0].policy === undefined, "released left alone, input not mutated");
 });
 
-Deno.test("policy always: no manifest option drops or changes the policy", () => {
+Deno.test("always-run/empty-policy-default-tangled-vouch: no manifest option drops or changes the policy", () => {
   for (const opts of [{}, { wootty: true }, { agent: true }, { association: "did:plc:x" }, { policy: "open" }, { ownerDid: "did:plc:me" }]) {
     assert(contractManifest({ name: "vmshell-p", ...opts }).spec.policy === "requester-tangled-vouch", JSON.stringify(opts));
   }
