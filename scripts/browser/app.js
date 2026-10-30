@@ -35,6 +35,8 @@ import {
   backendNotice,
   backupUnreadable,
   createPersister,
+  isNotOwner,
+  UNREADABLE_PREFIXES,
   openBestBackend,
   snapshotRecords,
   unreadableMessage,
@@ -706,7 +708,7 @@ function persistKcp(snapshot, seq) {
     if (seq) ops.puts.push([kcpSeqKey, seq]);
     await backend.apply(ops);
   }).catch((err) => {
-    addLog("warn", `kcp state save failed: ${err instanceof Error ? err.message : err}`);
+    stateWriteFailed("kcp state save", err);
   });
 }
 
@@ -718,7 +720,7 @@ function persistKcp(snapshot, seq) {
 const persister = createPersister({
   backend: stateBackend,
   immediate: [socialwebStateKey],
-  onError: (key, err) => addLog("warn", `state save failed (${key}): ${err instanceof Error ? err.message : err}`),
+  onError: (key, err) => stateWriteFailed(`state save (${key})`, err),
 });
 addEventListener("pagehide", () => void persister.flushAll());
 
@@ -733,13 +735,18 @@ async function restoreUnreadable(channel, message) {
   try {
     backup = await backupUnreadable(await stateBackend(), channel, raw);
   } catch (err) {
-    addLog("error", `backing up the unreadable ${channel} state failed: ${err instanceof Error ? err.message : err}`);
+    stateWriteFailed(`backing up the unreadable ${channel} state`, err);
   }
   const text = `${unreadableMessage(channel)}${backup ? ` (a copy is saved as ${backup})` : ""}. ` +
-    "This session runs without saving it; reload with a build that reads it, or reset.";
+    "This session runs without saving it; reload with a build that reads it, or Reset. " +
+    "The copies hold secrets (sign-in tokens and keys of the vault); Reset keeps them.";
   addLog("error", `${unreadableMessage(channel)}: ${message}${backup ? `; backed up as ${backup}` : backup === "" ? "; already backed up" : ""}`);
   console.error(`${unreadableMessage(channel)}: ${message}`);
-  banners.show(`unreadable-${channel}`, { text, level: "error" });
+  banners.show(`unreadable-${channel}`, {
+    text,
+    level: "error",
+    actions: [{ label: "Reset", onClick: () => void resetState() }],
+  });
 }
 
 // --- one kcp per origin (kcp_lock.js) -------------------------------------------
@@ -753,7 +760,52 @@ const kcpLock = createKcpLock({ log: (level, message) => addLog(level, message),
 
 // "yielding": a take over is flushing; those last writes must land.
 function kcpStateOwned() {
-  return ["held", "yielding", "unsupported", "idle"].includes(kcpLock.state);
+  return !stateFenced && ["held", "yielding", "unsupported", "idle"].includes(kcpLock.state);
+}
+
+// Owner fence (state_store.js claimOwner): right after this tab takes the
+// lock, and before its first persist, it writes its token; a write from a
+// tab whose token was replaced aborts whole (NotOwner). The first such
+// refusal stops every persist of this tab.
+const stateOwnerToken = vmshell.randomToken();
+let stateFenced = false;
+async function claimStateOwner() {
+  const backend = await stateBackend();
+  await backend.claimOwner(stateOwnerToken);
+  addLog("debug", `saved state owner: this tab (${stateOwnerToken.slice(0, 8)})`);
+}
+
+function stateWriteFailed(what, err) {
+  if (!isNotOwner(err)) {
+    addLog("warn", `${what} failed: ${err instanceof Error ? err.message : err}`);
+    return;
+  }
+  if (stateFenced) return;
+  stateFenced = true;
+  persister.stop();
+  addLog("error", `${what} refused: another tab owns the saved state now; this tab stops saving`);
+}
+
+// Clears the kcp and socialweb state (one transaction) and the shell, then
+// reloads: the terminal reset and the unreadable-state banner's Reset. The
+// <channel>-unreadable-* backups stay unless all is set (reset --all).
+async function resetState({ all = false } = {}) {
+  // A worker may hold the snapshot's OPFS file open; stop it first.
+  kcpWorker?.terminate();
+  kcpWorker = null;
+  await discardSnapshot().catch(() => {});
+  try {
+    const backend = await stateBackend();
+    await backend.apply({ clearPrefix: kcpRecordPrefix, deletes: [stateKey, socialwebStateKey, socialwebSeqKey] });
+    if (all) for (const prefix of UNREADABLE_PREFIXES) await backend.apply({ clearPrefix: prefix });
+  } catch (err) {
+    // A missing or read-only store is already a reset; another owner is not.
+    if (isNotOwner(err)) stateWriteFailed("reset", err);
+  }
+  localStorage.removeItem(legacyStateKey);
+  localStorage.removeItem(shellStateKey);
+  addLog("warn", `shell, kcp and socialweb state cleared${all ? " with the unreadable-state backups" : ""}; reloading`);
+  setTimeout(() => location.reload(), 300);
 }
 
 // Has the kcp worker persist what its coalescer still holds; resolves once
@@ -1387,7 +1439,7 @@ function shellHelp() {
     "  ssh vmshell-abc123            (a Held ComputeContract, over WebRTC; see ~/.ssh/config)",
     "  ssh vmshell-abc123 uname -a | grep Linux",
     "",
-    "builtins: help · clear · reset (wipe kcp state and reload) · snapshot-discard (cold boot next load)",
+    "builtins: help · clear · reset [--all] (wipe kcp state and reload; --all also the unreadable-state backups) · snapshot-discard (cold boot next load)",
     "keys: Ctrl-C cancel · Ctrl-D finish stdin · Tab complete · ↑/↓ history",
     "",
   ].join("\n");
@@ -1485,25 +1537,17 @@ function makeCommands() {
     return { stdout: "kcp snapshot discarded; the next load cold boots\n", stderr: "", exitCode: 0 };
   });
 
-  const reset = defineCommand("reset", async () => {
-    // A worker may hold the snapshot's OPFS file open; stop it first.
-    kcpWorker?.terminate();
-    kcpWorker = null;
-    await discardSnapshot().catch(() => {});
-    try {
-      const backend = await stateBackend();
-      await backend.remove(stateKey);
-      await backend.apply({ clearPrefix: kcpRecordPrefix });
-      await backend.remove(socialwebStateKey);
-      await backend.remove(socialwebSeqKey);
-    } catch {
-      // A missing or read-only store is already a reset.
+  const reset = defineCommand("reset", async (args) => {
+    const all = (args ?? []).includes("--all");
+    if ((args ?? []).some((a) => a !== "--all")) {
+      return { stdout: "", stderr: "usage: reset [--all]\n", exitCode: 2 };
     }
-    localStorage.removeItem(legacyStateKey);
-    localStorage.removeItem(shellStateKey);
-    addLog("warn", "shell, kcp and socialweb state cleared; reloading");
-    setTimeout(() => location.reload(), 300);
-    return { stdout: "cleared shell and kcp state; reloading…\n", stderr: "", exitCode: 0 };
+    await resetState({ all });
+    return {
+      stdout: `cleared shell and kcp state${all ? " and the unreadable-state backups" : " (unreadable-state backups kept; reset --all removes them)"}; reloading…\n`,
+      stderr: "",
+      exitCode: 0,
+    };
   });
 
   const ssh = defineCommand("ssh", (args, ctx) => runSsh(args, ctx));
@@ -3501,6 +3545,9 @@ async function start() {
   startDebugControl();
   // One kcp per origin: wait here while another tab of this browser runs it.
   await acquireKcpLock();
+  // Before kcp boots (its first persist): later writes of a tab that loses
+  // the state are refused.
+  await claimStateOwner();
   term.writeln(cyan("kcp-wasm") + dim(" loading real kcp.wasm…"));
   term.writeln(cyan("kubectl-wasm") + dim(lowMemory ? " loads on first use (low-memory mode)" : " loading kubectl.wasm…"));
   setStatus("loading kcp + kubectl…", "running");

@@ -46,11 +46,29 @@ function assertStorable(key, value, maxBytes) {
   }
 }
 
+/**
+ * The key holding the token of the tab that owns the saved state (the one
+ * holding the kcp-state Web Lock, kcp_lock.js). Every IndexedDB write checks
+ * it in its own transaction (claimOwner).
+ */
+export const OWNER_KEY = "owner";
+
+/** A write refused because another tab claimed the saved state since. */
+export function isNotOwner(err) {
+  return err?.code === "NotOwner";
+}
+
 /** In-memory backend used by tests and as the IndexedDB fallback. */
 export function createMemoryBackend({ maxBytes = DEFAULT_MAX_BYTES } = {}) {
   const values = new Map();
   return {
     kind: "memory",
+    // Nothing to fence: memory state is this tab's alone.
+    async claimOwner() {},
+    async keys(prefix) {
+      assertKey(prefix);
+      return [...values.keys()].filter((k) => k.startsWith(prefix)).sort();
+    },
     async load(key) {
       assertKey(key);
       return values.has(key) ? values.get(key) : null;
@@ -248,17 +266,70 @@ function openDatabase(factory, dbName) {
 /**
  * IndexedDB backend backed by a single out-of-line-key object store.
  * The returned promise rejects when the database cannot be opened.
+ *
+ * Owner fence: after claimOwner(token) every write transaction first reads
+ * OWNER_KEY in the same readwrite transaction and aborts, applying nothing,
+ * when it holds another tab's token (that tab took the state over since);
+ * the write rejects with code "NotOwner". Before a claim, writes are not
+ * fenced.
  */
 export async function createIndexedDBBackend(
   dbName,
-  { indexedDB: factory = globalThis.indexedDB, maxBytes = DEFAULT_MAX_BYTES } = {},
+  { indexedDB: factory = globalThis.indexedDB, maxBytes = DEFAULT_MAX_BYTES, keyRange = globalThis.IDBKeyRange } = {},
 ) {
   if (!factory || typeof factory.open !== "function") {
     throw new StateStoreError("state_store: IndexedDB is not available", "Unavailable");
   }
   const db = await openDatabase(factory, dbName);
+  let owner = null;
+  const range = (prefix) => keyRange.bound(prefix, `${prefix}\uffff`);
+
+  // Runs write(store) in one readwrite transaction, after the owner check.
+  async function fencedWrite(write) {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    const store = tx.objectStore(STORE_NAME);
+    const done = transactionDone(tx);
+    let refused = false;
+    let holder = null;
+    if (owner === null) {
+      write(store);
+    } else {
+      const expected = owner;
+      const check = store.get(OWNER_KEY);
+      check.onsuccess = () => {
+        if (check.result !== expected) {
+          refused = true;
+          holder = check.result ?? null;
+          tx.abort();
+          return;
+        }
+        write(store);
+      };
+    }
+    try {
+      await done;
+    } catch (err) {
+      if (refused) {
+        throw new StateStoreError(
+          `state_store: another tab owns the saved state now (${holder ?? "no owner"}); write refused`,
+          "NotOwner",
+          err,
+        );
+      }
+      throw err;
+    }
+  }
+
   return {
     kind: "indexeddb",
+    /** Makes token the owner (the tab just took the kcp-state lock) and fences this backend's writes with it. */
+    async claimOwner(token) {
+      assertKey(token);
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).put(token, OWNER_KEY);
+      await transactionDone(tx);
+      owner = token;
+    },
     async load(key) {
       assertKey(key);
       const tx = db.transaction(STORE_NAME, "readonly");
@@ -267,34 +338,29 @@ export async function createIndexedDBBackend(
     },
     async save(key, value) {
       assertStorable(key, value, maxBytes);
-      const tx = db.transaction(STORE_NAME, "readwrite");
-      await Promise.all([
-        idbRequest(tx.objectStore(STORE_NAME).put(value, key)),
-        transactionDone(tx),
-      ]);
+      await fencedWrite((store) => store.put(value, key));
     },
     async remove(key) {
       assertKey(key);
-      const tx = db.transaction(STORE_NAME, "readwrite");
-      await Promise.all([
-        idbRequest(tx.objectStore(STORE_NAME).delete(key)),
-        transactionDone(tx),
-      ]);
+      await fencedWrite((store) => store.delete(key));
     },
     async loadPrefix(prefix) {
       assertKey(prefix);
       const tx = db.transaction(STORE_NAME, "readonly");
-      const range = IDBKeyRange.bound(prefix, `${prefix}￿`);
-      return await idbRequest(tx.objectStore(STORE_NAME).getAll(range));
+      return await idbRequest(tx.objectStore(STORE_NAME).getAll(range(prefix)));
+    },
+    async keys(prefix) {
+      assertKey(prefix);
+      const tx = db.transaction(STORE_NAME, "readonly");
+      return (await idbRequest(tx.objectStore(STORE_NAME).getAllKeys(range(prefix)))).map(String).sort();
     },
     // One transaction per call: a snapshot message lands whole or not at all.
     async apply({ clearPrefix, deletes = [], puts = [] }) {
-      const tx = db.transaction(STORE_NAME, "readwrite");
-      const store = tx.objectStore(STORE_NAME);
-      if (clearPrefix) store.delete(IDBKeyRange.bound(clearPrefix, `${clearPrefix}￿`));
-      for (const k of deletes) store.delete(k);
-      for (const [k, v] of puts) store.put(v, k);
-      await transactionDone(tx);
+      await fencedWrite((store) => {
+        if (clearPrefix) store.delete(range(clearPrefix));
+        for (const k of deletes) store.delete(k);
+        for (const [k, v] of puts) store.put(v, k);
+      });
     },
   };
 }
@@ -351,16 +417,26 @@ export function unreadableMessage(channel) {
  * that channel is not copied again. Returns the backup key (or the existing
  * one's marker "" when it was a duplicate).
  */
-export async function backupUnreadable(backend, channel, raw, now = new Date()) {
+export async function backupUnreadable(backend, channel, raw, now = new Date(), keep = UNREADABLE_BACKUPS_KEPT) {
   if (typeof raw !== "string" || raw === "") return null;
   const prefix = `${channel}-unreadable-`;
   const existing = await backend.loadPrefix(prefix).catch(() => []);
   if (existing.includes(raw)) return "";
   const key = `${prefix}${now.toISOString()}`;
+  // Keys end in an ISO time, so they sort oldest first; the oldest go so at
+  // most keep remain with this one.
+  const older = (await backend.keys(prefix)).filter((k) => k !== key);
+  const drop = older.slice(0, Math.max(0, older.length - (keep - 1)));
   // apply, not save: the backup may exceed the per-value limit save enforces.
-  await backend.apply({ puts: [[key, raw]] });
+  await backend.apply({ puts: [[key, raw]], deletes: drop });
   return key;
 }
+
+/** Backups kept per channel (backupUnreadable). */
+export const UNREADABLE_BACKUPS_KEPT = 3;
+
+/** The key prefixes of the backups; reset keeps them, reset --all removes them. */
+export const UNREADABLE_PREFIXES = ["kcp-unreadable-", "socialweb-unreadable-"];
 
 /**
  * Per-key snapshot saver for the page's IndexedDB state. Each key's saves run
