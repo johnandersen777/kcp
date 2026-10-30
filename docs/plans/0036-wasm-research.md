@@ -120,3 +120,11 @@ relative to ~/src/kcp/socialweb-computer-kcp at origin/main.
   without OAuth, the page needs a non-OAuth mode (localRepo is still
   "pending" in wasm: overlays/atproto pds_store.go / repo_sqlite.go exist but
   the option is disabled).
+
+## V1 result (2026-10-30, page-driven, production)
+
+- Prod page https://shell.socialweb.computer 14e10250a (socialweb rc125 720ca71b), alice, Agent + "socialweb-computer in the VM (R2)" (guestTools + association.fromGuest): Held 17:10:18Z on hat-7; guest installed socialweb-computer from the bidder; agent aliceoa-3mz4bihylhh2s.
+- R2 = `run request --association-ref` inside the VM as the agent user (root refused by devinstance.RefuseRoot; non-root workaround), own localRepo did:plc:4bcvjivkb6r24w7qta3lbgtu on its in-VM PDS behind xrpc.fedproxy.com.
+- guest.requesterDid 17:15:49Z; page row "R2: ... Pending" 17:15:51Z -> "Verified" 17:15:52Z (one getRecord of R2's associationRequest through xrpc.fedproxy.com).
+- R2's own RFP 3mz4btoodgi22: hat-7 bidder-tangled-vouch allowed R2 via alice (bid 17:16:09Z, accept 17:16:16Z), nested VM fc-4bcvjivkb6r2-10005e5b Running 17:16:19Z; R2 joined atirc as r2-xjw6w5wbmgcdh ("r2: online"). PASS.
+- Not covered: R2's own agents (grandchildren, atircParentRef unused in the workaround); CLI path blocked by the run request option parsing bug (fixed on r2bin-fix 853e2adf, 8294bacd).
