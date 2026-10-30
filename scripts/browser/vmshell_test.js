@@ -359,7 +359,7 @@ Deno.test("Start R2: shown only on a Held contract with R2 guest tools and fromG
 Deno.test("A8 release notes: cascade wait, request phase and token revokes", () => {
   const ev = { name: "c-r2-release", contract: "c", direction: "outbound", nsid: "com.publicdomainrelay.temp.compute.events.guest.r2Release", phase: "Published" };
   const waiting = releaseNotes({ name: "c", phase: "Releasing", step: "releasingGuestRequester", atircRevokes: "Pending" }, [ev]);
-  assert(waiting[0] === "R2 release: waiting for the guest requester to release its contracts (up to 12 min), request Published", waiting[0]);
+  assert(waiting[0] === "R2 release: waiting for the guest requester to release its contracts (up to 24 min), request Published", waiting[0]);
   assert(waiting[1] === "tokens: revoking", waiting[1]);
   const after = releaseNotes({ name: "c", phase: "Released", step: "released", atircRevokes: "Done" }, [ev]);
   assert(after[0].startsWith("R2 release: asked (Published)") && after[1] === "tokens: revoked", after.join("|"));
@@ -370,12 +370,16 @@ Deno.test("A8 release notes: cascade wait, request phase and token revokes", () 
 Deno.test("A8 release notes from status.contract.r2Release (rc127 phases)", () => {
   const c = (r2Release) => ({ name: "c", phase: "Releasing", step: "releasingGuestRequester", r2Release });
   const note = (r2) => releaseNotes(c(r2))[0];
-  assert(note({ phase: "Requested", requestedAt: "t1" }) === "R2 release: asked t1, waiting (up to 12 min)", "requested");
+  assert(note({ phase: "Requested", requestedAt: "t1" }) === "R2 release: asked t1, waiting (up to 24 min)", "requested, no parsable time");
+  const at = "2026-10-30T12:00:00Z", tenLater = Date.parse(at) + 10 * 60_000;
+  assert(releaseNotes(c({ phase: "Requested", requestedAt: at }), [], tenLater)[0] ===
+    `R2 release: asked ${at}, waiting (up to 24 min, ~14 min left)`, "time left after a reload");
+  assert(releaseNotes(c({ phase: "Requested", requestedAt: at }), [], tenLater + 60 * 60_000)[0].endsWith("~0 min left)"), "never negative");
   assert(note({ phase: "Released", ok: true, requestedAt: "t1", answeredAt: "t2" }) === "R2 release: guest released t2", "released");
   assert(note({ phase: "Failed", message: "socialweb-r2-release.service failed", answeredAt: "t2" }) ===
     "R2 release: FAILED: socialweb-r2-release.service failed", "failed (ok omitted)");
   assert(note({ phase: "TimedOut", message: "no r2Released in 12m0s" }) ===
-    "R2 release: TIMED OUT after 12 min; bidder backstop releases R2's VMs after the association expires", "timed out");
+    "R2 release: TIMED OUT after 24 min; bidder backstop releases R2's VMs after the association expires", "timed out");
   assert(note({ phase: "SomethingNew", message: "m" }) === "R2 release: [SomethingNew] m", "unknown phase raw");
   assert(releaseNotes(c({ phase: "Requested", requestedAt: "t1" })).length === 1, "the status replaces the wait line");
 });
