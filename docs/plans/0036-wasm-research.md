@@ -135,4 +135,4 @@ relative to ~/src/kcp/socialweb-computer-kcp at origin/main.
 
 - Prod page 4cba14c3a, alice, Agent + R2: outer Held 17:23:29Z on hat-7; VM agent aliceoa-3mz4ca3etg627 joined.
 - R2 started as the agent user with --agent --hold: did:plc:reephqeca6eeq7hohvikcmot Pending 17:26:15Z -> Verified 17:26:16Z; child token r2-regb26j7a4jna.aliceoa.bsky.social minted 17:26:17Z; R2 joined and stayed subscribed 17:26:28Z ("r2: online (agent run)").
-- R2's own RFP accepted by hat-7 17:26:42Z (repo did:plc:reephqeca6eeq7hohvikcmot); nested VM Held 17:26:59Z; `run request agent r2-agent` -> agentStart -> grandchild agent joined atirc as vm-3mz4cgbnb6z22.r2-regb26j7a4jna.aliceoa.bsky.social (token minted below R2's via atircParentRef). PASS: alice -> R2 -> R2 VM agent.
+- R2's own RFP accepted by hat-7 17:26:42Z (repo did:plc:reephqeca6eeq7hohvikcmot); R2's own VM (separate Firecracker VM on hat-7, nested by ownership, not virtualization) Held 17:26:59Z; `run request agent r2-agent` -> agentStart -> grandchild agent joined atirc as vm-3mz4cgbnb6z22.r2-regb26j7a4jna.aliceoa.bsky.social (token minted below R2's via atircParentRef). PASS: alice -> R2 -> R2 VM agent.
