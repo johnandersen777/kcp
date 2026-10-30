@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-28.computecontracts.socialweb.computer
+  name: v1alpha1-29.computecontracts.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -609,6 +609,26 @@ spec:
                       - reportedAt
                       - event
                       - payload
+                  r2Release:
+                    type: object
+                    properties:
+                      phase:
+                        type: string
+                        enum:
+                          - Requested
+                          - Released
+                          - Failed
+                          - TimedOut
+                      ok:
+                        type: boolean
+                      message:
+                        type: string
+                      requestedAt:
+                        type: string
+                      answeredAt:
+                        type: string
+                    required:
+                      - phase
                   outcome:
                     type: string
                     enum:
