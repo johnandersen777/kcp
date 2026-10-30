@@ -2455,10 +2455,10 @@ function kcpStatus(err) {
   return Number(err?.status ?? 0);
 }
 
-// Serialize page-side infra PATCHes: release and terminal reconciliation both
-// replace spec.contracts whole, so two concurrent read-modify-writes lose VMs.
-function patchInfra(path, patch) {
-  const run = () => kcpREST("PATCH", path, patch, "application/merge-patch+json");
+// Serialize page-side infra writes: Request VM, Release and terminal
+// reconciliation all replace spec.contracts whole (an atomic list), so two
+// concurrent read-modify-writes lose VMs or a release stamp.
+function infraQueued(run) {
   const next = infraPatchQueue.then(run, run);
   infraPatchQueue = next.catch(() => {});
   return next;
@@ -2530,18 +2530,19 @@ async function sessionInfra() {
       });
       infra = await waitInfraGone(path);
     } else if (vmshell.infraRecordStale(binding)) {
-      await patchInfra(path, { spec: { record } });
-      infra = await kcpREST("GET", path);
+      infra = await infraQueued(() => vmshell.composeInfra({
+        rest: kcpREST,
+        api: SOCIALWEB_API,
+        infra: name,
+        update: (spec) => ({ ...spec, record }),
+      }));
     }
   }
   if (!infra) {
-    const manifest = vmshell.sessionInfraManifest(name, undefined, record);
-    try {
-      infra = await kcpREST("POST", `${SOCIALWEB_API}/ephemeralinfras`, manifest);
-    } catch (err) {
-      if (kcpStatus(err) !== 409) throw err;
-      infra = await kcpREST("GET", path);
-    }
+    // Create only if absent: a 409 reads it and re-applies the full spec
+    // with its resourceVersion (vmshell.createInfra).
+    const spec = vmshell.sessionInfraManifest(name, undefined, record).spec;
+    infra = await infraQueued(() => vmshell.createInfra({ rest: kcpREST, api: SOCIALWEB_API, name, spec }));
     addLog("info", `EphemeralInfra ${name} holds this tab's VMs`);
   }
   const synced = await waitInfraRecord(name, did);
@@ -2552,30 +2553,22 @@ async function sessionInfra() {
 // Sets the state of contract short in the session infra (Requested adds it).
 // addContract prunes released entries only when the record reaches 64.
 function setInfraContract(infraName, entry, secret) {
-  const path = `${SOCIALWEB_API}/ephemeralinfras/${infraName}`;
-  const run = async () => {
-    const infra = await kcpREST("GET", path);
-    const { contracts, dropped } = vmshell.addContract(infra.spec?.contracts ?? [], entry);
-    const patch = { spec: { contracts } };
-    if (secret) {
-      patch.spec.secrets = [
-        ...(infra.spec?.secrets ?? []).filter((x) => !dropped.includes(x.contract) && x.contract !== secret.contract),
-        secret,
-      ];
-    } else if (dropped.length > 0) {
-      patch.spec.secrets = (infra.spec?.secrets ?? []).filter((x) => !dropped.includes(x.contract));
-    }
-    await kcpREST("PATCH", path, patch, "application/merge-patch+json");
-  };
-  const next = infraPatchQueue.then(run, run);
-  infraPatchQueue = next.catch(() => {});
-  return next;
+  return infraQueued(() => vmshell.composeInfra({
+    rest: kcpREST,
+    api: SOCIALWEB_API,
+    infra: infraName,
+    update: (spec) => vmshell.withInfraContract(spec, entry, secret),
+  }));
 }
 
 // A VM that ends without the Release button (guest exit, bidder release or
 // failure) still leaves state Requested in the record. Mark it Released once
 // so the record says terminated and the next reconcile does not request it
-// again.
+// again. It is marked like a Release, with a fresh releaseRequestedAt, so
+// the infra controller re-asks a Failed contract whose guest may still run
+// (the requester's guestMayRun) instead of leaving it held. Each entry is
+// read again inside the write queue and only a Requested one is changed
+// (vmshell.finishedEntry), so a Release queued meanwhile keeps its stamp.
 async function markFinishedInfraContracts(contracts) {
   if (infraAutoSync || !contracts?.length) return;
   const pending = contracts.filter((contract) =>
@@ -2598,7 +2591,14 @@ async function markFinishedInfraContracts(contracts) {
     for (const entry of vmshell.finishedInfraContracts(infra, pending)) {
       const child = vmshell.infraContractName(name, entry.name);
       matched.add(child);
-      await setInfraContract(name, { ...entry, state: "Released" }, null);
+      await infraQueued(() => vmshell.updateInfraEntry({
+        rest: kcpREST,
+        api: SOCIALWEB_API,
+        infra: name,
+        match: (c) => c?.name === entry.name,
+        update: (current) => vmshell.finishedEntry(current, pending.find((c) => c.name === child)?.releaseRequestedAt),
+        what: entry.name,
+      }));
       infraAutoReleased.add(child);
     }
     for (const contract of pending) {
@@ -2667,8 +2667,9 @@ async function requestVM() {
 }
 
 // Every Release (button, Release again, d.release, the demo's leftover
-// sweep) applies spec.release with a fresh spec.releaseRequestedAt, then
-// marks a session-infra entry Released (vmshell.requestRelease).
+// sweep) sets the contract's EphemeralInfra entry to Released with a fresh
+// releaseRequestedAt; the infra controller copies both onto the contract
+// (vmshell.requestRelease). The page never writes the ComputeContract.
 async function releaseContract(name) {
   const previous = computeReleaseAsked.get(name);
   computeReleaseAsked.set(name, new Date().toISOString()); // hides Release again while in flight
@@ -2679,7 +2680,7 @@ async function releaseContract(name) {
       rest: kcpREST,
       api: SOCIALWEB_API,
       name,
-      setInfraContract: (infra, entry) => setInfraContract(infra, entry, null),
+      serialize: infraQueued,
     });
     computeReleaseAsked.set(name, requestedAt);
   } catch (err) {
@@ -2689,21 +2690,25 @@ async function releaseContract(name) {
     return;
   }
   computeLastRender = "";
-  addLog("info", `ComputeContract ${name} released (releaseRequestedAt ${requestedAt})`);
+  addLog("info", `ComputeContract ${name} release requested in its EphemeralInfra entry (releaseRequestedAt ${requestedAt})`);
   void webrtcGuest.deleteSSHKey(name).catch(() => {});
 }
 
 // The release runs in this tab's requester: closing the tab mid-release
-// leaves the guest running until the bidder's release deadline. A reload
-// resumes it, but warn before the tab goes away.
+// leaves the guest running until the bidder's release deadline, and pending
+// atirc token revokes or the R2 release cascade stall (rows' state:
+// vmshell.releaseWorkPending). A reload resumes them, but warn before the tab
+// goes away.
 addEventListener("beforeunload", (event) => {
   if (!computeReleasing) return;
   event.preventDefault();
   event.returnValue = "";
 });
 
-function computeRow(contract) {
-  const name = contract.name;
+function computeRow(fed) {
+  const name = fed.name;
+  // A Release this tab sent shows as requested until the contract carries it.
+  const contract = vmshell.withReleaseSent(fed, computeReleaseAsked.get(name));
   const li = document.createElement("li");
   const head = document.createElement("div");
   const title = document.createElement("strong");
@@ -2725,7 +2730,7 @@ function computeRow(contract) {
     });
     head.append(again);
   }
-  if (vmshell.isActive(contract) && !computeReleaseAsked.has(name)) {
+  if (vmshell.releaseOffered(contract) && !computeReleaseAsked.has(name)) {
     const release = document.createElement("button");
     release.type = "button";
     release.textContent = "Release";
@@ -3189,9 +3194,10 @@ function applyComputeState(state) {
   for (const watcher of [...feedWatchers]) watcher(state);
   const contracts = state.contracts ?? [];
   void markFinishedInfraContracts(contracts);
-  const active = contracts.filter(vmshell.isActive);
+  const seen = contracts.map((c) => vmshell.withReleaseSent(c, computeReleaseAsked.get(c?.name)));
+  const active = seen.filter(vmshell.isActive);
   if (computeBusy && active.length > 0) computeBusy = false;
-  computeReleasing = contracts.some(vmshell.isReleasing);
+  computeReleasing = seen.some(vmshell.releaseWorkPending);
   const ready = state.marketIdentity?.phase === "Ready";
   computeRequestEl.disabled = computeBusy || !ready || active.length > 0;
   if (ready && computeAgentRowEl.hidden) void agentServed().then((served) => { computeAgentRowEl.hidden = !served; });

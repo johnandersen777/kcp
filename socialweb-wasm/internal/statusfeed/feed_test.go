@@ -112,18 +112,19 @@ func TestReleaseRequestProjection(t *testing.T) {
 			"release": map[string]any{"attempts": int64(3), "requestedAt": "2026-10-30T11:00:00.000Z"},
 			"conditions": []any{
 				map[string]any{"type": "Ready", "status": "False"},
-				map[string]any{"type": "ReleaseFailed", "status": "True"},
+				map[string]any{"type": "ReleaseFailed", "status": "True", "reason": "ReleaseBound"},
 			},
 		},
 	}})
-	if !c.Release || c.ReleaseRequestedAt != "2026-10-30T12:00:01.000Z" || c.ReleaseAnsweredAt != "2026-10-30T11:00:00.000Z" || !c.ReleaseFailed {
+	if !c.Release || c.ReleaseRequestedAt != "2026-10-30T12:00:01.000Z" || c.ReleaseAnsweredAt != "2026-10-30T11:00:00.000Z" || !c.ReleaseFailed ||
+		c.ReleaseFailedReason != "ReleaseBound" {
 		t.Fatalf("release request: %+v", c)
 	}
 	plain := contract(&unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{"name": "c"},
 		"status":   map[string]any{"conditions": []any{map[string]any{"type": "ReleaseFailed", "status": "False"}}},
 	}})
-	if plain.ReleaseRequestedAt != "" || plain.ReleaseAnsweredAt != "" || plain.ReleaseFailed {
+	if plain.ReleaseRequestedAt != "" || plain.ReleaseAnsweredAt != "" || plain.ReleaseFailed || plain.ReleaseFailedReason != "" {
 		t.Fatalf("no release: %+v", plain)
 	}
 }
@@ -145,5 +146,38 @@ func TestR2ReleaseProjection(t *testing.T) {
 	}
 	if c := contract(&unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "c"}}}); c.R2Release != nil {
 		t.Fatalf("absent: %+v", c.R2Release)
+	}
+}
+
+func TestGuestParts(t *testing.T) {
+	with := func(c map[string]any) Contract {
+		return contract(&unstructured.Unstructured{Object: map[string]any{
+			"metadata": map[string]any{"name": "c"},
+			"status":   map[string]any{"phase": "Failed", "contract": c},
+		}})
+	}
+	receipt := map[string]any{"uri": "at://did:plc:b/x/1", "cid": "bafy"}
+	type parts struct{ receiptOk, terminated, releaseOk bool }
+	cases := []struct {
+		name string
+		c    map[string]any
+		want parts
+	}{
+		{"ok receipt, no answer", map[string]any{"receipt": receipt, "receiptOk": true}, parts{true, false, false}},
+		{"release answered not ok", map[string]any{"receipt": receipt, "receiptOk": true, "release": map[string]any{"ok": false}}, parts{true, false, false}},
+		{"no receipt", map[string]any{"receiptOk": true}, parts{false, false, false}},
+		{"receipt not ok", map[string]any{"receipt": receipt, "receiptOk": false}, parts{false, false, false}},
+		{"receiptOk unset", map[string]any{"receipt": receipt}, parts{false, false, false}},
+		{"terminated", map[string]any{"receipt": receipt, "receiptOk": true, "termination": map[string]any{"reason": "exit"}}, parts{true, true, false}},
+		{"released ok", map[string]any{"receipt": receipt, "receiptOk": true, "release": map[string]any{"ok": true}}, parts{true, false, true}},
+	}
+	for _, tc := range cases {
+		c := with(tc.c)
+		if got := (parts{c.ReceiptOk, c.Terminated, c.ReleaseOk}); got != tc.want {
+			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+	if c := contract(&unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "c"}}}); c.ReceiptOk || c.Terminated || c.ReleaseOk {
+		t.Error("no status: nothing set")
 	}
 }

@@ -193,21 +193,75 @@ export function isReleasing(contract) {
   return (Boolean(contract?.release) && !FINISHED.has(contract?.phase ?? "Pending")) || releasePending(contract);
 }
 
-// Release requests (socialweb rc127 H1, computecontracts 30): every Release
-// server-side applies spec.release with spec.releaseRequestedAt (now); the
-// requester copies the request it answered into status.release.requestedAt
-// (the feed's releaseAnsweredAt), and a newer request restarts a Failed
-// contract whose ReleaseFailed condition is True. The manager is the one
-// socialweb's own release intent (session.go releaseHeldContract) applies
-// exactly these two fields with, force on both sides
-// (marketintents.FieldManagerContractRelease), so neither writer conflicts
-// or drops the other's fields. Not the composer manager: for a session-infra
-// contract that is socialweb.computer/ephemeralinfra, the EphemeralInfra
-// controller's own manager, which owns the whole spec it created; an apply
-// with only these two fields under it would remove the rest. The infra
-// controller only sets spec.release while it is still false, so the page
-// applies first and then marks the infra entry Released.
+/**
+ * Release work this tab's requester still runs for the contract: a release in
+ * progress (isReleasing), atirc token revokes Pending, or the A8 cascade
+ * waiting for the guest requester. Closing the tab then would stall it.
+ */
+export function releaseWorkPending(contract) {
+  return isReleasing(contract) || contract?.atircRevokes === "Pending" || contract?.step === "releasingGuestRequester";
+}
+
+// Release requests (socialweb r128 10558978, ephemeralinfras 11): the
+// composer is the only writer of a ComputeContract's spec, so the page does
+// not write a contract an EphemeralInfra owns. Every Release (the button,
+// Release again, d.release and so the demo's leftover sweep) of such a
+// contract sets the EphemeralInfra entry to
+// {state: Released, releaseRequestedAt: now}; the infra controller copies
+// spec.release and the stamp onto the ComputeContract (manager
+// socialweb.computer/ephemeralinfra) and re-asks a Failed one for a newer
+// stamp. The requester copies the request it answered into
+// status.release.requestedAt (the feed's releaseAnsweredAt), and a newer
+// request restarts a Failed contract whose ReleaseFailed condition is True.
+//
+// The page is its EphemeralInfra's composer (linux-kcp, rc128 option A;
+// ephemeralinfras 12 makes spec.contracts a list map keyed by name). Every
+// infra write (create, add an entry, a record rebind, Release,
+// markFinished) is one server-side apply of the page's FULL desired spec
+// (INFRA_PAGE_FIELDS: every entry with every field, the secrets, the record
+// binding, description, ttl and endWhen) under INFRA_FIELD_MANAGER with
+// force, built from a fresh read and re-applied whole (composeInfra). An
+// apply that omits something its manager applied before removes it, so a
+// partial apply would drop entries or fields; the full spec never does. The
+// first apply takes over the entries earlier pages wrote by merge patch
+// (Go-http-client, Update). The apply carries the resourceVersion it read,
+// so a concurrent writer is a 409 and a fresh read, never a lost entry or
+// stamp. All of it runs in the page's infra write queue.
+//
+// A contract with no ownerReferences at all (rc127 leftovers, `run request`
+// from the terminal) has no composer to ask, so the page releases it as
+// rc127 did (linux-kcp, rc128): a server-side apply of exactly
+// {spec.release, spec.releaseRequestedAt} under
+// socialweb.computer/requester-release, force, the manager socialweb's own
+// release intent used for these two fields. A contract owned by anything
+// else is refused.
 export const RELEASE_FIELD_MANAGER = "socialweb.computer/requester-release";
+
+/** The field manager of every page write of its EphemeralInfra. */
+export const INFRA_FIELD_MANAGER = "socialweb.computer/page";
+
+/** The EphemeralInfra spec fields the page composes (sessionInfraManifest, addContract, the secrets). */
+export const INFRA_PAGE_FIELDS = ["description", "ttlSeconds", "endWhen", "record", "contracts", "secrets"];
+
+/** The page's part of an EphemeralInfra spec: INFRA_PAGE_FIELDS that are set, deep-copied. */
+export function pageInfraSpec(spec) {
+  const out = {};
+  for (const field of INFRA_PAGE_FIELDS) {
+    if (spec?.[field] !== undefined && spec[field] !== null) out[field] = structuredClone(spec[field]);
+  }
+  return out;
+}
+
+/** The server-side apply of the page's full EphemeralInfra spec (resourceVersion: the one read, "" on create). */
+export function infraApply(api, name, spec, resourceVersion = "") {
+  const metadata = { name };
+  if (resourceVersion) metadata.resourceVersion = resourceVersion;
+  return {
+    path: `${api}/ephemeralinfras/${name}?fieldManager=${encodeURIComponent(INFRA_FIELD_MANAGER)}&force=true`,
+    contentType: "application/apply-patch+yaml",
+    body: { apiVersion: "socialweb.computer/v1alpha1", kind: "EphemeralInfra", metadata, spec },
+  };
+}
 
 /** spec.releaseRequestedAt for a Release now: strictly after previous, so a second Release always differs. */
 export function releaseRequestedAt(previous = "", now = new Date()) {
@@ -216,7 +270,7 @@ export function releaseRequestedAt(previous = "", now = new Date()) {
   return new Date(at).toISOString();
 }
 
-/** The server-side apply that releases ComputeContract name. */
+/** The server-side apply that releases ownerless ComputeContract name. */
 export function releaseApply(api, name, requestedAt) {
   return {
     path: `${api}/computecontracts/${name}?fieldManager=${encodeURIComponent(RELEASE_FIELD_MANAGER)}&force=true`,
@@ -230,27 +284,215 @@ export function releaseApply(api, name, requestedAt) {
   };
 }
 
+/** The later of RFC 3339 stamps ("" when none parses). */
+export function latestStamp(...stamps) {
+  let best = "";
+  for (const stamp of stamps) {
+    if (!Number.isNaN(Date.parse(stamp ?? "")) && (!best || Date.parse(stamp) > Date.parse(best))) best = stamp;
+  }
+  return best;
+}
+
+/** a is a stamp later than b (any parsable a is later than a missing or unparsable b). */
+export function stampAfter(a, b) {
+  const x = Date.parse(a ?? "");
+  if (Number.isNaN(x)) return false;
+  const y = Date.parse(b ?? "");
+  return Number.isNaN(y) || x > y;
+}
+
+/** The infra entry for a Release: Released with releaseRequestedAt strictly after any stored request. */
+export function releasedEntry(entry, ccRequestedAt = "", now = new Date()) {
+  return { ...entry, state: "Released", releaseRequestedAt: releaseRequestedAt(latestStamp(entry?.releaseRequestedAt, ccRequestedAt), now) };
+}
+
 /**
- * Releases ComputeContract name (the Release button, d.release and so the
- * demo's leftover sweep): applies spec.release + a fresh releaseRequestedAt,
- * then marks a session-infra entry Released so the record says terminated.
- * rest(method, path, body, contentType) is kcpREST; setInfraContract(infra,
- * entry) is the page's queued infra patch. Returns the requestedAt sent.
+ * markFinishedInfraContracts' update: a Requested entry becomes Released
+ * like a Release does (releasedEntry: a fresh releaseRequestedAt strictly
+ * after the entry's and the contract's, ccRequestedAt), so the infra
+ * controller re-asks a Failed contract whose guest may still run; every
+ * other field stays. null for anything else, so an entry a Release already
+ * wrote is not written again.
  */
-export async function requestRelease({ rest, api, name, setInfraContract, now = new Date() }) {
+export function finishedEntry(entry, ccRequestedAt = "", now = new Date()) {
+  return entry?.state === "Requested" ? releasedEntry(entry, ccRequestedAt, now) : null;
+}
+
+const INFRA_WRITE_ATTEMPTS = 3;
+
+/**
+ * Creates EphemeralInfra name with spec only if it is absent: a POST under
+ * INFRA_FIELD_MANAGER. A 409 means it exists: it is read and the page's
+ * full spec (what is there, spec's fields filling the gaps) applied with
+ * the resourceVersion read, so a create never applies contracts: [] over
+ * existing entries. Returns the object.
+ */
+export async function createInfra({ rest, api, name, spec }) {
+  const manifest = { apiVersion: "socialweb.computer/v1alpha1", kind: "EphemeralInfra", metadata: { name }, spec };
+  try {
+    return await rest("POST", `${api}/ephemeralinfras?fieldManager=${encodeURIComponent(INFRA_FIELD_MANAGER)}`, manifest);
+  } catch (err) {
+    if (Number(err?.status ?? 0) !== 409) throw err;
+  }
+  return composeInfra({ rest, api, infra: name, update: (current) => ({ ...structuredClone(spec), ...current }) });
+}
+
+/**
+ * Update-operation managedFields entries that co-own the page's spec fields:
+ * the merge patches of earlier pages (Go-http-client) and the create POST
+ * (INFRA_FIELD_MANAGER, operation Update). While one of them co-owns an
+ * entry, the page's apply cannot remove it: a pruned secret or entry would
+ * stay. Seen live on a migrated infra: Go-http-client owned every
+ * spec.secrets key (a list map since before rev 12) and kept a pruned one.
+ */
+export function staleSpecOwners(obj) {
+  return (obj?.metadata?.managedFields ?? []).filter((m) => m?.operation === "Update" &&
+    (m.manager === "Go-http-client" || m.manager === INFRA_FIELD_MANAGER) &&
+    INFRA_PAGE_FIELDS.some((field) => m.fieldsV1?.["f:spec"]?.[`f:${field}`] !== undefined));
+}
+
+/** The JSON patch that drops stale managedFields entries from obj, guarded by its resourceVersion. */
+export function dropOwnersPatch(obj, stale) {
+  const kept = (obj?.metadata?.managedFields ?? []).filter((m) => !stale.includes(m));
+  return [
+    { op: "test", path: "/metadata/resourceVersion", value: obj?.metadata?.resourceVersion },
+    { op: "replace", path: "/metadata/managedFields", value: kept },
+  ];
+}
+
+/**
+ * One composer write of EphemeralInfra infra: reads it, update(spec, live)
+ * returns the page's full desired spec from the fresh page spec (null: no
+ * write), and that is applied whole (infraApply) with the resourceVersion
+ * read (409: read again, 3 attempts). Returns the object kcp answers, or
+ * null without a write.
+ *
+ * An infra other writers still co-own (staleSpecOwners) is first taken
+ * over: the page's spec as read is applied unchanged, so the page owns all
+ * of it, and the stale entries are dropped from managedFields; only then
+ * the update is applied, so whatever it prunes really goes.
+ */
+export async function composeInfra({ rest, api, infra, update }) {
+  const path = `${api}/ephemeralinfras/${infra}`;
+  let tookOver = false;
+  for (let attempt = 1; ; attempt++) {
+    const live = await rest("GET", path);
+    try {
+      if (!tookOver && staleSpecOwners(live).length > 0) {
+        tookOver = true;
+        const take = infraApply(api, infra, pageInfraSpec(live?.spec), live?.metadata?.resourceVersion ?? "");
+        const owned = await rest("PATCH", take.path, take.body, take.contentType);
+        try {
+          await rest("PATCH", `${path}?fieldManager=${encodeURIComponent(INFRA_FIELD_MANAGER)}`,
+            dropOwnersPatch(owned, staleSpecOwners(owned)), "application/json-patch+json");
+        } catch (err) {
+          // 409/422 (the test op): someone wrote meanwhile; read again and take over again
+          if (![409, 422].includes(Number(err?.status ?? 0))) throw err;
+          tookOver = false;
+          if (attempt >= INFRA_WRITE_ATTEMPTS) throw err;
+          continue;
+        }
+        attempt--;
+        continue;
+      }
+      const next = update(pageInfraSpec(live?.spec), live);
+      if (!next) return null;
+      const apply = infraApply(api, infra, next, live?.metadata?.resourceVersion ?? "");
+      return await rest("PATCH", apply.path, apply.body, apply.contentType);
+    } catch (err) {
+      if (Number(err?.status ?? 0) !== 409 || attempt >= INFRA_WRITE_ATTEMPTS) throw err;
+      tookOver = false;
+    }
+  }
+}
+
+/**
+ * One spec.contracts entry of EphemeralInfra infra through composeInfra:
+ * update(current) returns the new entry (null: no write); every other entry
+ * and spec field is applied as read. Returns the entry written, or null.
+ */
+export async function updateInfraEntry({ rest, api, infra, match, update, what = "the contract" }) {
+  let written = null;
+  await composeInfra({
+    rest,
+    api,
+    infra,
+    update: (spec) => {
+      const contracts = spec.contracts ?? [];
+      const current = contracts.find(match);
+      if (!current) throw new Error(`EphemeralInfra ${infra} has no entry for ${what}`);
+      written = update(current);
+      if (!written) return null;
+      return { ...spec, contracts: contracts.map((entry) => entry === current ? written : entry) };
+    },
+  });
+  return written;
+}
+
+/**
+ * Request VM's update: contract entry added (or replaced) with addContract,
+ * and its secrets entry (secret, or null) set; the secrets of entries
+ * addContract pruned go too.
+ */
+export function withInfraContract(spec, entry, secret = null) {
+  const { contracts, dropped } = addContract(spec?.contracts ?? [], entry);
+  const next = { ...spec, contracts };
+  if (secret) {
+    next.secrets = [
+      ...(spec?.secrets ?? []).filter((x) => !dropped.includes(x.contract) && x.contract !== secret.contract),
+      secret,
+    ];
+  } else if (dropped.length > 0) {
+    next.secrets = (spec?.secrets ?? []).filter((x) => !dropped.includes(x.contract));
+  }
+  return next;
+}
+
+/**
+ * Releases ComputeContract name. Owned by an EphemeralInfra: through its
+ * entry (state Released with a fresh releaseRequestedAt, strictly after the
+ * entry's and the contract's), no write to the contract. No owner at all:
+ * the rc127 apply of spec.release + a fresh releaseRequestedAt on the
+ * contract (releaseApply), no infra write. Any other owner: refused.
+ * rest(method, path, body, contentType) is kcpREST; serialize(run) runs run
+ * in the page's infra write queue. Returns the releaseRequestedAt sent.
+ */
+export async function requestRelease({ rest, api, name, serialize = (run) => run(), now = new Date() }) {
   const cc = await rest("GET", `${api}/computecontracts/${name}`);
   if (!cc) throw new Error(`ComputeContract ${name} not found`);
-  const requestedAt = releaseRequestedAt(cc.spec?.releaseRequestedAt, now);
-  const apply = releaseApply(api, name, requestedAt);
-  await rest("PATCH", apply.path, apply.body, apply.contentType);
-  const owner = (cc.metadata?.ownerReferences ?? []).find((o) => o.kind === "EphemeralInfra");
-  if (owner) {
-    const short = cc.metadata?.labels?.["infra.socialweb.computer/contract"];
-    const infra = await rest("GET", `${api}/ephemeralinfras/${owner.name}`).catch(() => null);
-    const entry = (infra?.spec?.contracts ?? []).find((c) => c.name === short || name.endsWith(`-${c.name}`));
-    if (entry && entry.state !== "Released") await setInfraContract(owner.name, { ...entry, state: "Released" });
+  const owners = cc.metadata?.ownerReferences ?? [];
+  if (owners.length === 0) {
+    const requestedAt = releaseRequestedAt(cc.spec?.releaseRequestedAt, now);
+    const apply = releaseApply(api, name, requestedAt);
+    await rest("PATCH", apply.path, apply.body, apply.contentType);
+    return requestedAt;
   }
-  return requestedAt;
+  const owner = owners.find((o) => o.kind === "EphemeralInfra");
+  if (!owner?.name) {
+    const kinds = owners.map((o) => `${o.kind ?? "?"}/${o.name ?? "?"}`).join(", ");
+    throw new Error(`ComputeContract ${name} is owned by ${kinds}, not an EphemeralInfra; its composer releases it, not the page`);
+  }
+  const short = cc.metadata?.labels?.["infra.socialweb.computer/contract"];
+  const entry = await serialize(() => updateInfraEntry({
+    rest,
+    api,
+    infra: owner.name,
+    match: (c) => Boolean(c?.name) && (c.name === short || infraContractName(owner.name, c.name) === name),
+    update: (current) => releasedEntry(current, cc.spec?.releaseRequestedAt, now),
+    what: name,
+  }));
+  return entry.releaseRequestedAt;
+}
+
+/**
+ * The contract as this tab sees it: a Release this tab sent (sentAt) that the
+ * contract does not show yet (the infra controller copies the stamp a moment
+ * later) counts as spec.release with that releaseRequestedAt, so the row says
+ * release requested instead of the earlier outcome.
+ */
+export function withReleaseSent(contract, sentAt = "") {
+  if (!contract || contract.phase === "Released" || !stampAfter(sentAt, contract.releaseRequestedAt)) return contract;
+  return { ...contract, release: true, releaseRequestedAt: sentAt };
 }
 
 /** status.release answers the current Release (a contract without releaseRequestedAt predates rc127: always). */
@@ -259,10 +501,22 @@ export function releaseAnswered(contract) {
   return !requested || (contract?.releaseAnsweredAt ?? "") === requested;
 }
 
-/** A failed release with a newer, unanswered Release: the requester restarts it, so it is pending, not Failed. */
+/**
+ * The requester's guestMayRun from the feed: an ok receipt, no termination,
+ * no release the bidder acknowledged (receiptOk, terminated, releaseOk).
+ */
+export function guestMayRun(contract) {
+  return Boolean(contract?.receiptOk) && !contract?.terminated && !contract?.releaseOk;
+}
+
+/**
+ * A Failed contract with a newer, unanswered Release that the requester
+ * restarts (r128 388ccee6, releaseRequestedAgain): its ReleaseFailed is
+ * True, or its guest may still run. Pending, not Failed.
+ */
 export function releasePending(contract) {
-  return Boolean(contract?.release) && contract?.phase === "Failed" && Boolean(contract?.releaseFailed) &&
-    !releaseAnswered(contract);
+  return Boolean(contract?.release) && contract?.phase === "Failed" &&
+    (Boolean(contract?.releaseFailed) || guestMayRun(contract)) && !releaseAnswered(contract);
 }
 
 /**
@@ -271,13 +525,35 @@ export function releasePending(contract) {
  */
 export function canReleaseAgain(contract, sentAt = "") {
   return Boolean(contract?.release) && contract?.phase === "Failed" && Boolean(contract?.releaseFailed) &&
-    releaseAnswered(contract) && !(sentAt && sentAt > (contract?.releaseRequestedAt ?? ""));
+    releaseAnswered(contract) && !stampAfter(sentAt, contract?.releaseRequestedAt);
+}
+
+/**
+ * The requester gave up at its release bound (r128 e2a117e8: ReleaseFailed
+ * True, reason ReleaseBound) and that answers the latest request.
+ */
+export function releaseTimedOut(contract) {
+  return Boolean(contract?.release) && contract?.phase === "Failed" && Boolean(contract?.releaseFailed) &&
+    contract?.releaseFailedReason === "ReleaseBound" && releaseAnswered(contract);
+}
+
+/**
+ * The Release button: an active contract, or a Failed one the requester
+ * re-releases for a newer stamp (r128 388ccee6): phase Failed, a valid
+ * receipt (receiptOk), not terminated and not released/acked (releaseOk),
+ * with no request pending (the Release sends the newer stamp) and no
+ * Release again offered instead. ReleaseFailed is not needed.
+ */
+export function releaseOffered(contract) {
+  if (isActive(contract)) return true;
+  return contract?.phase === "Failed" && guestMayRun(contract) && releaseAnswered(contract) && !canReleaseAgain(contract);
 }
 
 /** The row's phase: a pending re-release shows as Releasing, not the earlier Failed. */
 export function phaseLabel(contract) {
   const phase = contract?.phase ?? "Pending";
   if (releasePending(contract)) return { phase: "Releasing", text: ` Releasing · release requested ${contract.releaseRequestedAt}` };
+  if (releaseTimedOut(contract)) return { phase, text: ` ${phase} · release timed out` };
   return { phase, text: ` ${phase}${contract?.release && phase !== "Released" && phase !== "Failed" ? " · releasing" : ""}` };
 }
 

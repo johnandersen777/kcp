@@ -27,7 +27,7 @@ limitations under the License.
  *   --dir         directory to serve (default: public)
  *   --port        listen port (default: 8090)
  *   --origin      origin for metadata instead of the request Host header
- *   --scope       OAuth scope string (default: atproto transition:generic)
+ *   --scope       OAuth scope string (default: REQUESTER_SCOPE below)
  *   --scope-file  file containing the OAuth scope string
  */
 
