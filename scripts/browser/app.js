@@ -2539,9 +2539,10 @@ async function sessionInfra() {
     }
   }
   if (!infra) {
-    // Created by the page's composer apply too (the GET above found none).
-    const apply = vmshell.infraApply(SOCIALWEB_API, name, vmshell.sessionInfraManifest(name, undefined, record).spec);
-    infra = await infraQueued(() => kcpREST("PATCH", apply.path, apply.body, apply.contentType));
+    // Create only if absent: a 409 reads it and re-applies the full spec
+    // with its resourceVersion (vmshell.createInfra).
+    const spec = vmshell.sessionInfraManifest(name, undefined, record).spec;
+    infra = await infraQueued(() => vmshell.createInfra({ rest: kcpREST, api: SOCIALWEB_API, name, spec }));
     addLog("info", `EphemeralInfra ${name} holds this tab's VMs`);
   }
   const synced = await waitInfraRecord(name, did);

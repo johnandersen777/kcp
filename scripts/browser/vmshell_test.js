@@ -45,6 +45,7 @@ import {
   infraApply,
   pageInfraSpec,
   withInfraContract,
+  createInfra,
   releaseOffered,
   latestStamp,
   releaseTimedOut,
@@ -721,6 +722,40 @@ Deno.test("release: a plain Failed contract whose guest may still run offers Rel
   assert(k.writes().length === 1 && k.writes()[0].body.spec.release === true, JSON.stringify(k.writes()));
   const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
   assert(/if \(vmshell\.releaseOffered\(contract\) && !computeReleaseAsked\.has\(name\)\)/.test(app), "the row's Release button uses releaseOffered");
+});
+
+Deno.test("createInfra: POST if absent; a 409 reads and re-applies the full spec with its resourceVersion", async () => {
+  const spec = sessionInfraManifest("t", undefined, { repoRef: { name: "r" }, direction: "Publish" }).spec;
+  const calls = [];
+  const absent = (method, path, body, contentType) => {
+    calls.push({ method, path, body, contentType });
+    return Promise.resolve({ metadata: { name: "t" }, spec: body.spec });
+  };
+  await createInfra({ rest: absent, api: API, name: "t", spec });
+  assert(calls.length === 1 && calls[0].method === "POST" &&
+    calls[0].path === `${API}/ephemeralinfras?fieldManager=socialweb.computer%2Fpage` && calls[0].body.metadata.name === "t" &&
+    JSON.stringify(calls[0].body.spec) === JSON.stringify(spec), JSON.stringify(calls));
+
+  // it exists (another tab of this kcp, a restored snapshot): its entries survive
+  const infra = sessionInfra();
+  const k = fakeKcp(null, infra);
+  const exists = (method, path, body, contentType) => method === "POST"
+    ? (k.calls.push({ method, path, body, contentType }), Promise.reject(Object.assign(new Error("POST: 409 AlreadyExists"), { status: 409 })))
+    : k.rest(method, path, body, contentType);
+  await createInfra({ rest: exists, api: API, name: "t", spec });
+  const writes = k.writes();
+  assert(writes.length === 2 && writes[0].method === "POST" && writes[1].path === INFRA_APPLY_PATH, JSON.stringify(writes.map((w) => w.method + " " + w.path)));
+  assert(writes[1].body.metadata.resourceVersion === "7", "applied with the resourceVersion read");
+  assert(writes[1].body.spec.contracts.length === 2 && infra.spec.contracts.length === 2 && infra.spec.secrets.length === 1,
+    "never contracts: [] over existing entries");
+  assert(k.writes().every((w) => w.method !== "PATCH" || w.body.metadata.resourceVersion), "no apply without a resourceVersion");
+
+  let failed = "";
+  await createInfra({ rest: () => Promise.reject(Object.assign(new Error("POST: 403"), { status: 403 })), api: API, name: "t", spec })
+    .catch((err) => failed = err.message);
+  assert(failed === "POST: 403", failed);
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  assert(/infraQueued\(\(\) => vmshell\.createInfra\(/.test(app) && !/vmshell\.infraApply\(/.test(app), "sessionInfra creates with createInfra only");
 });
 
 Deno.test("release: until the contract carries this tab's stamp the row says release requested", () => {

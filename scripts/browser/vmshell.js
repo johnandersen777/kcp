@@ -321,6 +321,23 @@ export function finishedEntry(entry, ccRequestedAt = "", now = new Date()) {
 const INFRA_WRITE_ATTEMPTS = 3;
 
 /**
+ * Creates EphemeralInfra name with spec only if it is absent: a POST under
+ * INFRA_FIELD_MANAGER. A 409 means it exists: it is read and the page's
+ * full spec (what is there, spec's fields filling the gaps) applied with
+ * the resourceVersion read, so a create never applies contracts: [] over
+ * existing entries. Returns the object.
+ */
+export async function createInfra({ rest, api, name, spec }) {
+  const manifest = { apiVersion: "socialweb.computer/v1alpha1", kind: "EphemeralInfra", metadata: { name }, spec };
+  try {
+    return await rest("POST", `${api}/ephemeralinfras?fieldManager=${encodeURIComponent(INFRA_FIELD_MANAGER)}`, manifest);
+  } catch (err) {
+    if (Number(err?.status ?? 0) !== 409) throw err;
+  }
+  return composeInfra({ rest, api, infra: name, update: (current) => ({ ...structuredClone(spec), ...current }) });
+}
+
+/**
  * One composer write of EphemeralInfra infra: reads it, update(spec, live)
  * returns the page's full desired spec from the fresh page spec (null: no
  * write), and that is applied whole (infraApply) with the resourceVersion
