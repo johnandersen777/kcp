@@ -76,6 +76,15 @@ type Contract struct {
 
 	SecretsFetchedAt string    `json:"secretsFetchedAt,omitempty"`
 	Release          bool      `json:"release,omitempty"`
+	// ReleaseRequestedAt is spec.releaseRequestedAt (computecontracts 30):
+	// the page sets it with spec.release on every Release.
+	ReleaseRequestedAt string `json:"releaseRequestedAt,omitempty"`
+	// ReleaseAnsweredAt is status.release.requestedAt: the request the
+	// release outcome answers (current only when equal to ReleaseRequestedAt).
+	ReleaseAnsweredAt string `json:"releaseAnsweredAt,omitempty"`
+	// ReleaseFailed is the ReleaseFailed condition being True: a newer
+	// releaseRequestedAt restarts that release.
+	ReleaseFailed bool `json:"releaseFailed,omitempty"`
 	Networks         []Network `json:"networks,omitempty"`
 	// HostKeys are status.contract.hostKeys as authorized_keys lines, the
 	// pins for the page's WebRTC SSH client.
@@ -341,6 +350,15 @@ func contract(u *unstructured.Unstructured) Contract {
 		}
 	}
 	c.Release, _, _ = unstructured.NestedBool(u.Object, "spec", "release")
+	c.ReleaseRequestedAt, _, _ = unstructured.NestedString(u.Object, "spec", "releaseRequestedAt")
+	c.ReleaseAnsweredAt, _, _ = unstructured.NestedString(u.Object, "status", "release", "requestedAt")
+	conditions, _, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
+	for _, raw := range conditions {
+		cond, _ := raw.(map[string]any)
+		if cond["type"] == "ReleaseFailed" && cond["status"] == "True" {
+			c.ReleaseFailed = true
+		}
+	}
 	_, c.Agent, _ = unstructured.NestedMap(u.Object, "spec", "agent")
 	c.GuestTools, _, _ = unstructured.NestedStringSlice(u.Object, "spec", "guestTools")
 	c.FromGuest, _, _ = unstructured.NestedBool(u.Object, "spec", "association", "fromGuest")
