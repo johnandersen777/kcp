@@ -179,6 +179,12 @@ func startSocialweb(srv *real.Server, kcpHandler js.Func) {
 		return
 	}
 	registerPageExports(orc)
+	// Start returns only once the provider manifests are applied (or were
+	// already current), so the page may now record this build as the one its
+	// saved state was booted with.
+	if fn := js.Global().Get("__socialwebStarted"); fn.Type() == js.TypeFunction {
+		fn.Invoke()
+	}
 	if statusFeed {
 		go func() {
 			err := statusfeed.Start(context.Background(), srv.RestConfig(), func(raw []byte) {
