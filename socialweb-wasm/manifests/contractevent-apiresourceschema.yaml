@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-2.contractevents.socialweb.computer
+  name: v1alpha1-3.contractevents.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -48,6 +48,7 @@ spec:
                   - com.publicdomainrelay.temp.compute.events.guest.publicKey
                   - com.publicdomainrelay.temp.compute.events.guest.signalWebRTC
                   - com.publicdomainrelay.temp.compute.events.guest.secrets
+                  - com.publicdomainrelay.temp.compute.events.guest.agentStart
               kind:
                 type: string
                 maxLength: 32

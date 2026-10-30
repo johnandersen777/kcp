@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-36.marketbidders.socialweb.computer
+  name: v1alpha1-37.marketbidders.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -859,6 +859,11 @@ spec:
               operator:
                 type: string
               bidderDids:
+                type: array
+                items:
+                  type: string
+                x-kubernetes-list-type: set
+              computeKinds:
                 type: array
                 items:
                   type: string

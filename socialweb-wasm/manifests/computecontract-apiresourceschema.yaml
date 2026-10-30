@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-18.computecontracts.socialweb.computer
+  name: v1alpha1-21.computecontracts.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -44,6 +44,12 @@ spec:
                   type: string
               userData:
                 type: string
+              computeKind:
+                type: string
+                enum:
+                  - vm
+                  - deno
+                default: vm
               policy:
                 type: string
               policyArgs:
@@ -82,6 +88,12 @@ spec:
                 x-kubernetes-list-type: map
                 x-kubernetes-list-map-keys:
                   - tag
+              agent:
+                type: object
+                properties:
+                  envFile:
+                    type: string
+                    default: /etc/atirc/atirc.env
               secretsRef:
                 type: object
                 properties:
@@ -461,6 +473,21 @@ spec:
                       - observedAt
                       - event
                       - payload
+                  sandbox:
+                    type: object
+                    properties:
+                      exitCode:
+                        type: integer
+                      timedOut:
+                        type: boolean
+                      stdout:
+                        type: string
+                      stderr:
+                        type: string
+                      observedAt:
+                        type: string
+                    required:
+                      - exitCode
                   secretsRequested:
                     type: object
                     properties:

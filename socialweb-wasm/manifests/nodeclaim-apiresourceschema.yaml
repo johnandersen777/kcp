@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-12.nodeclaims.socialweb.computer
+  name: v1alpha1-13.nodeclaims.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -346,6 +346,21 @@ spec:
                       - observedAt
                       - event
                       - payload
+                  sandbox:
+                    type: object
+                    properties:
+                      exitCode:
+                        type: integer
+                      timedOut:
+                        type: boolean
+                      stdout:
+                        type: string
+                      stderr:
+                        type: string
+                      observedAt:
+                        type: string
+                    required:
+                      - exitCode
                   secretsRequested:
                     type: object
                     properties:

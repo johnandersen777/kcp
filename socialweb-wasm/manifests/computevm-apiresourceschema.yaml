@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-15.computevms.socialweb.computer
+  name: v1alpha1-16.computevms.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -188,6 +188,16 @@ spec:
                   type: integer
                   format: int32
                 x-kubernetes-list-type: set
+              sandbox:
+                type: object
+                properties:
+                  source:
+                    type: string
+                  timeoutSeconds:
+                    type: integer
+                    format: int32
+                required:
+                  - source
               guestNetwork:
                 type: object
                 properties:
