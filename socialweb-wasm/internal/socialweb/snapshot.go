@@ -32,3 +32,19 @@ func ParseSnapshot(raw []byte) (Snapshot, error) {
 	}
 	return snapshot, nil
 }
+
+// planRestore decides what Start does with the restored value raw: nothing
+// to restore (empty), a snapshot to restore, or, when raw is not empty but
+// cannot be read, an error and persist false. Without persist the vault never
+// hands a snapshot to OnSnapshot, so the first vault write cannot save an
+// empty vault over the stored one; the page keeps the unreadable value.
+func planRestore(raw []byte) (snapshot *Snapshot, persist bool, err error) {
+	if len(raw) == 0 {
+		return nil, true, nil
+	}
+	parsed, err := ParseSnapshot(raw)
+	if err != nil {
+		return nil, false, err
+	}
+	return &parsed, true, nil
+}

@@ -18,6 +18,7 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -236,22 +237,44 @@ func filterSnapshot(raw []byte) ([]byte, error) {
 	return json.Marshal(snap)
 }
 
+// ErrUnreadableSnapshot marks a saved snapshot this build cannot read: not
+// JSON, or another envelope version. The host must not persist over it (the
+// first full message would replace every saved record with a fresh store).
+var ErrUnreadableSnapshot = errors.New("unreadable kcp snapshot")
+
+// CheckSnapshot reports whether RestoreAll can read data's envelope, without
+// decoding the stores. An empty value is no snapshot and passes.
+func CheckSnapshot(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	var head struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &head); err != nil {
+		return fmt.Errorf("%w: %v", ErrUnreadableSnapshot, err)
+	}
+	if head.Version != allVersion {
+		return fmt.Errorf("%w: envelope version %d (this build reads %d)", ErrUnreadableSnapshot, head.Version, allVersion)
+	}
+	return nil
+}
+
 // RestoreAll restores one SnapshotAll envelope. Decoders must already be
-// registered, i.e. the apiserver has installed its APIs.
+// registered, i.e. the apiserver has installed its APIs. An envelope it
+// cannot read is an ErrUnreadableSnapshot error, never a fresh start: a
+// fresh store's first full message would delete the saved records.
 func RestoreAll(data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
 	start := time.Now()
+	if err := CheckSnapshot(data); err != nil {
+		return err
+	}
 	var all All
 	if err := json.Unmarshal(data, &all); err != nil {
-		return fmt.Errorf("decoding combined snapshot: %w", err)
-	}
-	if all.Version != allVersion {
-		// An older mini-shard snapshot has a different shape. Start fresh
-		// rather than failing the apiserver boot.
-		fmt.Fprintf(os.Stderr, "restore: ignoring incompatible snapshot version %d\n", all.Version)
-		return nil
+		return fmt.Errorf("%w: %v", ErrUnreadableSnapshot, err)
 	}
 	fmt.Fprintf(os.Stderr, "restore: %d store(s), %d bytes, envelope decoded in %s\n", len(all.Stores), len(data), time.Since(start).Round(time.Millisecond))
 	for name, storeRaw := range all.Stores {
@@ -301,6 +324,31 @@ func RestoreAll(data []byte) error {
 	return nil
 }
 
+// snapshotFlush carries FlushSnapshot requests to the OnSnapshot loop. It is
+// unbuffered: without a running loop a request is never taken.
+var snapshotFlush = make(chan chan struct{})
+
+// FlushSnapshot has the running OnSnapshot loop hand fn the writes it has not
+// persisted yet, now instead of after the quiet period, and returns once fn
+// returned. False means no loop took the request within timeout (persistence
+// is off, or the loop is busy).
+func FlushSnapshot(timeout time.Duration) bool {
+	reply := make(chan struct{})
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case snapshotFlush <- reply:
+	case <-timer.C:
+		return false
+	}
+	select {
+	case <-reply:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
 // OnSnapshot attaches fn to every shared store, including stores created
 // later. It returns a function that removes the handler.
 func OnSnapshot(fn func([]byte)) func() {
@@ -333,38 +381,47 @@ func OnSnapshot(fn func([]byte)) func() {
 	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
+	// Read before the goroutine runs: a write between this call and the
+	// goroutine's first instruction must still count as pending.
+	last := mutationSeq.Load()
 	go func() {
 		defer close(done)
 		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
-		last := mutationSeq.Load()
 		lastSnapshot := time.Now()
 		lastFull := time.Time{}
+		persist := func(now time.Time) {
+			last = mutationSeq.Load()
+			full := lastFull.IsZero() || (snapshotCompact > 0 && now.Sub(lastFull) >= snapshotCompact)
+			raw, wasFull, err := persistMessage(full)
+			if err != nil {
+				lastFull = time.Time{} // dirty keys were consumed; resync
+			} else if raw != nil {
+				fn(raw)
+				if wasFull {
+					lastFull = time.Now()
+				}
+			}
+			lastSnapshot = time.Now()
+		}
 		for {
 			select {
 			case <-stop:
 				return
+			case reply := <-snapshotFlush:
+				if mutationSeq.Load() != last {
+					persist(time.Now())
+				}
+				close(reply)
 			case now := <-ticker.C:
-				current := mutationSeq.Load()
-				if current == last {
+				if mutationSeq.Load() == last {
 					continue
 				}
 				quiet := now.Sub(time.Unix(0, lastMutationNanos.Load())) >= snapshotQuiet
 				if !quiet && now.Sub(lastSnapshot) < snapshotMaxAge {
 					continue
 				}
-				last = current
-				full := lastFull.IsZero() || (snapshotCompact > 0 && now.Sub(lastFull) >= snapshotCompact)
-				raw, wasFull, err := persistMessage(full)
-				if err != nil {
-					lastFull = time.Time{} // dirty keys were consumed; resync
-				} else if raw != nil {
-					fn(raw)
-					if wasFull {
-						lastFull = time.Now()
-					}
-				}
-				lastSnapshot = time.Now()
+				persist(now)
 			}
 		}
 	}()

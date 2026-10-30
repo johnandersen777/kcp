@@ -25,6 +25,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -209,12 +210,20 @@ func Boot(parent context.Context, cfg Config) (*Server, error) {
 	}
 	stage("newserver")
 
+	// Persisting starts only once the saved snapshot is restored: the first
+	// message is a full one, which replaces every saved record, so a restore
+	// that fails must never be followed by one.
 	if cfg.InitialSnapshot != nil {
 		kcpServer.PreRunHook = func(context.Context) error {
-			return storage.RestoreAll(cfg.InitialSnapshot)
+			if err := storage.RestoreAll(cfg.InitialSnapshot); err != nil {
+				return err
+			}
+			if cfg.OnSnapshot != nil {
+				storage.OnSnapshot(cfg.OnSnapshot)
+			}
+			return nil
 		}
-	}
-	if cfg.OnSnapshot != nil {
+	} else if cfg.OnSnapshot != nil {
 		storage.OnSnapshot(cfg.OnSnapshot)
 	}
 
@@ -234,10 +243,12 @@ func Boot(parent context.Context, cfg Config) (*Server, error) {
 
 	ctx, cancel := context.WithCancel(parent)
 	done := make(chan struct{})
+	var runErr error // set before done closes
 	go func() {
 		defer close(done)
 		if err := kcpServer.Run(ctx); err != nil && ctx.Err() == nil {
 			fmt.Printf("real: kcp exited: %v\n", err)
+			runErr = err
 		}
 	}()
 
@@ -253,6 +264,15 @@ func Boot(parent context.Context, cfg Config) (*Server, error) {
 		done:          done,
 	}
 	if err := s.waitReady(ctx, cfg.ReadyTimeout); err != nil {
+		select {
+		case <-done:
+			// kcp exited before it was ready (a failed restore): report why
+			// at once instead of after ReadyTimeout.
+			if runErr != nil {
+				err = fmt.Errorf("real: kcp exited before ready: %w", runErr)
+			}
+		default:
+		}
 		_ = s.Close()
 		return nil, err
 	}
@@ -280,6 +300,8 @@ func (s *Server) waitReady(ctx context.Context, timeout time.Duration) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-s.done:
+			return errors.New("real: kcp exited before ready")
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
