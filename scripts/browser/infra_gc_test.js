@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  contractFinishedAt,
   contractLive,
   feedContract,
   infraContractName,
@@ -23,8 +24,10 @@ const ALICE = "did:plc:lpfuqerea3deuoyrn7ojser4";
 const BOB = "did:plc:bobbobbobbobbobbobbobbob";
 const ME = "mytab1";
 
+const NOW = Date.parse("2026-10-30T12:00:00Z");
+const hoursAgo = (h) => new Date(NOW - h * 3600_000).toISOString();
 const infra = (origin, tab, entries, extra = {}) => ({
-  metadata: { name: originInfraName(origin, tab), ...extra.metadata },
+  metadata: { name: originInfraName(origin, tab), creationTimestamp: "2026-10-01T00:00:00Z", ...extra.metadata },
   spec: { contracts: entries.map((name) => ({ name, state: "Requested" })), record: infraRecordBinding(ALICE), ...extra.spec },
   status: extra.status ?? {},
 });
@@ -58,7 +61,7 @@ Deno.test("feedContract mirrors the status feed's guest parts", () => {
   assertEquals(feedContract(obj), {
     name: "c", phase: "Failed", release: true, releaseRequestedAt: "t2", releaseAnsweredAt: "t1",
     releaseFailed: true, releaseFailedReason: "ReleaseBound", atircRevokes: "Done", step: "",
-    receiptOk: true, terminated: false, releaseOk: false,
+    receiptOk: true, terminated: false, releaseOk: false, finishedAt: 0,
   });
   assertEquals(feedContract({ status: { contract: { receiptOk: true } } }).receiptOk, false, "receiptOk without a receipt");
 });
@@ -104,6 +107,7 @@ Deno.test("planInfraGC deletes dead infras, rebinds live ones, leaves the rest a
     origin: ORIGIN,
     tabId: ME,
     did: ALICE,
+    now: NOW,
   });
   const name = (tab) => originInfraName(ORIGIN, tab);
   assertEquals(plan.map((step) => [step.name, step.action]), [
@@ -131,4 +135,36 @@ Deno.test("page wiring: GC runs once the identity is Ready and rebinds through c
   for (const needle of ["vmshell.planInfraGC(", "tabId: infraTabId()", "origin: location.origin", "vmshell.composeInfra(", "infraQueued(", "\"DELETE\""]) {
     if (!gc.includes(needle)) throw new Error(`GC lacks ${needle}`);
   }
+});
+
+Deno.test("planInfraGC keeps 24 h of finished history (rc130)", () => {
+  const released = (status) => ({ phase: "Released", conditions: [{ type: "Ready", status: "False", lastTransitionTime: status }] });
+  const recent = infra(ORIGIN, "rec001", ["vmshell-r"]);
+  const old = infra(ORIGIN, "old001", ["vmshell-r"]);
+  const mixed = infra(ORIGIN, "mix001", ["vmshell-live", "vmshell-old"]);
+  const fresh = infra(ORIGIN, "new001", ["vmshell-x"], { metadata: { creationTimestamp: hoursAgo(2) } });
+  const stamped = infra(ORIGIN, "stp001", [], { spec: { contracts: [{ name: "vmshell-s", state: "Released", releaseRequestedAt: hoursAgo(3) }] } });
+  const objects = [
+    cc(recent, "vmshell-r", released(hoursAgo(1))),
+    cc(old, "vmshell-r", released(hoursAgo(25))),
+    cc(mixed, "vmshell-live", { phase: "Held" }),
+    cc(mixed, "vmshell-old", released(hoursAgo(48))),
+  ];
+  const plan = planInfraGC({
+    infras: [recent, old, mixed, fresh, stamped],
+    contracts: objects.map(feedContract),
+    origin: ORIGIN,
+    tabId: ME,
+    did: ALICE,
+    now: NOW,
+  });
+  const by = Object.fromEntries(plan.map((step) => [step.name, step]));
+  const n = (tab) => originInfraName(ORIGIN, tab);
+  assertEquals(by[n("rec001")].action, "keep", "Released 1 h ago stays");
+  assertEquals(by[n("rec001")].reason, "history: finished 1.0 h ago");
+  assertEquals(by[n("old001")].action, "delete", "Released 25 h ago goes");
+  assertEquals(by[n("mix001")].action, "keep", "one live, one old terminal: kept");
+  assertEquals(by[n("new001")].action, "keep", "no contract times: the infra's creation (2 h)");
+  assertEquals(by[n("stp001")].action, "keep", "the entry's release stamp counts");
+  assertEquals(contractFinishedAt({ status: { contract: { termination: { observedAt: hoursAgo(5) } } } }), NOW - 5 * 3600_000);
 });
