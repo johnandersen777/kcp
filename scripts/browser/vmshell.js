@@ -756,3 +756,91 @@ export function shellLink(contract, token) {
   url.hash = `token=${encodeURIComponent(token)}`;
   return url.toString();
 }
+
+// --- other tabs' EphemeralInfras (linux-kcp, rc129) ---------------------------
+//
+// Every tab of an origin shares one kcp state, so infras of tabs that are gone
+// stay in it until their ttl. On boot the page collects those of its own
+// origin: an infra none of whose entries points at a live ComputeContract is
+// deleted; one with a live contract keeps running and gets its record binding
+// repaired as sessionInfra repairs the tab's own. An infra already ending
+// (deletionTimestamp or status.endedAt: the infra controller expires it) is
+// left to the controller.
+
+/** The feed's view (statusfeed contract()) of a ComputeContract object, for the liveness rule. */
+export function feedContract(obj) {
+  const status = obj?.status ?? {};
+  const spec = obj?.spec ?? {};
+  const failed = (status.conditions ?? []).find((c) => c?.type === "ReleaseFailed" && c?.status === "True");
+  const guest = status.contract ?? {};
+  return {
+    name: obj?.metadata?.name ?? "",
+    phase: status.phase ?? "",
+    release: spec.release === true,
+    releaseRequestedAt: spec.releaseRequestedAt ?? "",
+    releaseAnsweredAt: status.release?.requestedAt ?? "",
+    releaseFailed: Boolean(failed),
+    releaseFailedReason: failed?.reason ?? "",
+    atircRevokes: status.atircRevokes ?? "",
+    step: status.execution?.step ?? "",
+    receiptOk: guest.receipt !== undefined && guest.receiptOk === true,
+    terminated: guest.termination !== undefined,
+    releaseOk: guest.release?.ok === true,
+  };
+}
+
+/**
+ * A ComputeContract that may still hold a VM or release work: not Released
+ * or Failed; Failed with the guest possibly running (the Release offer's
+ * guestMayRun) or a failed release; or release work still pending
+ * (releaseWorkPending: a re-release, atirc revokes, the guest requester).
+ */
+export function contractLive(contract) {
+  if (!contract) return false;
+  if (!FINISHED.has(contract.phase || "Pending")) return true;
+  if (contract.phase === "Failed" && (guestMayRun(contract) || contract.releaseFailed)) return true;
+  return releaseWorkPending(contract);
+}
+
+/** The tab id in name when it is an infra of origin (originInfraName), else null. */
+export function originInfraTab(origin, name) {
+  const prefix = originInfraName(origin, "x").slice(0, -1);
+  const tab = String(name ?? "").startsWith(prefix) ? String(name).slice(prefix.length) : "";
+  return /^[a-z0-9]{1,6}$/.test(tab) ? tab : null;
+}
+
+/**
+ * What to do with each EphemeralInfra of origin besides tabId's own:
+ * {name, action: "delete"|"rebind"|"keep"|"skip", reason, live}. Other
+ * origins' infras and the tab's own are not listed. contracts are
+ * feedContract views; did is the signed-in identity (rebind target).
+ */
+export function planInfraGC({ infras, contracts, origin, tabId, did }) {
+  const own = originInfraName(origin, tabId);
+  const byName = new Map((contracts ?? []).map((c) => [c?.name, c]));
+  const plan = [];
+  for (const infra of infras ?? []) {
+    const name = infra?.metadata?.name ?? "";
+    if (!name || name === own || originInfraTab(origin, name) === null) continue;
+    if (infra.metadata?.deletionTimestamp || infra.status?.endedAt) {
+      plan.push({ name, action: "skip", reason: "already ending", live: [] });
+      continue;
+    }
+    const live = (infra.spec?.contracts ?? [])
+      .map((entry) => infraContractName(name, entry?.name))
+      .filter((cc) => contractLive(byName.get(cc)));
+    if (live.length === 0) {
+      plan.push({ name, action: "delete", reason: "no live ComputeContract", live });
+      continue;
+    }
+    const binding = infra.spec?.record;
+    if (binding?.uri || (binding?.repoRef?.name && binding.repoRef.name !== repoName(did))) {
+      plan.push({ name, action: "keep", reason: "live contracts; its record is bound to another repo", live });
+    } else if (infraRecordStale(binding)) {
+      plan.push({ name, action: "rebind", reason: "live contracts; stale record binding", live });
+    } else {
+      plan.push({ name, action: "keep", reason: "live contracts", live });
+    }
+  }
+  return plan;
+}
