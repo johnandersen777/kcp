@@ -80,11 +80,14 @@ Deno.test("page wiring: kcp calls wait for ready; probes retry; Request VM never
 // bound (initSocialwebUI ran at the end of boot), and a click vanished.
 Deno.test("page wiring: compute and identity listeners are bound before kcp boots", async () => {
   const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
-  const start = app.slice(app.indexOf("async function start()"));
-  const init = start.indexOf("initSocialwebUI();");
-  assert(init >= 0, "start() initialises the UI");
-  assert(init < start.indexOf("await acquireKcpLock()") && init < start.indexOf("spawnKcp("), "listeners bound before the lock and kcp boot");
-  assert((app.match(/^\s*initSocialwebUI\(\);/gm) ?? []).length === 1, "initialised once, not again at the end of boot");
+  // Bound at module level before start(): no boot step (throwing or hanging)
+  // can skip it, and it runs before the kcp lock and kcp boot.
+  const tail = app.slice(app.lastIndexOf('setStatus("starting…", "running");'));
+  assert(/try \{\s*initSocialwebUI\(\);\s*\} catch/.test(tail), "init guarded at module level");
+  assert(tail.indexOf("initSocialwebUI();") < tail.indexOf("start().catch("), "listeners bound before start()");
+  const start = app.slice(app.indexOf("async function start()"), app.indexOf("async function start()") + 4000);
+  assert(!start.includes("initSocialwebUI();"), "not inside start(), where a failing step could skip it");
+  assert((app.match(/^\s*initSocialwebUI\(\);/gm) ?? []).length === 1, "initialised once");
   const ui = app.slice(app.indexOf("function initSocialwebUI"), app.indexOf("// --- compute ---"));
   assert(/identitySignInEl\.addEventListener\("click"/.test(ui) && /initComputeUI\(\);/.test(ui), "identity and compute listeners in init");
   const compute = app.slice(app.indexOf("function initComputeUI"), app.indexOf("function initComputeUI") + 300);
@@ -115,4 +118,19 @@ Deno.test("a Request VM click before kcp ready is logged and queued, then runs",
   gate.open("worker");
   await tick();
   assertEquals(log, ["Request VM clicked", "requesting ComputeContract"]);
+});
+
+Deno.test("page wiring: Request VM shows its progress while the infra and record take time", async () => {
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  const req = app.slice(app.indexOf("async function requestVM"), app.indexOf("async function requestVM") + 4000);
+  const steps = ['progress("preparing this tab\'s infra")', "sessionInfra((step) => progress(step))", 'progress("creating the contract")', "await setInfraContract("];
+  let at = 0;
+  for (const step of steps) {
+    const i = req.indexOf(step, at);
+    assert(i >= at, `${step} in order`);
+    at = i;
+  }
+  assert(/requesting a VM: \$\{step\}…/.test(req), "progress text");
+  const infra = app.slice(app.indexOf("async function sessionInfra"), app.indexOf("async function sessionInfra") + 3500);
+  assert(/onStep\("syncing its record"\);\s*const synced = await waitInfraRecord/.test(infra), "record sync step");
 });
