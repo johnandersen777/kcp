@@ -255,6 +255,17 @@ export { programModule, rewriteNodeImports };
 
 // --- page main thread ----------------------------------------------------------
 
+// The Compute panel's policy sandbox line from the status feed's PolicyEngine.
+// Before the probe has written Fenced (no status, no message) it is probing,
+// not "not fenced".
+export function policyEngineStatus(engine) {
+  if (!engine) return { text: "", className: "" };
+  const fenced = engine.fenced === "True";
+  const state = fenced ? "fenced" : engine.fenced === "False" || engine.message ? "not fenced" : "probing...";
+  const text = `policy sandbox: ${state}${engine.ready ? ", ready" : ""}${engine.message ? ` (${engine.message})` : ""}`;
+  return { text, className: fenced && engine.ready ? "ok" : "warn" };
+}
+
 // startFrame appends the hidden sandbox iframe and resolves once its relay is
 // listening.
 export function startFrame(doc = document) {

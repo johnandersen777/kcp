@@ -36,7 +36,7 @@ import * as webrtcGuest from "./webrtc_guest.js";
 import * as sshCmd from "./ssh_cmd.js";
 import { discardSnapshot } from "./kcp_hibernate.js";
 import { ControlStream, DebugLogSender } from "./debug_link.js";
-import { connectFrame, startFrame } from "./policy_sandbox.js";
+import { connectFrame, policyEngineStatus, startFrame } from "./policy_sandbox.js";
 
 const config = await (await fetch("/config")).json();
 const apiServer = String(config.apiServer);
@@ -3131,12 +3131,10 @@ async function runSsh(args, ctx) {
 // The PolicyEngine's fenced sandbox (plan 0037): Fenced and Ready come from
 // the resource (the probe's facts are the Fenced message).
 function renderPolicyEngine(engine) {
-  const fenced = engine?.fenced === "True";
-  const text = !engine ? "" : `policy sandbox: ${fenced ? "fenced" : "not fenced"}${engine.ready ? ", ready" : ""}` +
-    `${engine.message ? ` (${engine.message})` : ""}`;
+  const { text, className } = policyEngineStatus(engine);
   if (text === lastPolicySummary) return;
   lastPolicySummary = text;
-  setAppStatus(computePolicyEl, text, !engine ? "" : fenced && engine.ready ? "ok" : "warn");
+  setAppStatus(computePolicyEl, text, className);
   if (engine) addLog("info", `PolicyEngine ${engine.name} ${engine.phase ?? "Pending"} ready=${Boolean(engine.ready)} fenced=${engine.fenced ?? "unset"}: ${engine.message ?? ""}`);
 }
 

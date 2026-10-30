@@ -1,7 +1,7 @@
 // Copyright 2026 The KCP Authors.
 // SPDX-License-Identifier: Apache-2.0
 
-import { connect, frameSrcdoc, probe, rewriteNodeImports, runInWorker } from "./policy_sandbox.js";
+import { connect, frameSrcdoc, policyEngineStatus, probe, rewriteNodeImports, runInWorker } from "./policy_sandbox.js";
 
 function assert(cond, message) {
   if (!cond) throw new Error(message);
@@ -130,4 +130,16 @@ Deno.test("probe passes on the facts of a fenced sandbox", async () => {
     frame: async () => ({ origin: "null", parentDocument: "blocked" }),
   });
   eq(out.fenced, true, `fenced (${out.message})`);
+});
+
+Deno.test("policy sandbox line: probing, fenced and ready, not fenced with a reason", () => {
+  eq(policyEngineStatus(undefined), { text: "", className: "" }, "no engine");
+  eq(policyEngineStatus({ name: "policy-engine", phase: "Pending" }),
+    { text: "policy sandbox: probing...", className: "warn" }, "before the probe");
+  eq(policyEngineStatus({ name: "policy-engine", fenced: "True", ready: true, message: "ProbePassed: origin=null" }),
+    { text: "policy sandbox: fenced, ready (ProbePassed: origin=null)", className: "ok" }, "fenced and ready");
+  eq(policyEngineStatus({ name: "policy-engine", fenced: "False", message: "ProbeFailed: program=exit=1" }),
+    { text: "policy sandbox: not fenced (ProbeFailed: program=exit=1)", className: "warn" }, "not fenced");
+  eq(policyEngineStatus({ name: "policy-engine", message: "CreateFailed: no bridge" }).text,
+    "policy sandbox: not fenced (CreateFailed: no bridge)", "a reason without Fenced");
 });
