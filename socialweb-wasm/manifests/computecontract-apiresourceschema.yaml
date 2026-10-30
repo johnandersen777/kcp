@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-27.computecontracts.socialweb.computer
+  name: v1alpha1-28.computecontracts.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -760,6 +760,12 @@ spec:
                   - cid
               associationMessage:
                 type: string
+              atircRevokes:
+                type: string
+                enum:
+                  - Pending
+                  - Done
+                  - Abandoned
       additionalPrinterColumns:
         - name: Phase
           type: string
