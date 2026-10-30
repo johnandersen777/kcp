@@ -2,9 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  ORIGIN_INFRA_TTL_SECONDS,
+  addContract,
   contractManifest,
   contractName,
+  finishedInfraContracts,
+  fnv1a64,
   infraContract,
+  infraRecordURI,
+  infraRepoRef,
+  originInfraName,
+  randomTabId,
+  recordSyncError,
+  recordSynced,
+  repoName,
   sessionInfraManifest,
   isActive,
   isReleasing,
@@ -108,4 +119,78 @@ Deno.test("infraContract: a Requested entry, its secrets entry and the child nam
   assert(infraContract({ infra: "s1", short: "x" }).secret === null, "no wootty, no secrets entry");
   const infra = sessionInfraManifest("s1");
   assert(infra.kind === "EphemeralInfra" && infra.spec.endWhen === "Deadline" && infra.spec.contracts.length === 0, "infra");
+});
+
+Deno.test("fnv1a64 matches the known FNV-1a vector", () => {
+  assert(fnv1a64("a") === "af63dc4c8601ec8c", fnv1a64("a"));
+});
+
+Deno.test("origin infra name is stable, per-tab and DNS/atproto safe", () => {
+  const origin = "https://kcpwasm--johnandersen777-bsky-social.fedproxy.com";
+  const name = originInfraName(origin, "abc123");
+  assert(name === originInfraName(origin, "abc123"), "deterministic");
+  assert(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(name), name);
+  assert(name.length <= 40, name);
+  assert(originInfraName("http://127.0.0.1:8090", "abc123") !== originInfraName("https://127.0.0.1:8090", "abc123"), "scheme");
+  assert(originInfraName("https://x", "abc123") !== originInfraName("https://x", "def456"), "tab");
+  assert(originInfraName("", "") === originInfraName("", ""), "empty fallback");
+  assert(/^[a-z0-9]{6}$/.test(randomTabId(new Uint8Array([0, 1, 35, 36, 255, 10]))), "tab id");
+});
+
+Deno.test("repoName mirrors the Go AtprotoRepo name", () => {
+  assert(repoName("did:plc:lpfuqerea3deuoyrn7ojser4") === "repo-did-plc-lpfuqerea3deuoyrn7ojser4", repoName("did:plc:lpfuqerea3deuoyrn7ojser4"));
+  assert(repoName("DID:WEB:Example.COM:User") === "repo-did-web-example.com-user", repoName("DID:WEB:Example.COM:User"));
+  assert(repoName("did:plc:" + "x".repeat(300)).length === 253, "cap");
+  assert(infraRepoRef("did:plc:me").name === "repo-did-plc-me", "ref");
+});
+
+Deno.test("session infra manifest binds the tab record", () => {
+  const record = { repoRef: infraRepoRef("did:plc:me"), sync: "Both" };
+  const infra = sessionInfraManifest("web-origin-abc-tab123", undefined, record);
+  assert(infra.spec.ttlSeconds === ORIGIN_INFRA_TTL_SECONDS, "ttl");
+  assert(infra.spec.record.repoRef.name === "repo-did-plc-me" && infra.spec.record.sync === "Both", "record");
+  assert(sessionInfraManifest("local").spec.record === undefined, "unbound manifest");
+});
+
+Deno.test("record conditions drive the sync wait", () => {
+  const withConditions = (conditions) => ({ status: { conditions } });
+  assert(!recordSynced(withConditions([{ type: "Synced", status: "False", reason: "Creating" }])), "creating");
+  assert(recordSynced(withConditions([{ type: "Synced", status: "True", reason: "InSync" }])), "in sync");
+  assert(recordSyncError(withConditions([{ type: "Synced", status: "False", reason: "RecordUnavailable", message: "no repo.read" }])) === "no repo.read", "unavailable");
+  assert(recordSyncError(withConditions([{ type: "RecordValid", status: "False", message: "bad record" }])) === "bad record", "invalid");
+  assert(recordSyncError(withConditions([{ type: "SyncConflict", status: "True", reason: "RecordWon", message: "record won" }])) === "", "conflict is not fatal");
+  assert(infraRecordURI({ status: { record: { uri: "at://did:plc:me/computer.socialweb.ephemeralInfra/web-x" } } }, "did:plc:me", "web-x") ===
+    "at://did:plc:me/computer.socialweb.ephemeralInfra/web-x", "uri");
+});
+
+Deno.test("addContract replaces, appends and prunes released entries", () => {
+  const released = { name: "old", state: "Released" };
+  const active = { name: "live", state: "Requested" };
+  const out = addContract([released, active], { name: "new", state: "Requested" }, 2);
+  assert(out.contracts.map((c) => c.name).join() === "live,new", out.contracts.map((c) => c.name).join());
+  assert(out.dropped.join() === "old", out.dropped.join());
+  const replaced = addContract([active], { ...active, state: "Released" }, 1);
+  assert(replaced.contracts[0].state === "Released" && replaced.dropped.length === 0, "replace");
+  let full = false;
+  try {
+    addContract([active], { name: "new", state: "Requested" }, 1);
+  } catch {
+    full = true;
+  }
+  assert(full, "full active record refuses");
+});
+
+Deno.test("finishedInfraContracts marks only terminal requested entries", () => {
+  const infra = { metadata: { name: "web-origin-abc-tab123" }, spec: { contracts: [
+    { name: "vmshell-a", state: "Requested" },
+    { name: "vmshell-b", state: "Requested" },
+    { name: "vmshell-c", state: "Released" },
+  ] } };
+  const contracts = [
+    { name: "einfra-web-origin-abc-tab123-vmshell-a", phase: "Released" },
+    { name: "einfra-web-origin-abc-tab123-vmshell-b", phase: "Held" },
+    { name: "einfra-other-vmshell-c", phase: "Failed" },
+  ];
+  const done = finishedInfraContracts(infra, contracts);
+  assert(done.length === 1 && done[0].name === "vmshell-a", JSON.stringify(done));
 });

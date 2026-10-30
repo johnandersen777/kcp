@@ -534,7 +534,9 @@ async function kcpREST(method, path, body, contentType = "application/json") {
     } catch {
       // not a Status object
     }
-    throw new Error(`${method} ${path}: ${status} ${message}`.trim());
+    const err = new Error(`${method} ${path}: ${status} ${message}`.trim());
+    err.status = status;
+    throw err;
   }
   return text ? JSON.parse(text) : null;
 }
@@ -2367,6 +2369,9 @@ let computeBusy = false;
 let computeReleasing = false;
 let computeLastRender = "";
 const computeReleaseAsked = new Set();
+// Contracts already marked Released in the tab infra after a terminal phase.
+const infraAutoReleased = new Set();
+let infraAutoSync = false;
 
 // socialwebCall invokes a page-only Go export through kcp_worker.js.
 function socialwebCall(fn, payload, timeoutMs = 30_000) {
@@ -2385,38 +2390,184 @@ function socialwebCall(fn, payload, timeoutMs = 30_000) {
   });
 }
 
-// This tab's EphemeralInfra (name kept in sessionStorage): created on the
-// first Request VM, replaced once its deadline ended it.
+// One EphemeralInfra per tab: the object name is also the atproto record rkey,
+// so the origin and a stable per-tab id survive a reload without making tabs
+// fight over one record.
+const INFRA_TAB_KEY = "socialweb.infraTab";
+const INFRA_RECORD_POLL_MS = 750;
+const infraTabFallback = vmshell.randomTabId();
+let infraPatchQueue = Promise.resolve();
+
+function infraTabId() {
+  try {
+    let id = sessionStorage.getItem(INFRA_TAB_KEY);
+    if (!id) {
+      id = vmshell.randomTabId();
+      sessionStorage.setItem(INFRA_TAB_KEY, id);
+    }
+    return id;
+  } catch {
+    return infraTabFallback;
+  }
+}
+
+function kcpStatus(err) {
+  return Number(err?.status ?? 0);
+}
+
+// Serialize page-side infra PATCHes: release and terminal reconciliation both
+// replace spec.contracts whole, so two concurrent read-modify-writes lose VMs.
+function patchInfra(path, patch) {
+  const run = () => kcpREST("PATCH", path, patch, "application/merge-patch+json");
+  const next = infraPatchQueue.then(run, run);
+  infraPatchQueue = next.catch(() => {});
+  return next;
+}
+
+async function waitInfraGone(path, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(500);
+    try {
+      await kcpREST("GET", path);
+    } catch (err) {
+      if (kcpStatus(err) === 404) return null;
+      throw err;
+    }
+  }
+  throw new Error("the previous EphemeralInfra is still terminating");
+}
+
+async function waitInfraRecord(name, did, timeoutMs = 60_000) {
+  const path = `${SOCIALWEB_API}/ephemeralinfras/${name}`;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const infra = await kcpREST("GET", path);
+    const error = vmshell.recordSyncError(infra);
+    if (error) throw new Error(error);
+    if (vmshell.recordSynced(infra) && vmshell.infraRecordURI(infra, did, name)) return infra;
+    if (Date.now() >= deadline) {
+      throw new Error(`EphemeralInfra ${name} did not publish its record in time`);
+    }
+    await sleep(INFRA_RECORD_POLL_MS);
+  }
+}
+
+// This tab's EphemeralInfra. GET only creates on 404; every other failure is
+// thrown so a transient kcp/PDS error cannot orphan the tab's VMs in a new
+// object. Existing record bindings are repaired, and the record must be
+// synced before the caller adds its first contract (the first sync pulls an
+// existing record and would otherwise erase it).
 async function sessionInfra() {
-  let name = null;
+  const did = identityState?.phase === "Ready" ? identityState.did : "";
+  if (!did) throw new Error("sign in before requesting a VM");
   try {
-    name = sessionStorage.getItem("socialweb.sessionInfra");
+    sessionStorage.removeItem("socialweb.sessionInfra");
   } catch {
-    // no sessionStorage: one infra per load
+    // no sessionStorage
   }
-  if (name) {
-    const infra = await kcpREST("GET", `${SOCIALWEB_API}/ephemeralinfras/${name}`).catch(() => null);
-    if (infra && !infra.status?.endedAt && !infra.metadata?.deletionTimestamp) return infra;
-  }
-  name = `s${vmshell.contractName().slice("vmshell-".length)}`;
-  const infra = await kcpREST("POST", `${SOCIALWEB_API}/ephemeralinfras`, vmshell.sessionInfraManifest(name));
+  const name = vmshell.originInfraName(location.origin, infraTabId());
+  const path = `${SOCIALWEB_API}/ephemeralinfras/${name}`;
+  const repoRef = vmshell.infraRepoRef(did);
+  let infra = null;
   try {
-    sessionStorage.setItem("socialweb.sessionInfra", name);
-  } catch {
-    // see above
+    infra = await kcpREST("GET", path);
+  } catch (err) {
+    if (kcpStatus(err) !== 404) throw err;
   }
-  addLog("info", `EphemeralInfra ${name} holds this tab's VMs`);
-  return infra;
+  if (infra && (infra.metadata?.deletionTimestamp || infra.status?.endedAt)) {
+    await kcpREST("DELETE", path).catch((err) => {
+      if (kcpStatus(err) !== 404) throw err;
+    });
+    infra = await waitInfraGone(path);
+  }
+  if (infra) {
+    const binding = infra.spec?.record;
+    if (binding?.uri || (binding?.repoRef?.name && binding.repoRef.name !== repoRef.name)) {
+      await kcpREST("DELETE", path).catch((err) => {
+        if (kcpStatus(err) !== 404) throw err;
+      });
+      infra = await waitInfraGone(path);
+    } else if (!binding?.repoRef || (binding.sync && binding.sync !== "Both")) {
+      await patchInfra(path, { spec: { record: { repoRef, sync: "Both" } } });
+      infra = await kcpREST("GET", path);
+    }
+  }
+  if (!infra) {
+    const manifest = vmshell.sessionInfraManifest(name, undefined, { repoRef, sync: "Both" });
+    try {
+      infra = await kcpREST("POST", `${SOCIALWEB_API}/ephemeralinfras`, manifest);
+    } catch (err) {
+      if (kcpStatus(err) !== 409) throw err;
+      infra = await kcpREST("GET", path);
+    }
+    addLog("info", `EphemeralInfra ${name} holds this tab's VMs`);
+  }
+  const synced = await waitInfraRecord(name, did);
+  addLog("info", `EphemeralInfra ${name} record ${vmshell.infraRecordURI(synced, did, name)}`);
+  return synced;
 }
 
 // Sets the state of contract short in the session infra (Requested adds it).
-async function setInfraContract(infraName, entry, secret) {
-  const infra = await kcpREST("GET", `${SOCIALWEB_API}/ephemeralinfras/${infraName}`);
-  const contracts = (infra.spec?.contracts ?? []).filter((c) => c.name !== entry.name);
-  const secrets = (infra.spec?.secrets ?? []).filter((x) => !secret || x.contract !== secret.contract);
-  const patch = { spec: { contracts: [...contracts, entry] } };
-  if (secret) patch.spec.secrets = [...secrets, secret];
-  await kcpREST("PATCH", `${SOCIALWEB_API}/ephemeralinfras/${infraName}`, patch, "application/merge-patch+json");
+// addContract prunes released entries only when the record reaches 64.
+function setInfraContract(infraName, entry, secret) {
+  const path = `${SOCIALWEB_API}/ephemeralinfras/${infraName}`;
+  const run = async () => {
+    const infra = await kcpREST("GET", path);
+    const { contracts, dropped } = vmshell.addContract(infra.spec?.contracts ?? [], entry);
+    const patch = { spec: { contracts } };
+    if (secret) {
+      patch.spec.secrets = [
+        ...(infra.spec?.secrets ?? []).filter((x) => !dropped.includes(x.contract) && x.contract !== secret.contract),
+        secret,
+      ];
+    } else if (dropped.length > 0) {
+      patch.spec.secrets = (infra.spec?.secrets ?? []).filter((x) => !dropped.includes(x.contract));
+    }
+    await kcpREST("PATCH", path, patch, "application/merge-patch+json");
+  };
+  const next = infraPatchQueue.then(run, run);
+  infraPatchQueue = next.catch(() => {});
+  return next;
+}
+
+// A VM that ends without the Release button (guest exit, bidder release or
+// failure) still leaves state Requested in the record. Mark it Released once
+// so the record says terminated and the next reconcile does not request it
+// again.
+async function markFinishedInfraContracts(contracts) {
+  if (infraAutoSync || !contracts?.length) return;
+  const pending = contracts.filter((contract) =>
+    (contract.phase === "Released" || contract.phase === "Failed") && !infraAutoReleased.has(contract.name));
+  if (pending.length === 0) return;
+  const did = identityState?.phase === "Ready" ? identityState.did : "";
+  if (!did) return;
+  const name = vmshell.originInfraName(location.origin, infraTabId());
+  infraAutoSync = true;
+  try {
+    const infra = await kcpREST("GET", `${SOCIALWEB_API}/ephemeralinfras/${name}`).catch((err) => {
+      if (kcpStatus(err) === 404) return null;
+      throw err;
+    });
+    if (!infra) {
+      for (const contract of pending) infraAutoReleased.add(contract.name);
+      return;
+    }
+    const matched = new Set();
+    for (const entry of vmshell.finishedInfraContracts(infra, pending)) {
+      const child = vmshell.infraContractName(name, entry.name);
+      matched.add(child);
+      await setInfraContract(name, { ...entry, state: "Released" }, null);
+      infraAutoReleased.add(child);
+    }
+    for (const contract of pending) {
+      if (!matched.has(contract.name)) infraAutoReleased.add(contract.name);
+    }
+  } catch (err) {
+    addLog("warn", `marking finished VMs in ${name} failed: ${err instanceof Error ? err.message : err}`);
+  } finally {
+    infraAutoSync = false;
+  }
 }
 
 async function requestVM() {
@@ -2871,6 +3022,7 @@ function applyComputeState(state) {
   lastFeedState = state;
   for (const watcher of [...feedWatchers]) watcher(state);
   const contracts = state.contracts ?? [];
+  void markFinishedInfraContracts(contracts);
   const active = contracts.filter(vmshell.isActive);
   if (computeBusy && active.length > 0) computeBusy = false;
   computeReleasing = contracts.some(vmshell.isReleasing);

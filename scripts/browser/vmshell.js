@@ -15,6 +15,11 @@ export const WOOTTY_ENV = "/etc/wootty/wootty.env";
 export const SSH_TAG = "ssh";
 export const SECRETS_MOUNT = "requester";
 
+/** The per-tab EphemeralInfra record lives long enough to outlast a page session. */
+export const ORIGIN_INFRA_TTL_SECONDS = 30 * 24 * 3600;
+
+const INFRA_RECORD_CAP = 64;
+
 export function base64url(bytes) {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -29,6 +34,109 @@ export function randomToken() {
 export function contractName(bytes = crypto.getRandomValues(new Uint8Array(6))) {
   const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
   return "vmshell-" + Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
+}
+
+export function randomTabId(bytes = crypto.getRandomValues(new Uint8Array(6))) {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
+}
+
+/** FNV-1a 64-bit, 16 lowercase hex chars. Synchronous and secure-context free. */
+export function fnv1a64(text) {
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(String(text))) {
+    hash = ((hash ^ BigInt(byte)) * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+/**
+ * The EphemeralInfra object name, which is also the atproto record rkey. One
+ * record per tab: the origin and a stable per-tab id, with the origin hash so
+ * scheme/port changes cannot collide. Kept short enough that
+ * einfra-<name>-vmshell-xxxxxx stays a DNS label.
+ */
+export function originInfraName(origin, tabId) {
+  const raw = String(origin ?? "").trim().toLowerCase();
+  let host = raw;
+  try {
+    host = new URL(raw).host;
+  } catch {
+    // Not an absolute origin: sanitize the raw value below.
+  }
+  const slug = host.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 12).replace(/-+$/g, "") || "origin";
+  const tab = String(tabId ?? "").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 6) || "tab";
+  return `web-${slug}-${fnv1a64(raw)}-${tab}`;
+}
+
+/** Pure JS mirror of internal/contract/atprotorepo.RepoName. */
+export function repoName(did) {
+  let name = ("repo-" + String(did ?? "")).toLowerCase()
+    .replace(/[^a-z0-9.-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+  if (!name) name = "repo";
+  return name.slice(0, 253).replace(/[-.]+$/g, "");
+}
+
+export function infraRepoRef(did) {
+  return { group: "socialweb.computer", kind: "AtprotoRepo", name: repoName(did) };
+}
+
+export function infraCondition(infra, type) {
+  return (infra?.status?.conditions ?? []).find((condition) => condition?.type === type) ?? null;
+}
+
+export function recordSynced(infra) {
+  return infraCondition(infra, "Synced")?.status === "True";
+}
+
+/** The record sync failure to show, if the record is invalid or unavailable. */
+export function recordSyncError(infra) {
+  const valid = infraCondition(infra, "RecordValid");
+  if (valid?.status === "False") return valid.message || "the EphemeralInfra record is invalid";
+  const synced = infraCondition(infra, "Synced");
+  if (synced?.status === "False" && (synced.reason === "RecordUnavailable" || synced.reason === "RecordInvalid")) {
+    return synced.message || "the EphemeralInfra record is unavailable";
+  }
+  return "";
+}
+
+export function infraRecordURI(infra, did, name) {
+  if (!did || !name) return "";
+  const uri = `at://${did}/computer.socialweb.ephemeralInfra/${name}`;
+  return infra?.status?.record?.uri === uri ? uri : "";
+}
+
+/**
+ * Replace or append a contract, pruning the oldest released entries when the
+ * record is full. Never drops an active entry. Returns the dropped names so
+ * the caller can remove their secrets.
+ */
+export function addContract(contracts, entry, cap = INFRA_RECORD_CAP) {
+  const list = Array.isArray(contracts) ? contracts.slice() : [];
+  const index = list.findIndex((contract) => contract?.name === entry.name);
+  if (index >= 0) list[index] = entry;
+  else list.push(entry);
+  const dropped = [];
+  while (list.length > cap) {
+    const oldest = list.findIndex((contract) => contract?.state === "Released");
+    if (oldest < 0) throw new Error(`the EphemeralInfra record is full (${cap} contracts); release a VM first`);
+    dropped.push(list[oldest].name);
+    list.splice(oldest, 1);
+  }
+  return { contracts: list, dropped };
+}
+
+/** Requested infra entries whose child ComputeContract has already finished. */
+export function finishedInfraContracts(infra, contracts) {
+  const name = infra?.metadata?.name;
+  if (!name) return [];
+  const terminal = new Set((contracts ?? [])
+    .filter((contract) => contract?.phase === "Released" || contract?.phase === "Failed")
+    .map((contract) => contract.name));
+  return (infra?.spec?.contracts ?? []).filter((entry) =>
+    entry?.state === "Requested" && terminal.has(infraContractName(name, entry.name)));
 }
 
 const FINISHED = new Set(["Released", "Failed"]);
@@ -58,17 +166,20 @@ export function secretsBundle(token) {
 }
 
 /**
- * The page session's EphemeralInfra: every VM the tab requests is a contract
- * in it, so the requester only tracks this session's contracts and deleting
- * (or the deadline of) the infra releases and collects all of them. Deadline,
- * not Complete: a session outlives its first released VM.
+ * The page tab's EphemeralInfra: every VM this tab requests is a contract in
+ * it, so the requester only tracks this tab's contracts and deleting (or the
+ * deadline of) the infra releases and collects all of them. Deadline, not
+ * Complete: a tab outlives its first released VM. record binds the object to
+ * the tab's atproto record; without it the infra is local to browser kcp.
  */
-export function sessionInfraManifest(name, ttlSeconds = 6 * 3600) {
+export function sessionInfraManifest(name, ttlSeconds = ORIGIN_INFRA_TTL_SECONDS, record = null) {
+  const spec = { description: "socialweb.computer page session", ttlSeconds, endWhen: "Deadline", contracts: [] };
+  if (record) spec.record = record;
   return {
     apiVersion: "socialweb.computer/v1alpha1",
     kind: "EphemeralInfra",
     metadata: { name },
-    spec: { description: "socialweb.computer page session", ttlSeconds, endWhen: "Deadline", contracts: [] },
+    spec,
   };
 }
 

@@ -36,6 +36,18 @@ q() {
   printf "%q" "$1"
 }
 
+# The deployed SHA lives beside the site, not inside it, so the site bundle
+# stays exactly what the build wrote. The local ledger records what was live
+# before each swap.
+STATE_DIR="${DEPLOY_STATE_DIR:-${REPO}/.deploy}"
+REMOTE_SHA_FILE="/var/www/${ORIGIN}.deployed-sha"
+CURRENT_SHA="${DEPLOY_SHA:-$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)}"
+mkdir -p "$STATE_DIR"
+PREVIOUS_SHA="$(ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "cat $(q "$REMOTE_SHA_FILE") 2>/dev/null || true" 2>/dev/null | tr -d '[:space:]' || true)"
+if [ -z "$PREVIOUS_SHA" ]; then
+  PREVIOUS_SHA="$(tr -d '[:space:]' < "$STATE_DIR/last-deployed-sha.txt" 2>/dev/null || true)"
+fi
+
 # ── Build ────────────────────────────────────────────────────────────────────
 if [ "${SKIP_BUILD:-}" != "1" ]; then
   say "building ${PUBLIC_DIR} from ${ARTIFACTS}"
@@ -52,6 +64,13 @@ console.log(JSON.stringify(buildClientMetadata(`https://${Deno.env.get("ORIGIN")
 ' > "$PUBLIC_DIR/oauth-client-metadata.json"
 say "client_id https://${ORIGIN}/oauth-client-metadata.json"
 
+# Record what was live before this swap; after the remote check succeeds the
+# same ledger names what is live now.
+printf '%s\n' "${PREVIOUS_SHA:-unknown}" > "$STATE_DIR/previous-deployed-sha.txt"
+printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${PREVIOUS_SHA:-unknown}" "$CURRENT_SHA" \
+  >> "$STATE_DIR/deploy-history.txt"
+say "previous deployed sha: ${PREVIOUS_SHA:-unknown}; deploying ${CURRENT_SHA}"
+
 # ── Ship ─────────────────────────────────────────────────────────────────────
 STAGE="/var/www/.stage-${ORIGIN}"
 say "shipping $(du -sh "$PUBLIC_DIR" | cut -f1) to ${SSH_TARGET}:${STAGE}"
@@ -59,7 +78,7 @@ tar cf - -C "$PUBLIC_DIR" . | ssh "${SSH_OPTS[@]}" "$SSH_TARGET" \
   "rm -rf $(q "$STAGE") && mkdir -p $(q "$STAGE") && tar xf - -C $(q "$STAGE")"
 
 # ── Remote: swap the site in, Caddy site block ───────────────────────────────
-ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "ORIGIN=$(q "$ORIGIN") STAGE=$(q "$STAGE") bash -s" <<'REMOTE_EOF'
+ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "ORIGIN=$(q "$ORIGIN") STAGE=$(q "$STAGE") SHA_FILE=$(q "$REMOTE_SHA_FILE") DEPLOY_SHA=$(q "$CURRENT_SHA") bash -s" <<'REMOTE_EOF'
 set -euo pipefail
 
 say() {
@@ -98,13 +117,15 @@ if ! grep -qE '^[[:space:]]*import[[:space:]]+/etc/caddy/sites/\*\.caddy' /etc/c
 fi
 caddy validate --config /etc/caddy/Caddyfile >/dev/null
 systemctl reload caddy || systemctl restart caddy
-say "https://${ORIGIN} -> ${ROOT}"
+printf '%s\n' "$DEPLOY_SHA" > "$SHA_FILE"
+say "https://${ORIGIN} -> ${ROOT} (sha ${DEPLOY_SHA})"
 REMOTE_EOF
 
 # ── Check ────────────────────────────────────────────────────────────────────
 for _ in 1 2 3 4 5 6; do
   if curl -fsS "https://${ORIGIN}/oauth-client-metadata.json" | grep -q "\"client_id\": \"https://${ORIGIN}/oauth-client-metadata.json\""; then
-    say "done: https://${ORIGIN}"
+    printf '%s\n' "$CURRENT_SHA" > "$STATE_DIR/last-deployed-sha.txt"
+    say "done: https://${ORIGIN} (sha ${CURRENT_SHA})"
     exit 0
   fi
   sleep 5
