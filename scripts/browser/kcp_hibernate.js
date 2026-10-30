@@ -35,6 +35,12 @@ limitations under the License.
 //     records the last number it had posted per channel. Equal means the
 //     snapshot's memory holds exactly the persisted state; anything else
 //     (newer JSON, or JSON that lost a message) cold boots from JSON.
+//   - with the owner fence (state_store.js claimOwner), it was written by
+//     the tab that owned the saved state when this load started. Two tabs
+//     number their persists from the same stored base, so after a forced
+//     take over a stale holder's capture could carry the very seqs the new
+//     owner persisted; the owner token tells them apart. A capture also
+//     checks, right before it commits, that its tab still owns the state.
 // Any other problem deletes the snapshot and cold boots.
 //
 // Re-capture: whenever the sequence moved since the last capture, the worker
@@ -53,6 +59,64 @@ const EVERY_MS = 60 * 1000;
 // socialweb compose write in bursts), unless the page is going away.
 const QUIET_MS = 30 * 1000;
 const CHUNK = 4 << 20;
+
+/** The kcp-wasm state database's owner key (state_store.js OWNER_KEY). */
+export const OWNER_KEY = "owner";
+
+/**
+ * The owner token in the page's state database dbName, or null (no database,
+ * no token, any error). Never creates the database.
+ */
+export function readOwner(dbName, factory = globalThis.indexedDB) {
+  return new Promise((resolve) => {
+    if (!factory || !dbName) return resolve(null);
+    let req;
+    try {
+      req = factory.open(dbName);
+    } catch {
+      return resolve(null);
+    }
+    req.onupgradeneeded = () => req.transaction?.abort(); // it did not exist: leave it so
+    req.onerror = () => resolve(null);
+    req.onsuccess = () => {
+      const db = req.result;
+      const done = (value) => {
+        db.close();
+        resolve(value);
+      };
+      if (!db.objectStoreNames.contains("state")) return done(null);
+      try {
+        const get = db.transaction("state", "readonly").objectStore("state").get(OWNER_KEY);
+        get.onsuccess = () => done(get.result ?? null);
+        get.onerror = () => done(null);
+      } catch {
+        done(null);
+      }
+    };
+  });
+}
+
+function notOwner(message) {
+  const err = new Error(message);
+  err.name = "NotOwnerError";
+  return err;
+}
+
+/**
+ * Why the stored snapshot meta must not be restored, or "" when it may: key,
+ * seqs and, when owner is not undefined (the fence is on), the owner token
+ * the saved state had when this load started.
+ */
+export function snapshotRejection(meta, { key, seqs, owner }) {
+  if (meta?.extra?.key !== key) return "the module, wasm_exec.js or the boot configuration changed";
+  if (!sameSeqs(meta.extra?.seqs, seqs)) {
+    return `persisted state is newer (snapshot ${JSON.stringify(meta.extra?.seqs)}, state ${JSON.stringify(seqs)})`;
+  }
+  if (owner !== undefined && (meta.extra?.owner ?? null) !== owner) {
+    return "written by a tab that no longer owned the saved state";
+  }
+  return "";
+}
 
 const hex = (buf) => Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, "0")).join("");
 const ms = (t0) => Math.round(performance.now() - t0);
@@ -128,7 +192,7 @@ const opfs = {
   },
   // save captures inside, after the last await, so Go cannot run between the
   // capture and the raw write.
-  async save(go, extra, gzip) {
+  async save(go, extra, gzip, beforeCommit = async () => {}) {
     const dir = await this.dir(true);
     const memFile = `mem-${Date.now()}.${gzip ? "gz" : "bin"}`;
     const handle = await (await dir.getFileHandle(memFile, { create: true })).createSyncAccessHandle();
@@ -160,6 +224,12 @@ const opfs = {
       throw err;
     }
     handle.close();
+    try {
+      await beforeCommit();
+    } catch (err) {
+      await dir.removeEntry(memFile).catch(() => {});
+      throw err;
+    }
     Object.assign(meta, { memFile, gzip });
     // createWritable swaps the file in on close(): the old meta.json (and the
     // mem file it names) stays valid until the new one is complete.
@@ -170,6 +240,11 @@ const opfs = {
       if (name.startsWith("mem-") && name !== memFile) await dir.removeEntry(name).catch(() => {});
     }
     return meta;
+  },
+  async writeMeta(meta) {
+    const writable = await (await (await this.dir(true)).getFileHandle("meta.json", { create: true })).createWritable();
+    await writable.write(JSON.stringify(meta));
+    await writable.close();
   },
   async discard() {
     const root = await navigator.storage.getDirectory();
@@ -214,7 +289,7 @@ const idb = {
     if (!blob) throw new Error("snapshot memory is missing");
     return streamInto(memStream(blob, meta.gzip), view);
   },
-  async save(go, extra, gzip) {
+  async save(go, extra, gzip, beforeCommit = async () => {}) {
     const { meta, memory } = capture(go, extra());
     const t0 = performance.now();
     // new Blob() copies synchronously, so the stored memory is consistent.
@@ -222,6 +297,7 @@ const idb = {
     meta.stats.copyMs = ms(t0);
     if (gzip) blob = await new Response(memStream(blob, false).pipeThrough(new CompressionStream("gzip"))).blob();
     Object.assign(meta, { stored: blob.size, gzip });
+    await beforeCommit();
     await idbDo("readwrite", (s) => {
       s.put(blob, "mem");
       return s.put(meta, "meta");
@@ -229,10 +305,26 @@ const idb = {
     meta.stats.writeMs = ms(t0);
     return meta;
   },
+  writeMeta(meta) {
+    return idbDo("readwrite", (s) => s.put(meta, "meta"));
+  },
   discard() {
     return idbDo("readwrite", (s) => s.clear()).catch(() => {});
   },
 };
+
+/**
+ * After a restore by a new owner (its memory is exactly the persisted state:
+ * the seqs matched), stamps the stored snapshot with that owner's token so
+ * the next load can use it without a fresh capture first.
+ */
+export async function restampOwner(store, token) {
+  const meta = await store.readMeta();
+  if (!meta?.extra || meta.extra.owner === token) return false;
+  meta.extra.owner = token;
+  await store.writeMeta(meta);
+  return true;
+}
 
 export function pickStore(kind) {
   const hasOpfs = typeof globalThis.FileSystemFileHandle?.prototype?.createSyncAccessHandle === "function" &&
@@ -262,17 +354,13 @@ const sameSeqs = (a, b) => (a?.kcp ?? 0) === (b?.kcp ?? 0) && (a?.socialweb ?? 0
  *
  * before(meta) runs right before the instance is rebuilt (fs state, JS state).
  */
-export async function tryRestore({ go, module, key, seqs, store = pickStore(), log, before }) {
+export async function tryRestore({ go, module, key, seqs, owner = undefined, store = pickStore(), log, before }) {
   const t0 = performance.now();
   let meta;
   try {
     meta = await store.readMeta();
     if (!meta) return null;
-    const why = meta.extra?.key !== key
-      ? "the module, wasm_exec.js or the boot configuration changed"
-      : !sameSeqs(meta.extra?.seqs, seqs)
-      ? `persisted state is newer (snapshot ${JSON.stringify(meta.extra?.seqs)}, state ${JSON.stringify(seqs)})`
-      : "";
+    const why = snapshotRejection(meta, { key, seqs, owner });
     if (why) {
       log("info", `snapshot discarded: ${why}`);
       await store.discard();
@@ -312,7 +400,10 @@ export async function tryRestore({ go, module, key, seqs, store = pickStore(), l
  * extra() the JSON-safe worker state to keep. captured is the seqs the stored
  * snapshot already holds (after a restore), or null.
  */
-export function startHibernation({ go, key, ready, seqs, extra, captured = null, gzip = false, store = pickStore(), log }) {
+export function startHibernation({
+  go, key, ready, seqs, extra, captured = null, gzip = false, store = pickStore(), log, owner = null,
+  timers = globalThis,
+}) {
   let lastSeqs = captured;
   let lastAt = 0;
   let want = false;
@@ -341,8 +432,15 @@ export function startHibernation({ go, key, ready, seqs, extra, captured = null,
     let done;
     running = new Promise((resolve) => (done = resolve));
     const t0 = performance.now();
+    // owner: {token, current()}; the capture is this tab's only while the
+    // saved state's owner is still its token, checked before it starts and
+    // again right before it commits.
+    const stillOwner = async () => {
+      if (owner && (await owner.current()) !== owner.token) throw notOwner("another tab owns the saved state now");
+    };
     try {
-      const meta = await store.save(go, () => ({ ...extra(), seqs: seqs(), key }), gzip);
+      await stillOwner();
+      const meta = await store.save(go, () => ({ ...extra(), seqs: seqs(), key, owner: owner?.token ?? null }), gzip, stillOwner);
       lastSeqs = meta.extra.seqs;
       lastAt = Date.now();
       want = false;
@@ -350,14 +448,19 @@ export function startHibernation({ go, key, ready, seqs, extra, captured = null,
         `${(meta.stored / 1048576).toFixed(0)} MiB stored${gzip ? " (gzip)" : ""}, capture ${meta.stats.captureMs}ms, ` +
         `copy ${meta.stats.copyMs ?? 0}ms, write ${meta.stats.writeMs}ms, total ${ms(t0)}ms`);
     } catch (err) {
-      log("warn", `snapshot failed: ${err?.message ?? err}`);
+      if (err?.name === "NotOwnerError") {
+        disabled = true;
+        log("warn", `snapshot capture stopped: ${err.message}`);
+      } else {
+        log("warn", `snapshot failed: ${err?.message ?? err}`);
+      }
       if (err?.name === "QuotaExceededError") disabled = true;
     } finally {
       running = null;
       done();
     }
   };
-  setInterval(tick, 1000);
+  timers.setInterval(tick, 1000);
   return {
     request() {
       want = true;

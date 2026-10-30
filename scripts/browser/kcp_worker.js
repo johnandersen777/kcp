@@ -373,6 +373,10 @@ if (restored && typeof globalThis.socialwebIngressList === "function") {
 const readyMs = Math.round(performance.now() - started);
 log("ok", `kcp ready in ${readyMs}ms`);
 self.postMessage({ type: "ready", restored: restored?.stats ?? null, compileMs, readyMs });
+if (restored && init.hibernate?.owner) {
+  hibernate.restampOwner(hibernate.pickStore(init.hibernate.store), init.hibernate.owner.token)
+    .catch((err) => log("warn", `snapshot owner restamp failed: ${err?.message ?? err}`));
+}
 hibernation = restoreUnreadable ? null : startHibernationLoop();
 
 // --- hibernation ---------------------------------------------------------------
@@ -388,6 +392,9 @@ async function restoreSnapshot() {
       module,
       key: snapshotKey,
       seqs,
+      // Owner fence: only a snapshot of the tab that owned the saved state
+      // when this load started (undefined: no fence, memory state).
+      owner: init.hibernate.owner ? init.hibernate.owner.previous ?? null : undefined,
       store: hibernate.pickStore(init.hibernate.store),
       log,
       before(meta) {
@@ -459,6 +466,9 @@ function startHibernationLoop() {
     ready: () => typeof globalThis.socialwebHandleRequest === "function" && pending.size === 0,
     seqs: () => ({ ...seqs }),
     extra: () => ({ fs: exportFsState(), latestState }),
+    owner: init.hibernate.owner
+      ? { token: init.hibernate.owner.token, current: () => hibernate.readOwner(init.hibernate.owner.db) }
+      : null,
   });
 }
 

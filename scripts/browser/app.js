@@ -36,6 +36,7 @@ import {
   backupUnreadable,
   createPersister,
   isNotOwner,
+  OWNER_KEY,
   UNREADABLE_PREFIXES,
   openBestBackend,
   snapshotRecords,
@@ -769,8 +770,12 @@ function kcpStateOwned() {
 // refusal stops every persist of this tab.
 const stateOwnerToken = vmshell.randomToken();
 let stateFenced = false;
+// The owner before this tab's claim (the tab that wrote the saved state), for
+// the hibernation snapshot check; undefined while the state is not fenced.
+let stateOwnerPrevious;
 async function claimStateOwner() {
   const backend = await stateBackend();
+  if (backend.kind === "indexeddb") stateOwnerPrevious = (await backend.load(OWNER_KEY).catch(() => null)) ?? null;
   await backend.claimOwner(stateOwnerToken);
   addLog("debug", `saved state owner: this tab (${stateOwnerToken.slice(0, 8)})`);
 }
@@ -1060,6 +1065,9 @@ async function hibernateInit(useSnapshot) {
     enabled,
     restore: useSnapshot,
     persistSeq: { kcp: Number(kcp ?? 0), socialweb: Number(socialweb ?? 0) },
+    // Owner fence for snapshots (kcp_hibernate.js): captures carry and check
+    // this tab's token; a restore needs the previous owner's.
+    owner: stateOwnerPrevious === undefined ? null : { token: stateOwnerToken, previous: stateOwnerPrevious, db: stateDB },
     gzip: localStorage.getItem("kcp.snapshot.gzip") !== "0",
     store: localStorage.getItem("kcp.snapshot.store") ?? undefined,
   };
