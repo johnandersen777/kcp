@@ -359,3 +359,9 @@ Open questions for the owner:
 - Fail closed (socialweb 8d79dff0): a PolicyWorkflowRun waits Pending EngineUnavailable until `engine.Ready()` (`internal/controllers/policyworkflowrun/controller.go` engineFor), which needs `Sandbox.Fenced()` (`internal/policyengine/controller/engine.go` Ready); `workflow/expression.go` runDeno refuses when not fenced; the page runner's `Fenced()` is set only by a passing probe.
 - 2026-10-30 rc122-sync on the fence URL (drives-oauth, socialweb 007b35f6, P1 associate DID + 0035 agent + this sandbox): Associate DID = bob, Agent on; policy run Succeeded 15:11:42Z in the browser sandbox; `requester_association_written` 15:11:43Z (rkey `requester_associate-did-plc-ocnuqjlzgohypj3zoznermms`); Held 15:12:01Z (37.6 s), row "Associated at://..."; agent nick `aliceoa-3mz42v4bgnn23` joined; Released 15:12:33Z with `requester_atirc_revoked` and `requester_association_deleted` (getRecord RecordNotFound); hat-7 orphan check clean; no "bus: link denied" lines after the EphemeralInfra eventSourceRefs fix. PASS.
 - 2026-10-30 PRODUCTION https://shell.socialweb.computer (deploy 2e87b895d; 292078717 first lacked policy_sandbox.js in the public bundle, fixed + import guard 1f89b1b64): fenced, ready; Associate DID = bob, Agent on; accept 15:27:52.6Z (browser policy allowed hat-7); Held 15:28:19Z (55.3 s) with "Associated at://...requester_associate-did-plc-ocnuqjlzgohypj3zoznermms"; agent nick `aliceoa-3mz43rtqcvh2i` joined; Released 15:28:51Z. PASS.
+
+## rc126 page in prod (2026-10-30)
+
+- Page 059187059 (socialweb integ-rc126 ad824f87) deployed to shell.socialweb.computer; scope unchanged (25 tokens).
+- Prod check (drives-oauth): alice signed in 17:58:55Z; probe 17:58:57.0Z "policy sandbox: fenced, ready (ProbePassed ...)".
+- Page policy suite at ad824f87: 70/0 (PT twins green; no-trust-snapshot deny without network; deadline/cancel with a real stall); deno 142/0; headless fence PASS.
