@@ -75,3 +75,19 @@ Deno.test("banners show, replace by id, act on buttons and hide", () => {
   banners.hide("memory");
   assertEquals([container.hidden, container.children.length, banners.ids()], [true, 0, []]);
 });
+
+// A page module missing from either asset list hangs the page (dev server)
+// or 404s in production (build-kubectl-wasm-web-public.sh).
+Deno.test("every module the page imports is served by the dev server and the production build", async () => {
+  const dev = await Deno.readTextFile(new URL("../kubectl_wasm_web.ts", import.meta.url));
+  const prod = await Deno.readTextFile(new URL("../build-kubectl-wasm-web-public.sh", import.meta.url));
+  const missing = [];
+  for (const file of ["app.js", "kcp_worker.js"]) {
+    const text = await Deno.readTextFile(new URL(`./${file}`, import.meta.url));
+    for (const [, ref] of text.matchAll(/["']\.\/([\w.-]+\.js)["']/g)) {
+      if (!dev.includes(`["/${ref}", "${ref}"]`)) missing.push(`dev:${ref}`);
+      if (!new RegExp(`^\\s+${ref.replace(".", "\\.")}$`, "m").test(prod)) missing.push(`prod:${ref}`);
+    }
+  }
+  assertEquals(missing, [], "unserved page modules");
+});

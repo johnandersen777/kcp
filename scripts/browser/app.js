@@ -775,7 +775,9 @@ async function yieldKcp(why) {
   ready = false;
   const worker = kcpWorker ?? kcpWorkerBooting;
   if (why === "takeover") {
-    if (worker) {
+    // A worker still booting answers no messages yet; its writes are boot
+    // state the next kcp recreates.
+    if (kcpWorker) {
       const flushed = await flushKcpWorker(worker);
       addLog(flushed ? "info" : "warn", flushed ? "kcp writes flushed for the other tab" : "kcp flush unanswered; saving what arrived");
     }
