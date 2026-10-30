@@ -156,6 +156,12 @@ globalThis.__socialwebIngress = (json) => {
   queueMicrotask(() => ingress.apply(list));
 };
 
+// Go calls this once socialweb started, which is after its provider manifests
+// were applied (or found current); the page then records the kcp.wasm build.
+globalThis.__socialwebStarted = () => {
+  self.postMessage({ type: "socialweb-started" });
+};
+
 // WebRTC ingress (webrtc_ingress.js): Go offers a datachannel to a bidder
 // during submitRfp and serves that bidder's XRPC calls over it. Only where
 // the worker exposes RTCPeerConnection; Go disables the ingress otherwise and
