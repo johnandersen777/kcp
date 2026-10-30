@@ -39,3 +39,12 @@ Deno.test("loadScope reads the generated scope file and falls back without it", 
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+// The fallback must be the generated scope, token for token, or a host
+// without requester-scope.txt serves metadata the PDS rejects tokens against.
+const built = new URL("../.work/wasm/requester-scope.txt", import.meta.url);
+const haveBuilt = await Deno.stat(built).then(() => true, () => false);
+Deno.test({ name: "the fallback scope equals the built requester-scope.txt", ignore: !haveBuilt, fn: async () => {
+  const want = (await Deno.readTextFile(built)).trim().split(/\s+/).join(" ");
+  if (DEFAULT_SCOPE !== want) throw new Error(`fallback differs from ${built.pathname}:\nwant ${want}\ngot  ${DEFAULT_SCOPE}`);
+} });
