@@ -322,9 +322,19 @@ export function schemaHasAgent(schema) {
  */
 export function releaseNotes(contract, contractEvents = []) {
   const notes = [];
+  // status.contract.r2Release (rc127): the guest's answer, when the status has it.
+  const r2 = contract?.r2Release;
+  if (r2) {
+    const phase = r2.phase ? ` [${r2.phase}]` : "";
+    if (r2.ok === true) notes.push(`R2 release: guest released (${r2.answeredAt ?? "?"})${phase}`);
+    else if (r2.ok === false) notes.push(`R2 release: FAILED/TIMED OUT: ${r2.message || "no message"}${phase}`);
+    else notes.push(`R2 release: asked ${r2.requestedAt ?? "?"}, waiting${phase}`);
+  }
   const asked = contractEvents.find((e) => e?.contract === contract?.name && e.direction === "outbound" &&
     e.nsid === "com.publicdomainrelay.temp.compute.events.guest.r2Release");
-  if (contract?.step === "releasingGuestRequester") {
+  if (r2) {
+    // the answer above replaces the wait/request lines
+  } else if (contract?.step === "releasingGuestRequester") {
     notes.push(`R2 release: waiting for the guest requester to release its contracts (up to 12 min)${asked ? `, request ${asked.phase ?? "Pending"}` : ""}`);
   } else if (asked) {
     notes.push(`R2 release: asked (${asked.phase ?? "Pending"}); answered or 12 min bound passed`);

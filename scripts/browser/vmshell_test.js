@@ -366,3 +366,13 @@ Deno.test("A8 release notes: cascade wait, request phase and token revokes", () 
   assert(/ABANDONED/.test(releaseNotes({ name: "c", atircRevokes: "Abandoned" })[0]), "abandoned flagged");
   assert(releaseNotes({ name: "c", phase: "Held" }, [{ ...ev, contract: "other" }]).length === 0, "nothing for a plain contract");
 });
+
+Deno.test("A8 release notes from status.contract.r2Release (rc127), unknown phases raw", () => {
+  const c = (r2Release) => ({ name: "c", phase: "Releasing", step: "releasingGuestRequester", r2Release });
+  assert(releaseNotes(c({ phase: "Requested", requestedAt: "t1" }))[0] === "R2 release: asked t1, waiting [Requested]", "waiting");
+  assert(releaseNotes(c({ phase: "Released", ok: true, requestedAt: "t1", answeredAt: "t2" }))[0] === "R2 release: guest released (t2) [Released]", "ok");
+  assert(releaseNotes(c({ phase: "TimedOut", ok: false, message: "no answer in 12m0s" }))[0] ===
+    "R2 release: FAILED/TIMED OUT: no answer in 12m0s [TimedOut]", "failed");
+  assert(releaseNotes(c({ phase: "SomethingNew", requestedAt: "t1" }))[0].includes("[SomethingNew]"), "unknown phase shown raw");
+  assert(releaseNotes(c({ requestedAt: "t1" })).length === 1, "the answer replaces the wait line");
+});

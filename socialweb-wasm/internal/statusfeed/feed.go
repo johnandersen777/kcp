@@ -70,6 +70,9 @@ type Contract struct {
 	// status.atircRevokes (Pending|Done|Abandoned), run before Released.
 	Step         string `json:"step,omitempty"`
 	AtircRevokes string `json:"atircRevokes,omitempty"`
+	// R2Release is status.contract.r2Release: the A8 cascade's guest
+	// answer (phase values from assoc-b's rc127 commit; passed through raw).
+	R2Release *R2Release `json:"r2Release,omitempty"`
 
 	SecretsFetchedAt string    `json:"secretsFetchedAt,omitempty"`
 	Release          bool      `json:"release,omitempty"`
@@ -86,6 +89,16 @@ type Contract struct {
 	// GuestRequester is status.contract.guestRequester: the DID the guest's
 	// socialweb-computer (R2) reported and whether the requester verified it.
 	GuestRequester *GuestRequester `json:"guestRequester,omitempty"`
+}
+
+// R2Release is the guest requester's answer to guest.r2Release; OK is nil
+// until it answered.
+type R2Release struct {
+	Phase       string `json:"phase,omitempty"`
+	OK          *bool  `json:"ok,omitempty"`
+	Message     string `json:"message,omitempty"`
+	RequestedAt string `json:"requestedAt,omitempty"`
+	AnsweredAt  string `json:"answeredAt,omitempty"`
 }
 
 // GuestRequester is the R2 guest's reported requester DID.
@@ -333,6 +346,17 @@ func contract(u *unstructured.Unstructured) Contract {
 	c.FromGuest, _, _ = unstructured.NestedBool(u.Object, "spec", "association", "fromGuest")
 	c.Step, _, _ = unstructured.NestedString(u.Object, "status", "execution", "step")
 	c.AtircRevokes, _, _ = unstructured.NestedString(u.Object, "status", "atircRevokes")
+	if rel, ok, _ := unstructured.NestedMap(u.Object, "status", "contract", "r2Release"); ok {
+		r := &R2Release{}
+		r.Phase, _ = rel["phase"].(string)
+		r.Message, _ = rel["message"].(string)
+		r.RequestedAt, _ = rel["requestedAt"].(string)
+		r.AnsweredAt, _ = rel["answeredAt"].(string)
+		if answer, ok := rel["ok"].(bool); ok {
+			r.OK = &answer
+		}
+		c.R2Release = r
+	}
 	networks, _, _ := unstructured.NestedSlice(u.Object, "status", "contract", "networks")
 	for _, raw := range networks {
 		n, _ := raw.(map[string]any)
