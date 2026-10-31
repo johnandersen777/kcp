@@ -382,54 +382,6 @@ func (s *Store) create(ctx context.Context, key string, obj runtime.Object, ttl 
 	return stored, m, nil
 }
 
-// mergeSnapshot upserts the snapshot's items into the store as Added or
-// Modified watch events and leaves every other object in place. Unlike
-// RestoreWith (a boot-time replacement), this is safe on a live apiserver:
-// replacing the store would look like a mass delete to every informer.
-func (s *Store) mergeSnapshot(snap *Snapshot) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	upserts := 0
-	for key, raw := range snap.Items {
-		decode, ok := decoderFor(key)
-		if !ok {
-			continue // its API is not installed in this process
-		}
-		obj, err := decode(raw)
-		if err != nil {
-			return upserts, fmt.Errorf("decoding item %q: %w", key, err)
-		}
-		typ := watch.Modified
-		if _, exists := s.objects[key]; !exists {
-			typ = watch.Added
-		}
-		s.rv++
-		if err := s.versioner.UpdateObject(obj, s.rv); err != nil {
-			s.rv--
-			return upserts, fmt.Errorf("updating resource version of %q: %w", key, err)
-		}
-		s.objects[key] = obj
-		if cluster := snap.Clusters[key]; cluster != "" {
-			m := s.objectMeta[key]
-			m.cluster = logicalcluster.Name(cluster)
-			s.objectMeta[key] = m
-		}
-		if shard := snap.Shards[key]; shard != "" {
-			m := s.objectMeta[key]
-			m.shard = genericapirequest.Shard(shard)
-			s.objectMeta[key] = m
-		}
-		s.changedLocked(key)
-		s.recordEventLocked(key, typ, obj)
-		s.broadcastLocked(key, typ, obj)
-		upserts++
-	}
-	if upserts > 0 {
-		noteMutation()
-	}
-	return upserts, nil
-}
-
 // Get implements storage.Interface.
 func (s *Store) Get(ctx context.Context, key string, opts kstorage.GetOptions, objPtr runtime.Object) error {
 	obj, m, err := s.get(key, opts)

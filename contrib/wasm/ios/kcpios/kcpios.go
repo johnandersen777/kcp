@@ -476,6 +476,11 @@ func InfraSnapshot() (string, error) {
 // Added/Modified watch events (never replacing the store). Call it after the
 // socialweb provider's CRDs are registered (after the requester starts):
 // RestoreResources needs a decoder per resource.
+// RestoreInfra inserts a snapshot from InfraSnapshot into the running kcp as
+// creates would (insert-only: a live object wins, ADDED watch events, nothing
+// deleted), using the storage package's MergeAll. Call it from the embedded
+// BeforeRequester hook once the socialweb schemas exist and before the
+// requester controllers start.
 func RestoreInfra(snapshot string) error {
 	mu.Lock()
 	running := srv != nil
@@ -490,7 +495,12 @@ func RestoreInfra(snapshot string) error {
 	if err != nil {
 		return fmt.Errorf("kcpios: infra snapshot: %w", err)
 	}
-	return storage.RestoreResources(raw)
+	inserted, err := storage.MergeAll(raw)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "kcpios: infra restore inserted %d object(s)\n", inserted)
+	return nil
 }
 
 // Stop shuts the apiserver down and clears process state.

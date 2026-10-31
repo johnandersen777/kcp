@@ -219,38 +219,6 @@ func SnapshotResources(fragments []string) ([]byte, error) {
 	return json.Marshal(out)
 }
 
-// RestoreResources merges one SnapshotResources envelope into the running
-// stores: named objects are upserted with Added/Modified watch events, and
-// objects the snapshot does not name stay untouched. Use it for a live
-// apiserver; RestoreAll replaces each store, which on a running server looks
-// like a mass delete to every informer and crashes them.
-func RestoreResources(data []byte) error {
-	if len(data) == 0 {
-		return nil
-	}
-	if err := CheckSnapshot(data); err != nil {
-		return err
-	}
-	var all All
-	if err := json.Unmarshal(data, &all); err != nil {
-		return fmt.Errorf("%w: %v", ErrUnreadableSnapshot, err)
-	}
-	for name, storeRaw := range all.Stores {
-		var snap Snapshot
-		if err := json.Unmarshal(storeRaw, &snap); err != nil {
-			return fmt.Errorf("store %q: %w", name, err)
-		}
-		upserts, err := Shared(name).mergeSnapshot(&snap)
-		if err != nil {
-			return fmt.Errorf("store %q: %w", name, err)
-		}
-		if upserts > 0 {
-			fmt.Fprintf(os.Stderr, "restore (merge): store %q: %d object(s)\n", name, upserts)
-		}
-	}
-	return nil
-}
-
 // skipSnapshotKey drops kcp's own bootstrap state: the cache store rebuilds
 // from the registry, and leases/configmaps/RBAC in the system workspaces are
 // recreated at boot. Restoring them makes the apiserver fight its own
