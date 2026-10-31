@@ -241,6 +241,38 @@ func TestAdmission(t *testing.T) {
 			wantErr: "forbidden: modification of reserved label: \"some.kcp.io\"",
 		},
 		{
+			// kcp.io/shard makes the store keep a client-chosen uid and
+			// creationTimestamp (registry/rest/meta.go): only privileged
+			// writers (the cache server path) may set it.
+			testName: "created kcp.io/shard annotation",
+			attr: newAttr(
+				&v1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "foo",
+						Annotations: map[string]string{"kcp.io/shard": "root"},
+					},
+				},
+				nil,
+				admission.Create,
+				&user.DefaultInfo{},
+			),
+			wantErr: "forbidden: modification of reserved annotation: \"kcp.io/shard\"",
+		},
+		{
+			testName: "created kcp.io/shard annotation as privileged system user",
+			attr: newAttr(
+				&v1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "foo",
+						Annotations: map[string]string{"kcp.io/shard": "root"},
+					},
+				},
+				nil,
+				admission.Create,
+				&user.DefaultInfo{Groups: []string{user.SystemPrivilegedGroup}},
+			),
+		},
+		{
 			testName: "created kcp.io label as privileged system user",
 			attr: newAttr(
 				&v1.Pod{
