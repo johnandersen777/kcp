@@ -88,15 +88,17 @@ func Start(dir, snapshot string) (string, error) {
 	_ = os.Setenv("KCP_LOW_MEMORY", "1")
 
 	ctx, cancelFn := context.WithCancel(context.Background())
-	// Boot with two cores left for the UI: Go threads ignore Swift QoS and
-	// would otherwise take every core while kcp warms up. Restore the default
-	// parallelism once the control plane is ready.
+	// Keep the UI responsive for the whole process lifetime: Go threads ignore
+	// Swift QoS, and a phone must keep cores for the chat whatever kcp does.
+	// Cap at 2 (owner device report, 2026-10-31), leaving the rest to the app.
 	procs := runtime.NumCPU() - 2
+	if procs > 2 {
+		procs = 2
+	}
 	if procs < 1 {
 		procs = 1
 	}
-	previousProcs := runtime.GOMAXPROCS(procs)
-	defer runtime.GOMAXPROCS(previousProcs)
+	runtime.GOMAXPROCS(procs)
 	booted, err := real.Boot(ctx, real.Config{
 		RootDir:         dir,
 		Address:         address,
@@ -112,11 +114,9 @@ func Start(dir, snapshot string) (string, error) {
 	mu.Lock()
 	srv, cancel = booted, cancelFn
 	mu.Unlock()
-	// Collect harder once boot is done: iOS jetsam kills the app long before a
-	// browser tab's wasm limit. Boot keeps the default GOGC for speed. The soft
-	// memory limit keeps the heap from growing into jetsam territory; raise it
-	// if the requester graph needs more headroom on newer devices.
-	debug.SetGCPercent(25)
+	// A soft memory limit keeps the heap out of jetsam territory. Leave GOGC at
+	// its default (100): collecting at 25 burned CPU continuously on a phone
+	// and made the chat unusable once kcp was up (owner device report).
 	debug.SetMemoryLimit(1 << 30)
 	return statusJSON()
 }
@@ -161,15 +161,17 @@ func StartRequester(configJSON string, sandbox embedded.PolicySandbox) (string, 
 	}
 
 	type config struct {
-		Handle           string `json:"handle"`
-		DID              string `json:"did"`
-		PDSURL           string `json:"pdsUrl"`
-		OAuthClientID    string `json:"oauthClientId"`
-		OAuthRedirectURI string `json:"oauthRedirectUri"`
-		StateDir         string `json:"stateDir"`
-		Origin           string `json:"origin"`
-		Restore          string `json:"restore"`
-		ForceApply       bool   `json:"forceApply"`
+		Handle                string `json:"handle"`
+		DID                   string `json:"did"`
+		PDSURL                string `json:"pdsUrl"`
+		OAuthClientID         string `json:"oauthClientId"`
+		OAuthRedirectURI      string `json:"oauthRedirectUri"`
+		StateDir              string `json:"stateDir"`
+		Origin                string `json:"origin"`
+		Restore               string `json:"restore"`
+		ForceApply            bool   `json:"forceApply"`
+		ProviderIdentitiesB64 string `json:"providerIdentitiesB64"`
+		InfraRestoreB64       string `json:"infraRestoreB64"`
 	}
 	var cfg config
 	if configJSON != "" {
@@ -188,20 +190,54 @@ func StartRequester(configJSON string, sandbox embedded.PolicySandbox) (string, 
 		}
 		restore = raw
 	}
+	var providerIdentities []byte
+	if cfg.ProviderIdentitiesB64 != "" {
+		raw, err := base64.StdEncoding.DecodeString(cfg.ProviderIdentitiesB64)
+		if err != nil {
+			return "", fmt.Errorf("kcpios: provider identities: %w", err)
+		}
+		providerIdentities = raw
+	}
+	var infraRestore []byte
+	if cfg.InfraRestoreB64 != "" {
+		raw, err := base64.StdEncoding.DecodeString(cfg.InfraRestoreB64)
+		if err != nil {
+			return "", fmt.Errorf("kcpios: infra restore snapshot: %w", err)
+		}
+		infraRestore = raw
+	}
+
+	// BeforeRequester runs after the provider identities and the
+	// market-requester schemas/bindings exist and before the requester
+	// controllers start: the restored EphemeralInfra and ComputeContracts are
+	// in storage by the time the contract informer first lists.
+	beforeRequester := func(context.Context) error {
+		if len(infraRestore) == 0 {
+			return nil
+		}
+		inserted, err := storage.MergeAll(infraRestore)
+		if err != nil {
+			return fmt.Errorf("kcpios: infra restore: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "kcpios: infra restore inserted %d object(s)\n", inserted)
+		return nil
+	}
 
 	ctx, cancelFn := context.WithCancel(context.Background())
 	r, err := embedded.Start(ctx, embedded.Config{
-		Rest:             server.RestConfig(),
-		StateDir:         cfg.StateDir,
-		Origin:           cfg.Origin,
-		Handle:           cfg.Handle,
-		DID:              cfg.DID,
-		PDSURL:           cfg.PDSURL,
-		OAuthClientID:    cfg.OAuthClientID,
-		OAuthRedirectURI: cfg.OAuthRedirectURI,
-		ForceApply:       cfg.ForceApply,
-		Restore:          restore,
-		PolicySandbox:    sandbox,
+		Rest:               server.RestConfig(),
+		StateDir:           cfg.StateDir,
+		Origin:             cfg.Origin,
+		Handle:             cfg.Handle,
+		DID:                cfg.DID,
+		PDSURL:             cfg.PDSURL,
+		OAuthClientID:      cfg.OAuthClientID,
+		OAuthRedirectURI:   cfg.OAuthRedirectURI,
+		ForceApply:         cfg.ForceApply,
+		Restore:            restore,
+		PolicySandbox:      sandbox,
+		ProviderIdentities: providerIdentities,
+		BeforeRequester:    beforeRequester,
 	})
 	if err != nil {
 		cancelFn()
@@ -481,26 +517,19 @@ func InfraSnapshot() (string, error) {
 // deleted), using the storage package's MergeAll. Call it from the embedded
 // BeforeRequester hook once the socialweb schemas exist and before the
 // requester controllers start.
-func RestoreInfra(snapshot string) error {
-	mu.Lock()
-	running := srv != nil
-	mu.Unlock()
-	if !running {
-		return fmt.Errorf("kcpios: kcp is not running")
+// ProviderIdentities returns the provider APIExport identity secrets as the
+// JSON envelope embedded.Config.ProviderIdentities takes, base64 encoded. KEY
+// MATERIAL: the caller seals it; never log or store it in the clear.
+func ProviderIdentities() (string, error) {
+	rq := currentRequester()
+	if rq == nil {
+		return "", fmt.Errorf("kcpios: requester is not running")
 	}
-	if snapshot == "" {
-		return nil
-	}
-	raw, err := base64.StdEncoding.DecodeString(snapshot)
+	raw, err := rq.ProviderIdentities(context.Background())
 	if err != nil {
-		return fmt.Errorf("kcpios: infra snapshot: %w", err)
+		return "", err
 	}
-	inserted, err := storage.MergeAll(raw)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "kcpios: infra restore inserted %d object(s)\n", inserted)
-	return nil
+	return base64.StdEncoding.EncodeToString(raw), nil
 }
 
 // Stop shuts the apiserver down and clears process state.

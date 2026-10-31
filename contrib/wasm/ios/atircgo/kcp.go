@@ -80,8 +80,9 @@ func KCPInfraSnapshot() (string, error) {
 	return kcpios.InfraSnapshot()
 }
 
-// KCPRestoreInfra restores a KCPInfraSnapshot into the running kcp. Call it
-// after the requester started (its provider sets register the decoders).
-func KCPRestoreInfra(snapshot string) error {
-	return kcpios.RestoreInfra(snapshot)
+// KCPProviderIdentities returns the provider APIExport identity secrets as
+// the base64 JSON envelope StartRequester takes in providerIdentitiesB64. KEY
+// MATERIAL: seal it before writing it anywhere; never log it.
+func KCPProviderIdentities() (string, error) {
+	return kcpios.ProviderIdentities()
 }
