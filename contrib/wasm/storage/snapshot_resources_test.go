@@ -20,7 +20,63 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+
+	kstorage "k8s.io/apiserver/pkg/storage"
+
+	fetchv1alpha1 "github.com/kcp-dev/kcp/contrib/wasm/apis/fetch/v1alpha1"
 )
+
+func TestRestoreResourcesMerges(t *testing.T) {
+	RegisterDecoder(prefix, decodeFetch)
+	ctx := context.Background()
+	name := "restore-resources-merge-test"
+	s := Shared(name)
+	kept := key("kept")
+	unrelated := "/registry/other.example.com/widgets/unrelated"
+	if err := s.Create(ctx, kept, newFetch("kept"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Create(ctx, unrelated, newFetch("unrelated"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	before, _, err := s.get(kept, kstorage.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRV := before.(*fetchv1alpha1.Fetch).ResourceVersion
+
+	next, err := json.Marshal(newFetch("next"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := json.Marshal(newFetch("kept"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := message{Version: allVersion, Stores: map[string]*Snapshot{name: {
+		ResourceVersion: 10,
+		Items:           map[string]json.RawMessage{key("next"): next, kept: item},
+	}}}
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreResources(raw); err != nil {
+		t.Fatalf("RestoreResources: %v", err)
+	}
+	for _, key := range []string{kept, key("next"), unrelated} {
+		if _, _, err := s.get(key, kstorage.GetOptions{}); err != nil {
+			t.Fatalf("%q missing after merge: %v", key, err)
+		}
+	}
+	after, _, err := s.get(kept, kstorage.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rv := after.(*fetchv1alpha1.Fetch).ResourceVersion; rv == beforeRV {
+		t.Fatalf("merged object kept its resource version %q", rv)
+	}
+}
 
 func TestSnapshotResourcesKeepsOnlySelectedKeys(t *testing.T) {
 	ctx := context.Background()

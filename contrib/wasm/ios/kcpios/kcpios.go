@@ -465,9 +465,10 @@ func InfraSnapshot() (string, error) {
 	return base64.StdEncoding.EncodeToString(raw), nil
 }
 
-// RestoreInfra restores a snapshot from InfraSnapshot into the running kcp.
-// Call it after the socialweb provider's CRDs are registered (after the
-// requester starts): RestoreAll needs a decoder per resource.
+// RestoreInfra merges a snapshot from InfraSnapshot into the running kcp as
+// Added/Modified watch events (never replacing the store). Call it after the
+// socialweb provider's CRDs are registered (after the requester starts):
+// RestoreResources needs a decoder per resource.
 func RestoreInfra(snapshot string) error {
 	mu.Lock()
 	running := srv != nil
@@ -482,7 +483,7 @@ func RestoreInfra(snapshot string) error {
 	if err != nil {
 		return fmt.Errorf("kcpios: infra snapshot: %w", err)
 	}
-	return storage.RestoreAll(raw)
+	return storage.RestoreResources(raw)
 }
 
 // Stop shuts the apiserver down and clears process state.
