@@ -190,6 +190,35 @@ func SnapshotAll() ([]byte, error) {
 	return data, err
 }
 
+// SnapshotResources captures only the objects whose storage key contains one
+// of the fragments, in the same envelope RestoreAll reads. The app uses it to
+// persist the session's EphemeralInfra and ComputeContracts across restarts
+// without the full state (whose restore rebuilds every informer).
+func SnapshotResources(fragments []string) ([]byte, error) {
+	keep := func(key string) bool {
+		if skipSnapshotKey(key) {
+			return false
+		}
+		for _, fragment := range fragments {
+			if strings.Contains(key, fragment) {
+				return true
+			}
+		}
+		return false
+	}
+	out := message{Version: allVersion, Stores: map[string]*Snapshot{}}
+	for name, store := range SharedStores() {
+		part, err := store.snapshotWhere(keep)
+		if err != nil {
+			return nil, fmt.Errorf("snapshotting store %q: %w", name, err)
+		}
+		if len(part.Items) > 0 {
+			out.Stores[name] = part
+		}
+	}
+	return json.Marshal(out)
+}
+
 // skipSnapshotKey drops kcp's own bootstrap state: the cache store rebuilds
 // from the registry, and leases/configmaps/RBAC in the system workspaces are
 // recreated at boot. Restoring them makes the apiserver fight its own

@@ -73,3 +73,15 @@ func KCPRequesterReady() bool {
 func KCPRequesterSnapshot() (string, error) {
 	return kcpios.RequesterSnapshot()
 }
+
+// KCPInfraSnapshot returns the session EphemeralInfra and ComputeContracts,
+// base64 encoded, so a Release can finish after a restart.
+func KCPInfraSnapshot() (string, error) {
+	return kcpios.InfraSnapshot()
+}
+
+// KCPRestoreInfra restores a KCPInfraSnapshot into the running kcp. Call it
+// after the requester started (its provider sets register the decoders).
+func KCPRestoreInfra(snapshot string) error {
+	return kcpios.RestoreInfra(snapshot)
+}

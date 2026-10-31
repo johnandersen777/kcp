@@ -441,6 +441,50 @@ func Snapshot() (string, error) {
 	return base64.StdEncoding.EncodeToString(raw), nil
 }
 
+// infraSnapshotFragments select the session state a Release must survive a
+// restart with (plan 0038): the session EphemeralInfra and its contracts.
+var infraSnapshotFragments = []string{
+	"/registry/socialweb.computer/ephemeralinfras/",
+	"/registry/socialweb.computer/computecontracts/",
+}
+
+// InfraSnapshot returns the session EphemeralInfra and ComputeContracts,
+// base64 encoded, in the envelope RestoreInfra reads. It is small (a few KB),
+// so the app can persist it across restarts without the full state.
+func InfraSnapshot() (string, error) {
+	mu.Lock()
+	running := srv != nil
+	mu.Unlock()
+	if !running {
+		return "", fmt.Errorf("kcpios: kcp is not running")
+	}
+	raw, err := storage.SnapshotResources(infraSnapshotFragments)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(raw), nil
+}
+
+// RestoreInfra restores a snapshot from InfraSnapshot into the running kcp.
+// Call it after the socialweb provider's CRDs are registered (after the
+// requester starts): RestoreAll needs a decoder per resource.
+func RestoreInfra(snapshot string) error {
+	mu.Lock()
+	running := srv != nil
+	mu.Unlock()
+	if !running {
+		return fmt.Errorf("kcpios: kcp is not running")
+	}
+	if snapshot == "" {
+		return nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(snapshot)
+	if err != nil {
+		return fmt.Errorf("kcpios: infra snapshot: %w", err)
+	}
+	return storage.RestoreAll(raw)
+}
+
 // Stop shuts the apiserver down and clears process state.
 func Stop() {
 	mu.Lock()

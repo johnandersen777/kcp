@@ -1056,6 +1056,33 @@ func (s *Store) persistPart(full bool, skip func(string) bool) (part *Snapshot, 
 	return part, full || len(part.Items) > 0 || len(part.Deletes) > 0, nil
 }
 
+// snapshotWhere copies the objects keep accepts into a Snapshot, with the
+// same identity fields persistPart records. It never touches the dirty sets.
+func (s *Store) snapshotWhere(keep func(string) bool) (*Snapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	s.encMu.Lock()
+	defer s.encMu.Unlock()
+	part := &Snapshot{ResourceVersion: s.rv, Items: map[string]json.RawMessage{}, Clusters: map[string]string{}, Shards: map[string]string{}}
+	for key, obj := range s.objects {
+		if !keep(key) {
+			continue
+		}
+		raw, err := s.encodedLocked(key, obj)
+		if err != nil {
+			return nil, err
+		}
+		part.Items[key] = raw
+		if m := s.objectMeta[key]; !m.cluster.Empty() {
+			part.Clusters[key] = m.cluster.String()
+		}
+		if m := s.objectMeta[key]; !m.shard.Empty() {
+			part.Shards[key] = m.shard.String()
+		}
+	}
+	return part, nil
+}
+
 // derive returns fn(src) for the stored object src at key, computed once per
 // owner while src is the current object at key. The result is shared and
 // must not be modified. Objects that are no longer current (deleted, or
