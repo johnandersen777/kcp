@@ -49,7 +49,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "smoke: requester start:", err)
 		os.Exit(1)
 	}
-	time.Sleep(2 * time.Second)
+	time.Sleep(20 * time.Second)
 	group, err := kcpios.Request("GET", "/apis/socialweb.computer", "", "")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "smoke: group:", err)
@@ -60,6 +60,30 @@ func main() {
 		groupBody = groupBody[:200]
 	}
 	fmt.Println("smoke: socialweb group:", string(groupBody))
+
+	for _, path := range []string{
+		"/apis/tenancy.kcp.io/v1alpha1/workspaces?limit=50",
+		"/apis/apis.kcp.io/v1alpha1/apibindings",
+		"/apis/socialweb.computer/v1alpha1",
+		"/apis/socialweb.computer/v1alpha1/marketidentities/requester",
+		"/apis/socialweb.computer/v1alpha1/marketidentities",
+		"/apis/socialweb.computer/v1alpha1/marketrequesters",
+		"/apis/apis.kcp.io/v1alpha1/apibindings?limit=50",
+		"/clusters/root:socialweb-provider/apis",
+		"/clusters/root:socialweb-provider/apis/socialweb.computer/v1alpha1",
+		"/clusters/root:socialweb-provider/apis/socialweb.computer/v1alpha1/marketidentities/requester",
+	} {
+		out, err := kcpios.Request("GET", path, "", "")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "smoke: %s: %v\n", path, err)
+			continue
+		}
+		body, _ := base64.StdEncoding.DecodeString(extractBody(out))
+		if len(body) > 300 {
+			body = body[:300]
+		}
+		fmt.Printf("smoke: %s -> %s\n", path, string(body))
+	}
 	kcpios.Stop()
 }
 

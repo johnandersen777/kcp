@@ -148,7 +148,7 @@ func statusJSON() (string, error) {
 // StartRequester starts the socialweb market requester in-process, on top of
 // the running kcp. configJSON carries the signed-in identity (handle, DID, PDS
 // URL and OAuth client fields); see the Swift bridge.
-func StartRequester(configJSON string) (string, error) {
+func StartRequester(configJSON string, sandbox embedded.PolicySandbox) (string, error) {
 	mu.Lock()
 	server, dir := srv, rootDir
 	running := requester != nil
@@ -201,10 +201,21 @@ func StartRequester(configJSON string) (string, error) {
 		OAuthRedirectURI: cfg.OAuthRedirectURI,
 		ForceApply:       cfg.ForceApply,
 		Restore:          restore,
+		PolicySandbox:    sandbox,
 	})
 	if err != nil {
 		cancelFn()
 		return "", fmt.Errorf("kcpios: requester: %w", err)
+	}
+
+	// Start returns once the provider sets are applied; the root composes the
+	// requester resources asynchronously. Wait for the MarketRequester before
+	// callers read or patch the MarketIdentity.
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer waitCancel()
+	if err := r.WaitReady(waitCtx); err != nil {
+		cancelFn()
+		return "", fmt.Errorf("kcpios: requester not ready: %w", err)
 	}
 
 	mu.Lock()
@@ -238,6 +249,18 @@ func RequesterSnapshot() (string, error) {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(raw), nil
+}
+
+// PutContractSecrets writes the bundle the requester reads through
+// spec.secretsRef. Call it before creating the contract.
+func PutContractSecrets(contract string, bundleJSON []byte) error {
+	mu.Lock()
+	r := requester
+	mu.Unlock()
+	if r == nil {
+		return fmt.Errorf("kcpios: requester is not running")
+	}
+	return r.PutContractSecrets(context.Background(), contract, bundleJSON)
 }
 
 // Request performs one HTTPS request against the loopback apiserver and
