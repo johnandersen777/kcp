@@ -281,9 +281,20 @@ func Request(method, path, headersJSON, body string) (string, error) {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
+	var headers map[string]string
+	if headersJSON != "" {
+		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
+			return "", fmt.Errorf("kcpios: headers: %w", err)
+		}
+	}
+	// X-Atirc-Direct marks an app request that must reach the apiserver, not
+	// the requester's in-process exposure: once the requester runs, its
+	// handlers intercept /apis/socialweb... and answer from its own view.
+	direct := strings.EqualFold(headers["X-Atirc-Direct"], "1")
+	delete(headers, "X-Atirc-Direct")
 	// The socialweb requester owns the OAuth callback and the exposure/ingress
 	// paths it composes. Try it first, with the un-rewritten path.
-	if rq := currentRequester(); rq != nil {
+	if rq := currentRequester(); rq != nil && !direct {
 		if out, handled, err := serveRequester(rq, method, path, headersJSON, body, server); handled {
 			return out, err
 		}
@@ -302,11 +313,7 @@ func Request(method, path, headersJSON, body string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if headersJSON != "" {
-		var headers map[string]string
-		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
-			return "", fmt.Errorf("kcpios: headers: %w", err)
-		}
+	if len(headers) > 0 {
 		for key, value := range headers {
 			if strings.EqualFold(key, "host") {
 				req.Host = value
