@@ -195,6 +195,71 @@ func (s *Store) Restore(data []byte, decode func([]byte) (runtime.Object, error)
 	return s.RestoreWith(data, func(_ string, raw []byte) (runtime.Object, error) { return decode(raw) })
 }
 
+// MergeWith inserts the snapshot's items whose keys the live store does not
+// hold, as creates would: each gets a new resource version and an ADDED event,
+// and is persisted. Keys the store already holds are skipped (the live object
+// wins). Unlike RestoreWith it never replaces the store, so it is safe on a
+// running apiserver, e.g. to bring back a few saved objects after a restart.
+// It returns how many items it inserted.
+func (s *Store) MergeWith(data []byte, decode func(key string, raw []byte) (runtime.Object, error)) (int, error) {
+	var snap Snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return 0, fmt.Errorf("decoding snapshot: %w", err)
+	}
+	keys := make([]string, 0, len(snap.Items))
+	for key := range snap.Items {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	objects := make(map[string]runtime.Object, len(keys))
+	for _, key := range keys {
+		obj, err := decode(key, snap.Items[key])
+		if err != nil {
+			return 0, fmt.Errorf("decoding item %q: %w", key, err)
+		}
+		objects[key] = obj
+	}
+
+	added := 0
+	var err error
+	s.mu.Lock()
+	for _, key := range keys {
+		if _, exists := s.objects[key]; exists {
+			continue
+		}
+		stored := objects[key]
+		s.rv++
+		if err = s.versioner.UpdateObject(stored, s.rv); err != nil {
+			s.rv--
+			err = fmt.Errorf("setting the resource version of %q: %w", key, err)
+			break
+		}
+		var m objectMeta
+		if cluster, ok := snap.Clusters[key]; ok {
+			m.cluster = logicalcluster.Name(cluster)
+		}
+		if shard, ok := snap.Shards[key]; ok {
+			m.shard = genericapirequest.Shard(shard)
+		}
+		s.objects[key] = stored
+		s.objectMeta[key] = m
+		s.changedLocked(key)
+		s.recordEventLocked(key, watch.Added, stored)
+		s.broadcastLocked(key, watch.Added, stored)
+		added++
+	}
+	if added > 0 {
+		noteMutation()
+	}
+	snapshot := s.snapshotForHandlerLocked()
+	s.mu.Unlock()
+
+	if added > 0 {
+		s.persist(snapshot)
+	}
+	return added, err
+}
+
 // RestoreWith is Restore with the storage key passed to the decoder. The
 // key lets a heterogeneous apiserver pick the resource's typed decoder.
 func (s *Store) RestoreWith(data []byte, decode func(key string, raw []byte) (runtime.Object, error)) error {
