@@ -209,13 +209,12 @@ func StartRequester(configJSON string, sandbox embedded.PolicySandbox) (string, 
 	}
 
 	// Start returns once the provider sets are applied; the root composes the
-	// requester resources asynchronously. Wait for the MarketRequester before
-	// callers read or patch the MarketIdentity.
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// requester resources asynchronously. Nudge callers toward readiness but
+	// never hold the UI for the whole compose: the app polls MarketIdentity.
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer waitCancel()
 	if err := r.WaitReady(waitCtx); err != nil {
-		cancelFn()
-		return "", fmt.Errorf("kcpios: requester not ready: %w", err)
+		fmt.Fprintln(os.Stderr, "kcpios: requester still composing:", err)
 	}
 
 	mu.Lock()

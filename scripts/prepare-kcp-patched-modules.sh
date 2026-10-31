@@ -112,29 +112,12 @@ PY
 
 overlay="${repo_root}/contrib/wasm/_overlay"
 
-# The storagebackend factory gains a memory:// backend.
-copy_module k8s.io/apiserver "${work}/apiserver"
-cp "${overlay}/apiserver/factory.go" \
-  "${work}/apiserver/pkg/storage/storagebackend/factory/factory.go"
-if [[ "${mode}" == "js" ]]; then
-  cp "${overlay}/apiserver/serving_unix.go" \
-    "${work}/apiserver/pkg/server/options/serving_unix.go"
-  cp "${overlay}/apiserver/serving_with_loopback.go" \
-    "${work}/apiserver/pkg/server/options/serving_with_loopback.go"
-  # Admission plugins hold each write up to 10s while their informers sync,
-  # then reject it as not ready. During browser bootstrap that stalls RBAC
-  # and kube-system creation for the full timeout per request; fail fast and
-  # let the bootstrap retry loops come back once the caches are warm.
-  replace_in "${work}/apiserver/pkg/admission/handler.go" \
-    'timeToWaitForReady = 10 * time.Second' 'timeToWaitForReady = 1 * time.Second'
-fi
-
-if [[ "${mode}" == "js" ]]; then
-  # Server-side apply bodies are JSON from every client here, but the apply
-  # patcher decodes them with the YAML parser (sigs.k8s.io/yaml goes through
-  # go-yaml first): on the iPhone that was ~600 MB of the ~3.7 GB allocated
-  # around one ComputeContract. JSON bodies decode with sigs.k8s.io/json
-  # (ints preserved, as the YAML route does); anything else stays on YAML.
+# Server-side apply bodies are JSON from every client here, but the apply
+# patcher decodes them with the YAML parser (sigs.k8s.io/yaml goes through
+# go-yaml first): JSON escapes such as \n then fail as "unknown escape
+# character". JSON bodies decode with sigs.k8s.io/json; anything else stays on
+# YAML. Needed in both modes (native iOS hits the same path).
+patch_apply_json() {
   replace_in "${work}/apiserver/pkg/endpoints/handlers/patch.go" \
     'p.mechanism = newApplyPatcher(p, scope.FieldManager, yaml.Unmarshal, yaml.UnmarshalStrict)' \
     'p.mechanism = newApplyPatcher(p, scope.FieldManager, applyUnmarshal, applyUnmarshalStrict)'
@@ -175,6 +158,32 @@ func applyUnmarshalStrict(data []byte, v interface{}) error {
 }
 GO
   fi
+}
+
+# The storagebackend factory gains a memory:// backend.
+copy_module k8s.io/apiserver "${work}/apiserver"
+cp "${overlay}/apiserver/factory.go" \
+  "${work}/apiserver/pkg/storage/storagebackend/factory/factory.go"
+if [[ "${mode}" == "js" ]]; then
+  cp "${overlay}/apiserver/serving_unix.go" \
+    "${work}/apiserver/pkg/server/options/serving_unix.go"
+  cp "${overlay}/apiserver/serving_with_loopback.go" \
+    "${work}/apiserver/pkg/server/options/serving_with_loopback.go"
+  # Admission plugins hold each write up to 10s while their informers sync,
+  # then reject it as not ready. During browser bootstrap that stalls RBAC
+  # and kube-system creation for the full timeout per request; fail fast and
+  # let the bootstrap retry loops come back once the caches are warm.
+  replace_in "${work}/apiserver/pkg/admission/handler.go" \
+    'timeToWaitForReady = 10 * time.Second' 'timeToWaitForReady = 1 * time.Second'
+fi
+
+# Native iOS hits the same YAML apply path for JSON bodies.
+if [[ "${mode}" == "native" ]]; then
+  patch_apply_json
+fi
+
+if [[ "${mode}" == "js" ]]; then
+  patch_apply_json
 
   # Systemd journal logging is replaced by stderr logging.
   copy_module github.com/coreos/go-systemd/v22 "${work}/go-systemd"
