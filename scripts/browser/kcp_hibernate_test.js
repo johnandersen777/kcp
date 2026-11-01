@@ -123,41 +123,120 @@ Deno.test("page wiring: snapshots get this tab's token and the previous owner's 
   }
 });
 
-// rc131 cold boots: a flush writes records newer than the last snapshot, so
-// the worker asks for a capture right after it; it happens only when the
-// seqs moved, without waiting for the 30 s quiet period.
-Deno.test("capture after a flush: only when the seqs moved, at once", async () => {
-  let seqs = { kcp: 9, socialweb: 0 };
-  const saved = [];
+// rc131 cold boots, without a capture storm (review page-rc131 2e7d88ba5,
+// 1): a flush asks for a capture (requestSoon) that waits until the seqs
+// were still SOON_QUIET_MS and SOON_GAP_MS after the last capture; a hide
+// (request) captures at once. A fake clock drives the loop's tick.
+function clockedLoop({ captured = { kcp: 9, socialweb: 0 } } = {}) {
+  const c = { t: 1_000_000, seqs: { ...captured }, saved: [], tick: null };
   const store = {
     kind: "fake",
     async save(_go, extra, _gzip, beforeCommit) {
       const e = extra();
       await beforeCommit();
-      saved.push(e.seqs.kcp);
+      c.saved.push({ at: c.t, kcp: e.seqs.kcp });
       return { extra: e, bytes: 0, stored: 0, stats: {} };
     },
   };
-  const loop = startHibernation({
+  c.loop = startHibernation({
     go: fakeGo(),
     key: KEY,
     ready: () => true,
-    seqs: () => ({ ...seqs }),
+    seqs: () => ({ ...c.seqs }),
     extra: () => ({}),
-    captured: { kcp: 9, socialweb: 0 }, // the snapshot this load restored
+    captured,
     store,
     log: () => {},
-    timers: { setInterval: () => 0 },
+    timers: { setInterval: (fn) => (c.tick = fn) },
+    now: () => c.t,
   });
-  loop.request(); // a flush that wrote nothing new
-  await settle();
-  assertEquals(saved, [], "no capture without new records");
-  seqs = { kcp: 10, socialweb: 0 }; // the flush persisted one message
-  loop.request();
-  await settle();
-  assertEquals(saved, [10], "captured right after the flush, inside the quiet period");
+  // advance the clock second by second, ticking like the 1 s interval
+  c.run = async (seconds, each = () => {}) => {
+    for (let i = 0; i < seconds; i++) {
+      c.t += 1000;
+      each(i);
+      await c.tick();
+    }
+  };
+  return c;
+}
+
+Deno.test("capture after a flush: once the seqs are still, never for a no-op flush", async () => {
+  const c = clockedLoop();
+  c.loop.requestSoon(); // a flush that wrote nothing new
+  await c.run(5);
+  assertEquals(c.saved, [], "no capture without new records");
+  c.seqs.kcp = 10; // the flush persisted one message
+  c.loop.requestSoon();
+  await c.run(2);
+  assertEquals(c.saved, [], "not before SOON_QUIET_MS of still seqs");
+  await c.run(3);
+  assertEquals(c.saved.map((x) => x.kcp), [10], "captured a few seconds after the flush, long before QUIET_MS (30 s)");
+});
+
+Deno.test("no request: moving seqs capture only after the 30 s quiet period", async () => {
+  const c = clockedLoop();
+  c.loop.requestSoon(); // unchanged seqs: not armed
+  await c.run(1);
+  c.seqs.kcp = 10; // a background write, no flush
+  await c.run(20);
+  assertEquals(c.saved, [], "nothing before the quiet period");
+  await c.run(15);
+  assertEquals(c.saved.length, 1, "the regular capture");
+});
+
+Deno.test("a typical VM lifecycle captures at most about twice", async () => {
+  const c = clockedLoop();
+  // Request VM to Held: ~60 s of requester status writes every 1-2 s, a
+  // flush at each of 7 phase/step changes.
+  await c.run(60, (i) => {
+    if (i % 2 === 0) c.seqs.kcp++;
+    if (i % 9 === 0) c.loop.requestSoon();
+  });
+  await c.run(10); // Held, settled
+  // minutes of use: occasional background writes, no flushes
+  await c.run(120, (i) => {
+    if (i % 40 === 0) c.seqs.kcp++;
+  });
+  // Release: ~15 s of writes, 3 flushes
+  await c.run(15, (i) => {
+    c.seqs.kcp++;
+    if (i % 5 === 0) c.loop.requestSoon();
+  });
+  await c.run(10);
+  // [62 s: Held settled, 141 s: the regular 30 s-quiet capture of a
+  // background write, 208 s: Released settled]: two from flushes.
+  const at = c.saved.map((x) => (x.at - 1_000_000) / 1000);
+  assert(c.saved.length <= 3, `captures at ${JSON.stringify(at)} s`);
+  assertEquals(at.filter((s) => (s > 60 && s <= 70) || s > 195).length, 2, "one per settle point");
+  // the two settle points are captured right away
+  const settledHeld = c.saved.find((x) => x.at > 1_000_000 + 60_000 && x.at <= 1_000_000 + 70_000);
+  assert(settledHeld, "Held captured once settled");
+  const burst = c.saved.filter((x) => x.at <= 1_000_000 + 60_000);
+  assertEquals(burst.length, 0, "no capture during the bidding burst (seqs never still 3 s)");
+});
+
+Deno.test("a hide captures at once; the worker asks requestSoon after a flush", async () => {
+  const c = clockedLoop();
+  c.seqs.kcp = 10;
+  c.loop.request(); // visibilitychange to hidden
+  await new Promise((r) => setTimeout(r, 10));
+  assertEquals(c.saved.map((x) => x.kcp), [10]);
   const worker = await Deno.readTextFile(new URL("./kcp_worker.js", import.meta.url));
-  if (!/flushed: Boolean\(out\?\.flushed\) \}\);[\s\S]{0,400}if \(out\?\.flushed\) hibernation\?\.request\(\);/.test(worker)) {
-    throw new Error("the worker asks for a capture after each flush");
-  }
+  if (!/if \(out\?\.flushed\) hibernation\?\.requestSoon\(\);/.test(worker)) throw new Error("flushes use requestSoon");
+  if (!/type === "hibernate"\) \{\s*hibernation\?\.request\(\);/.test(worker)) throw new Error("hide uses request");
+});
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+Deno.test("restampOwner stamps only the snapshot this load restored", async () => {
+  let stored = { ...meta("tab-a"), wallMs: 5, memFile: "mem-5.gz" };
+  const store = { readMeta: async () => stored, writeMeta: async (m) => void (stored = structuredClone(m)) };
+  const restored = structuredClone(stored);
+  stored = { ...meta("tab-a"), wallMs: 9, memFile: "mem-9.gz" }; // a capture committed since
+  assertEquals(await restampOwner(store, "tab-b", restored), false, "another snapshot");
+  stored = structuredClone(restored);
+  assertEquals(await restampOwner(store, "tab-b", restored), true, "the restored one");
 });

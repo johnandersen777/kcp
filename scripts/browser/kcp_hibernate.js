@@ -318,9 +318,12 @@ const idb = {
  * the seqs matched), stamps the stored snapshot with that owner's token so
  * the next load can use it without a fresh capture first.
  */
-export async function restampOwner(store, token) {
+export async function restampOwner(store, token, restored = null) {
   const meta = await store.readMeta();
   if (!meta?.extra || meta.extra.owner === token) return false;
+  // Only the snapshot this load restored (a capture may have committed since).
+  if (restored && (meta.wallMs !== restored.wallMs || meta.memFile !== restored.memFile ||
+    !sameSeqs(meta.extra.seqs, restored.extra?.seqs))) return false;
   meta.extra.owner = token;
   await store.writeMeta(meta);
   return true;
@@ -400,29 +403,50 @@ export async function tryRestore({ go, module, key, seqs, owner = undefined, sto
  * extra() the JSON-safe worker state to keep. captured is the seqs the stored
  * snapshot already holds (after a restore), or null.
  */
+// A capture asked for after a kcp flush (requestSoon) waits for the seqs to
+// be still this long and for this gap since the last capture: every phase
+// change and action flushes, and each capture copies the whole memory
+// (~780 MiB, ~4 s gzip), an iOS tab-kill risk if they come back to back
+// (review page-rc131 2e7d88ba5, 1). A hide (request) still captures at once.
+export const SOON_QUIET_MS = 3 * 1000;
+export const SOON_GAP_MS = 15 * 1000;
+
 export function startHibernation({
   go, key, ready, seqs, extra, captured = null, gzip = false, store = pickStore(), log, owner = null,
-  timers = globalThis,
+  timers = globalThis, now = Date.now,
 }) {
   let lastSeqs = captured;
   let lastAt = 0;
-  let want = false;
+  let want = false; // a hide: capture as soon as kcp is idle
+  let soon = false; // a flush: capture once still, at most every SOON_GAP_MS
   let running = null; // the in-flight save
   let disabled = false;
   let lastReason = "";
   let seen = seqs();
-  let changedAt = Date.now();
+  let changedAt = now();
 
   const tick = async () => {
     if (disabled || running) return;
     const current = seqs();
     if (!sameSeqs(current, seen)) {
       seen = current;
-      changedAt = Date.now();
+      changedAt = now();
     }
-    if (lastSeqs && sameSeqs(lastSeqs, current)) return;
-    if (!want && Date.now() - changedAt < QUIET_MS) return;
-    if (!want && lastAt && Date.now() - lastAt < EVERY_MS) return;
+    if (lastSeqs && sameSeqs(lastSeqs, current)) {
+      // Nothing new since the last capture: a request is answered.
+      want = false;
+      soon = false;
+      return;
+    }
+    const t = now();
+    if (want) {
+      // a hide: at once
+    } else if (soon) {
+      if (t - changedAt < SOON_QUIET_MS || (lastAt && t - lastAt < SOON_GAP_MS)) return;
+    } else {
+      if (t - changedAt < QUIET_MS) return;
+      if (lastAt && t - lastAt < EVERY_MS) return;
+    }
     const reason = !ready() ? "kcp or socialweb not ready, or a request is in flight" : busy(go);
     if (reason) {
       if (reason !== lastReason) log("debug", `snapshot deferred: ${reason}`);
@@ -442,8 +466,9 @@ export function startHibernation({
       await stillOwner();
       const meta = await store.save(go, () => ({ ...extra(), seqs: seqs(), key, owner: owner?.token ?? null }), gzip, stillOwner);
       lastSeqs = meta.extra.seqs;
-      lastAt = Date.now();
+      lastAt = now();
       want = false;
+      soon = false;
       log("info", `snapshot saved to ${store.kind}: ${(meta.bytes / 1048576).toFixed(0)} MiB memory, ` +
         `${(meta.stored / 1048576).toFixed(0)} MiB stored${gzip ? " (gzip)" : ""}, capture ${meta.stats.captureMs}ms, ` +
         `copy ${meta.stats.copyMs ?? 0}ms, write ${meta.stats.writeMs}ms, total ${ms(t0)}ms`);
@@ -455,6 +480,9 @@ export function startHibernation({
         log("warn", `snapshot failed: ${err?.message ?? err}`);
       }
       if (err?.name === "QuotaExceededError") disabled = true;
+      // A failed capture counts for the gaps: no retry every second.
+      lastAt = now();
+      want = false;
     } finally {
       running = null;
       done();
@@ -462,9 +490,18 @@ export function startHibernation({
   };
   timers.setInterval(tick, 1000);
   return {
+    /** The tab is being hidden: capture as soon as kcp is idle. */
     request() {
       want = true;
       void tick();
+    },
+    /**
+     * kcp just flushed: capture once the seqs were still SOON_QUIET_MS and
+     * SOON_GAP_MS after the last capture, and only if they moved since it.
+     */
+    requestSoon() {
+      if (lastSeqs && sameSeqs(lastSeqs, seqs())) return;
+      soon = true;
     },
     async discard() {
       disabled = true;
