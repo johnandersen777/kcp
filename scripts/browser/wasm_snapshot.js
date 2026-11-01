@@ -186,6 +186,7 @@ export function capture(go, extra = {}) {
     else if (funcIds.has(v)) e = { k: "func", id: funcIds.get(v) };
     else if (paths.has(v)) e = { k: "path", p: paths.get(v) };
     else if (v instanceof Uint8Array) e = { k: "u8", v: b64(v) };
+    else if (isSocket(v)) e = socketEntry(v);
     else {
       e = { k: "unknown", t: typeof v, c: v?.constructor?.name ?? String(v) };
       unknown.push({ id, rc, t: e.t, c: e.c, keys: v ? Object.keys(v).slice(0, 8) : [] });
@@ -216,6 +217,56 @@ export function capture(go, extra = {}) {
   };
   meta.stats.captureMs = Math.round(performance.now() - t0);
   return { meta, memory };
+}
+
+// A WebSocket does not survive a restore: the new page never opened it, so its
+// handlers would never fire and Go would wait out its read timeout (wsconn: 2
+// min) before redialing. capture records the onclose func wrapper Go set on
+// it; restore puts a closed stand-in in its place and, once Go runs, fires
+// that onclose with an abnormal close so Go redials at once.
+export function isSocket(v) {
+  return typeof globalThis.WebSocket === "function" && v instanceof globalThis.WebSocket;
+}
+
+export function socketEntry(v) {
+  const onclose = funcIds.get(v.onclose);
+  return onclose === undefined ? { k: "socket" } : { k: "socket", onclose };
+}
+
+const SOCKET_CLOSED = 3;
+
+export function deadSocket() {
+  return {
+    readyState: SOCKET_CLOSED,
+    binaryType: "arraybuffer",
+    onopen: null,
+    onmessage: null,
+    onerror: null,
+    onclose: null,
+    close() {},
+    send() {
+      throw new Error("this WebSocket did not survive the memory snapshot");
+    },
+  };
+}
+
+// closeRestoredSockets fires each restored socket's onclose: the wrapper Go
+// set before the capture, or the one it set on the stand-in since (null if Go
+// already closed the conn).
+export function closeRestoredSockets(go, sockets) {
+  for (const { socket, onclose } of sockets) {
+    const handler = typeof socket.onclose === "function"
+      ? socket.onclose
+      : onclose === undefined
+      ? null
+      : go._values.find((v, i) => i >= GO_ROOTS && funcIds.get(v) === onclose) ?? go._makeFuncWrapper(onclose);
+    if (!handler) continue;
+    try {
+      handler.call(socket, { type: "close", code: 1006, reason: "restored from a memory snapshot", wasClean: false });
+    } catch (err) {
+      console.warn("closing a restored WebSocket:", err);
+    }
+  }
 }
 
 function armTimeout(go, id, delay) {
@@ -256,6 +307,7 @@ export async function restore(go, module, meta, fill) {
   go._goRefCounts = new Array(GO_ROOTS).fill(Infinity);
   go._ids = new Map([[0, 1], [null, 2], [true, 3], [false, 4], [globalThis, 5], [go, 6]]);
   const missing = [];
+  const sockets = [];
   meta.values.forEach((e, i) => {
     const id = GO_ROOTS + i;
     let v;
@@ -267,6 +319,9 @@ export async function restore(go, module, meta, fill) {
     else if (e.k === "path") {
       v = resolvePath(e.p);
       if (v === undefined) missing.push(e.p.join("."));
+    } else if (e.k === "socket") {
+      v = deadSocket();
+      sockets.push({ socket: v, onclose: e.onclose });
     } else v = e.t === "function" ? function unrestorable() {} : { unrestorable: e.c };
     go._values[id] = v;
     go._goRefCounts[id] = e.rc ?? 0;
@@ -294,6 +349,7 @@ export async function restore(go, module, meta, fill) {
     resume() {
       for (const id of meta.timeouts) armTimeout(go, id, 0);
       if (meta.timeouts.length === 0) setTimeout(() => go._resume(), 0);
+      setTimeout(() => closeRestoredSockets(go, sockets), 0);
     },
     timings: {
       instantiateMs: Math.round(t.instantiate - t.start),
