@@ -11,6 +11,9 @@ import {
   assembleSnapshot,
   backendNotice,
   backupUnreadable,
+  isNotOwner,
+  OWNER_KEY,
+  UNREADABLE_BACKUPS_KEPT,
   MEMORY_FALLBACK_MESSAGE,
   unreadableMessage,
   createIndexedDBBackend,
@@ -20,6 +23,7 @@ import {
   snapshotRecords,
   StateStoreError,
 } from "./state_store.js";
+import { fakeIndexedDB, fakeKeyRange } from "./fake_indexeddb_for_tests.js";
 
 function assertEquals(actual, expected) {
   if (actual !== expected) {
@@ -364,4 +368,136 @@ Deno.test("page wiring: backend line pinned, memory banner + console.warn, unrea
   const worker = await Deno.readTextFile(new URL("./kcp_worker.js", import.meta.url));
   assert(/globalThis\.__kcpRestoreFailed = /.test(worker), "worker hook for Go");
   assert(/hibernation = restoreUnreadable \? null : startHibernationLoop\(\)/.test(worker), "no capture of an unreadable session");
+});
+
+// --- rc130: owner fence (review127 r13), backup cap ------------------------
+
+async function twoTabs() {
+  const factory = fakeIndexedDB();
+  const open = () => createIndexedDBBackend("kcp-wasm", { indexedDB: factory, keyRange: fakeKeyRange });
+  return { factory, a: await open(), b: await open() };
+}
+const K = "kcp\u0000";
+
+Deno.test("owner fence: the owner's writes go through, whole", async () => {
+  const { factory, a } = await twoTabs();
+  await a.claimOwner("tab-a");
+  assertEquals(await a.load(OWNER_KEY), "tab-a");
+  await a.apply({ puts: [[`${K}i1`, "one"], [`${K}i2`, "two"]] });
+  await a.apply({ clearPrefix: K, puts: [[`${K}i3`, "three"]] });
+  await a.save("socialweb", "vault");
+  await a.remove("socialweb");
+  const data = factory.dump("kcp-wasm");
+  assertEquals(JSON.stringify([...data.keys()].sort()), JSON.stringify([`${K}i3`, OWNER_KEY]));
+});
+
+Deno.test("owner fence: a stale holder's writes after a take over are refused and change nothing", async () => {
+  const { factory, a, b } = await twoTabs();
+  await a.claimOwner("tab-a");
+  await a.apply({ puts: [[`${K}i1`, "a1"], ["socialweb", "vault-a"]] });
+  await b.claimOwner("tab-b"); // b took the lock (take over or force)
+  await b.apply({ clearPrefix: K, puts: [[`${K}i1`, "b1"], ["socialweb", "vault-b"]] });
+  const before = JSON.stringify([...factory.dump("kcp-wasm")]);
+  const refused = [];
+  for (const write of [
+    () => a.apply({ clearPrefix: K, puts: [[`${K}stale`, "a2"]] }),
+    () => a.save("socialweb", "vault-a-old"),
+    () => a.remove("socialweb"),
+    () => a.apply({ puts: [["socialweb", "x"], ["socialweb-seq", 9]] }),
+  ]) {
+    try {
+      await write();
+      refused.push(false);
+    } catch (err) {
+      refused.push(isNotOwner(err));
+    }
+  }
+  assertEquals(JSON.stringify(refused), JSON.stringify([true, true, true, true]));
+  assertEquals(JSON.stringify([...factory.dump("kcp-wasm")]), before);
+  await b.save("socialweb", "vault-b2");
+  assertEquals(await b.load("socialweb"), "vault-b2");
+});
+
+Deno.test("owner fence: the new owner's token is in place before its first persist", async () => {
+  const { a, b } = await twoTabs();
+  await a.claimOwner("tab-a");
+  await b.claimOwner("tab-b");
+  assertEquals(await b.load(OWNER_KEY), "tab-b");
+  // The persister of the new tab writes; the stale tab's persister reports NotOwner.
+  const errors = [];
+  const pa = createPersister({ backend: () => Promise.resolve(a), immediate: ["socialweb"], onError: (k, e) => errors.push(isNotOwner(e)) });
+  const pb = createPersister({ backend: () => Promise.resolve(b), immediate: ["socialweb"], onError: (k, e) => errors.push(`b ${e}`) });
+  await pb.schedule("socialweb", "vault-b", 4);
+  await pa.schedule("socialweb", "vault-a", 3);
+  assertEquals(JSON.stringify(errors), JSON.stringify([true]));
+  assertEquals(await b.load("socialweb"), "vault-b");
+  assertEquals(await b.load("socialweb-seq"), 4);
+});
+
+Deno.test("owner fence: the memory backend has nothing to fence", async () => {
+  const m = createMemoryBackend();
+  await m.claimOwner("tab-a");
+  await m.save("socialweb", "v");
+  assertEquals(await m.load(OWNER_KEY), null);
+});
+
+Deno.test("backupUnreadable keeps the newest three per channel", async () => {
+  for (const backend of [createMemoryBackend(), (await twoTabs()).a]) {
+    for (let i = 0; i < 5; i++) {
+      await backupUnreadable(backend, "kcp", `raw-${i}`, new Date(Date.UTC(2026, 9, 30, 12, i)));
+    }
+    await backupUnreadable(backend, "socialweb", "sw", new Date(Date.UTC(2026, 9, 30, 13)));
+    const kept = await backend.keys("kcp-unreadable-");
+    assertEquals(kept.length, UNREADABLE_BACKUPS_KEPT);
+    assertEquals(JSON.stringify(await backend.loadPrefix("kcp-unreadable-")), JSON.stringify(["raw-2", "raw-3", "raw-4"]));
+    assertEquals((await backend.keys("socialweb-unreadable-")).length, 1);
+  }
+});
+
+Deno.test("page wiring: owner claimed before kcp boots; refusals stop saving; Reset keeps backups", async () => {
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  const start = app.slice(app.indexOf("async function start()"));
+  const lock = start.indexOf("await acquireKcpLock()");
+  const claim = start.indexOf("await claimStateOwner()");
+  assert(lock >= 0 && claim > lock && claim < start.indexOf("spawnKcp("), "lock, then owner token, then kcp");
+  assert(/stateWriteFailed\("kcp state save", err\)/.test(app), "kcp persist refusals handled");
+  assert(/onError: \(key, err\) => stateWriteFailed\(/.test(app), "persister refusals handled");
+  const failed = app.slice(app.indexOf("function stateWriteFailed"), app.indexOf("async function resetState"));
+  assert(/stateFenced = true;\s*persister\.stop\(\);/.test(failed), "first refusal stops saving");
+  assert(/return !stateFenced && /.test(app), "fenced tab drops kcp persists");
+  const reset = app.slice(app.indexOf("async function resetState"), app.indexOf("// --- kcp hibernation"));
+  assert(/if \(all\) for \(const prefix of UNREADABLE_PREFIXES\)/.test(reset), "backups removed only with --all");
+  assert(/deletes: \[stateKey, socialwebStateKey, socialwebSeqKey\]/.test(reset), "state keys cleared");
+  assert(/label: "Reset", onClick: \(\) => void resetState\(\)/.test(app), "banner Reset keeps backups");
+  assert(/includes\("--all"\)/.test(app) && /await resetState\(\{ all \}\)/.test(app), "reset --all");
+  assert(/The copies hold secrets/.test(app), "banner warns that backups hold secrets");
+});
+
+Deno.test("page wiring: hidden, pagehide and spec-writing actions flush the kcp worker's held writes", async () => {
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  assert(/addEventListener\("pagehide", \(\) => void flushKcpSoon\("pagehide"\)\)/.test(app), "pagehide flushes kcp");
+  assert(/visibilityState !== "hidden"\) return;\s*void persister\.flushAll\(\);\s*void flushKcpSoon\("hidden"\);/.test(app), "hidden flushes kcp");
+  const fn = app.slice(app.indexOf("function flushKcpSoon"), app.indexOf("function flushKcpSoon") + 700);
+  assert(/if \(!kcpWorker \|\| !kcpStateOwned\(\) \|\| kcpPersistOff\) return Promise\.resolve\(\);/.test(fn), "only a running, owning, saving kcp");
+  assert(/flushKcpWorker\(kcpWorker, 3000\)/.test(fn) && /await kcpPersistQueue/.test(fn), "posts persist-flush and waits for the writes");
+  assert(/kcpFlushAgain = true/.test(fn), "a flush asked during one runs again after it");
+  assert(/if \(channel === "kcp"\) kcpPersistOff = true;/.test(app), "fail-closed kcp has nothing to flush");
+  const flush = app.slice(app.indexOf("function flushKcpWorker"), app.indexOf("function flushKcpWorker") + 400);
+  assert(/worker\.postMessage\(\{ type: "persist-flush" \}\)/.test(flush), "the flush message the worker answers");
+  const worker = await Deno.readTextFile(new URL("./kcp_worker.js", import.meta.url));
+  assert(/type === "persist-flush"[\s\S]{0,200}callGo\("kcpPersistFlush"/.test(worker), "worker calls Go's kcpPersistFlush");
+  // Each spec-writing action flushes right after its write succeeded.
+  const after = (fnName, write, label) => {
+    const body = app.slice(app.indexOf(fnName));
+    const w = body.indexOf(write);
+    const f = body.indexOf(`flushKcpSoon("${label}")`);
+    assert(w >= 0 && f > w && f - w < 200, `${label} flushes after ${write}`);
+  };
+  after("async function requestVM", "await setInfraContract(", "Request VM");
+  after("async function releaseContract", "vmshell.requestRelease(", "Release");
+  after("function r2Action", "await createContractEvent(", "Start R2");
+  const gc = app.slice(app.indexOf("async function collectOtherTabInfras"), app.indexOf("// Sets the state of contract short"));
+  assert((gc.match(/flushKcpSoon\("infra GC"\)/g) ?? []).length === 3, "GC delete, rebind-delete and rebind flush");
+  assert(/"Release again"[\s\S]{0,200}releaseContract\(name\)/.test(app), "Release again goes through releaseContract");
+  assert(/Promise\.race\(\[flushKcpSoon\("reload"\), sleep\(3000\)\]\)\.then\(go, go\)/.test(app), "d.reload flushes first");
 });

@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  infraRebindSettled,
+  infraRecordResolvable,
+  rebindThenDelete,
+  contractFinishedAt,
   contractLive,
   feedContract,
   infraContractName,
@@ -23,8 +27,10 @@ const ALICE = "did:plc:lpfuqerea3deuoyrn7ojser4";
 const BOB = "did:plc:bobbobbobbobbobbobbobbob";
 const ME = "mytab1";
 
+const NOW = Date.parse("2026-10-30T12:00:00Z");
+const hoursAgo = (h) => new Date(NOW - h * 3600_000).toISOString();
 const infra = (origin, tab, entries, extra = {}) => ({
-  metadata: { name: originInfraName(origin, tab), ...extra.metadata },
+  metadata: { name: originInfraName(origin, tab), creationTimestamp: "2026-10-01T00:00:00Z", ...extra.metadata },
   spec: { contracts: entries.map((name) => ({ name, state: "Requested" })), record: infraRecordBinding(ALICE), ...extra.spec },
   status: extra.status ?? {},
 });
@@ -58,7 +64,7 @@ Deno.test("feedContract mirrors the status feed's guest parts", () => {
   assertEquals(feedContract(obj), {
     name: "c", phase: "Failed", release: true, releaseRequestedAt: "t2", releaseAnsweredAt: "t1",
     releaseFailed: true, releaseFailedReason: "ReleaseBound", atircRevokes: "Done", step: "",
-    receiptOk: true, terminated: false, releaseOk: false,
+    receiptOk: true, terminated: false, releaseOk: false, finishedAt: 0,
   });
   assertEquals(feedContract({ status: { contract: { receiptOk: true } } }).receiptOk, false, "receiptOk without a receipt");
 });
@@ -104,6 +110,7 @@ Deno.test("planInfraGC deletes dead infras, rebinds live ones, leaves the rest a
     origin: ORIGIN,
     tabId: ME,
     did: ALICE,
+    now: NOW,
   });
   const name = (tab) => originInfraName(ORIGIN, tab);
   assertEquals(plan.map((step) => [step.name, step.action]), [
@@ -130,5 +137,148 @@ Deno.test("page wiring: GC runs once the identity is Ready and rebinds through c
   const gc = app.slice(app.indexOf("async function collectOtherTabInfras"), app.indexOf("// Sets the state of contract short"));
   for (const needle of ["vmshell.planInfraGC(", "tabId: infraTabId()", "origin: location.origin", "vmshell.composeInfra(", "infraQueued(", "\"DELETE\""]) {
     if (!gc.includes(needle)) throw new Error(`GC lacks ${needle}`);
+  }
+});
+
+Deno.test("planInfraGC keeps 24 h of finished history (rc130)", () => {
+  const released = (status) => ({ phase: "Released", conditions: [{ type: "Ready", status: "False", lastTransitionTime: status }] });
+  const recent = infra(ORIGIN, "rec001", ["vmshell-r"]);
+  const old = infra(ORIGIN, "old001", ["vmshell-r"]);
+  const mixed = infra(ORIGIN, "mix001", ["vmshell-live", "vmshell-old"]);
+  const fresh = infra(ORIGIN, "new001", ["vmshell-x"], { metadata: { creationTimestamp: hoursAgo(2) } });
+  const stamped = infra(ORIGIN, "stp001", [], { spec: { contracts: [{ name: "vmshell-s", state: "Released", releaseRequestedAt: hoursAgo(3) }] } });
+  const objects = [
+    cc(recent, "vmshell-r", released(hoursAgo(1))),
+    cc(old, "vmshell-r", released(hoursAgo(25))),
+    cc(mixed, "vmshell-live", { phase: "Held" }),
+    cc(mixed, "vmshell-old", released(hoursAgo(48))),
+  ];
+  const plan = planInfraGC({
+    infras: [recent, old, mixed, fresh, stamped],
+    contracts: objects.map(feedContract),
+    origin: ORIGIN,
+    tabId: ME,
+    did: ALICE,
+    now: NOW,
+  });
+  const by = Object.fromEntries(plan.map((step) => [step.name, step]));
+  const n = (tab) => originInfraName(ORIGIN, tab);
+  assertEquals(by[n("rec001")].action, "keep", "Released 1 h ago stays");
+  assertEquals(by[n("rec001")].reason, "history: finished 1.0 h ago");
+  assertEquals(by[n("old001")].action, "delete", "Released 25 h ago goes");
+  assertEquals(by[n("mix001")].action, "keep", "one live, one old terminal: kept");
+  assertEquals(by[n("new001")].action, "keep", "no contract times: the infra's creation (2 h)");
+  assertEquals(by[n("stp001")].action, "keep", "the entry's release stamp counts");
+  assertEquals(contractFinishedAt({ status: { contract: { termination: { observedAt: hoursAgo(5) } } } }), NOW - 5 * 3600_000);
+});
+
+// --- records that do not resolve (rc130, production root cause) -------------
+
+const unresolved = { type: "RecordUnresolved", status: "True", reason: "RepoUnresolvable", message: "repo not found" };
+const uriOf = (did, infraObj) => `at://${did}/computer.socialweb.ephemeralInfra/${infraObj.metadata.name}`;
+
+Deno.test("infraRecordResolvable: condition, old repo.read error, and the current repo", () => {
+  const ok = infra(ORIGIN, "r00001", []);
+  assertEquals(infraRecordResolvable(ok, ALICE), true);
+  assertEquals(infraRecordResolvable({ ...ok, status: { conditions: [unresolved] } }, ALICE), false, "RecordUnresolved");
+  assertEquals(infraRecordResolvable({ ...ok, status: { conditions: [{ type: "Synced", status: "False", message: "repo.read handle: not found" }] } }, ALICE), false, "old error");
+  assertEquals(infraRecordResolvable(ok, BOB), false, "another repo");
+  assertEquals(infraRecordResolvable({ ...ok, spec: { contracts: [] } }, ALICE), true, "no record binding");
+});
+
+Deno.test("planInfraGC: unresolved records are rebound first (same DID) or kept (other DID)", () => {
+  const old = (tab, extra) => infra(ORIGIN, tab, [], extra);
+  const resolvable = old("res001");
+  const sameDid = old("same01", { spec: { record: { repoRef: { group: "socialweb.computer", kind: "AtprotoRepo", name: "repo-old-name" } } } });
+  sameDid.status = { conditions: [unresolved], record: { uri: uriOf(ALICE, sameDid) } };
+  const otherDid = old("othr01", { spec: { record: infraRecordBinding(BOB) } });
+  otherDid.status = { conditions: [unresolved], record: { uri: uriOf(BOB, otherDid) } };
+  const plan = planInfraGC({ infras: [resolvable, sameDid, otherDid], contracts: [], origin: ORIGIN, tabId: ME, did: ALICE, now: NOW });
+  assertEquals(plan.map((step) => [step.action, step.reason.startsWith("kept") ? step.reason : ""]), [
+    ["delete", ""],
+    ["rebind-delete", ""],
+    ["keep", "kept: record unresolved"],
+  ]);
+});
+
+function fakeInfraAPI(infraObj, settleAfterGets) {
+  const calls = [];
+  let gets = 0;
+  let current = structuredClone(infraObj);
+  const rest = async (method, path, body) => {
+    calls.push(method);
+    if (method === "PATCH") {
+      const spec = (typeof body === "string" ? JSON.parse(body) : body).spec;
+      current = { ...current, metadata: { ...current.metadata, generation: 2, resourceVersion: "2" }, spec };
+      return structuredClone(current);
+    }
+    if (method === "GET") {
+      gets++;
+      if (calls.filter((c) => c === "PATCH").length > 0 && gets > settleAfterGets) {
+        current = { ...current, status: { observedGeneration: 2, record: { uri: uriOf(ALICE, current) }, conditions: [] } };
+      }
+      return structuredClone(current);
+    }
+    if (method === "DELETE") return {};
+    throw new Error(method);
+  };
+  return { rest, calls, current: () => current };
+}
+
+Deno.test("rebindThenDelete: rebinds, waits for the record, then deletes", async () => {
+  const stuck = infra(ORIGIN, "same02", [], { spec: { record: { repoRef: { name: "repo-old-name" } } } });
+  stuck.metadata.generation = 1;
+  stuck.status = { observedGeneration: 1, conditions: [unresolved], record: { uri: uriOf(ALICE, stuck) } };
+  const api = fakeInfraAPI(stuck, 2);
+  let t = 0;
+  const deleted = await rebindThenDelete({ rest: api.rest, api: "/apis/x", name: stuck.metadata.name, did: ALICE, sleep: async () => void (t += 750), now: () => t });
+  assertEquals(deleted, true);
+  assertEquals(api.calls.at(-1), "DELETE");
+  assertEquals(api.current().spec.record.repoRef.name, infraRecordBinding(ALICE).repoRef.name, "rebound to the current repo");
+});
+
+Deno.test("rebindThenDelete: a record that still does not resolve keeps the infra", async () => {
+  const stuck = infra(ORIGIN, "same03", [], { spec: { record: { repoRef: { name: "repo-old-name" } } } });
+  stuck.status = { conditions: [unresolved], record: { uri: uriOf(ALICE, stuck) } };
+  const api = fakeInfraAPI(stuck, Infinity);
+  let t = 0;
+  const deleted = await rebindThenDelete({ rest: api.rest, api: "/apis/x", name: stuck.metadata.name, did: ALICE, timeoutMs: 30_000, sleep: async () => void (t += 750), now: () => t });
+  assertEquals(deleted, false);
+  assertEquals(api.calls.includes("DELETE"), false, "never deleted");
+});
+
+Deno.test("infraRebindSettled waits for the controller to observe the rebind", () => {
+  const base = infra(ORIGIN, "set001", []);
+  const at = (status) => ({ ...base, status });
+  assertEquals(infraRebindSettled(at({ observedGeneration: 1, record: { uri: "at://x/y/z" } }), ALICE, 2), false, "not observed yet");
+  assertEquals(infraRebindSettled(at({ observedGeneration: 2, conditions: [unresolved], record: { uri: "at://x/y/z" } }), ALICE, 2), false, "still unresolved");
+  assertEquals(infraRebindSettled(at({ observedGeneration: 2 }), ALICE, 2), false, "no record yet");
+  assertEquals(infraRebindSettled(at({ observedGeneration: 2, record: { uri: "at://x/y/z" } }), ALICE, 2), true);
+});
+
+Deno.test("contractTransitions: a phase or step change flushes once; an unchanged feed does not", async () => {
+  const { contractTransitions } = await import("./vmshell.js");
+  const feed = (phase, step = "") => [{ name: "a", phase: "Held" }, { name: "b", phase, step }];
+  let base = null;
+  const flushes = [];
+  // What applyComputeState does per feed update.
+  const apply = (contracts) => {
+    const t = contractTransitions(base, contracts);
+    base = t.key;
+    if (t.changed) flushes.push(t.key);
+  };
+  apply(feed("Requesting")); // first update: the base
+  apply(feed("Requesting")); // unchanged
+  assertEquals(flushes.length, 0, "no flush without a change");
+  apply(feed("Held")); // the requester wrote Held
+  assertEquals(flushes.length, 1, "one flush for the phase change");
+  apply(feed("Held"));
+  apply([...feed("Held")].reverse()); // order is not a change
+  assertEquals(flushes.length, 1, "unchanged again");
+  apply(feed("Held", "releasingGuestRequester"));
+  assertEquals(flushes.length, 2, "a step change flushes");
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  if (!/const transitions = vmshell\.contractTransitions\(lastContractTransitions, state\.contracts\);\s*lastContractTransitions = transitions\.key;\s*if \(transitions\.changed\) void flushKcpSoon\("contract status"\);/.test(app)) {
+    throw new Error("applyComputeState flushes on contract transitions");
   }
 });
