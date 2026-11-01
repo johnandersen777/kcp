@@ -64,3 +64,17 @@ func TestAssociationProjection(t *testing.T) {
 		t.Fatalf("status.association: %+v", c)
 	}
 }
+
+func TestGuestRequesterProjection(t *testing.T) {
+	if c := contract(&unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "c"}}}); c.GuestRequester != nil {
+		t.Fatalf("no guestRequester: %+v", c)
+	}
+	c := contract(&unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "c"},
+		"status": map[string]any{"contract": map[string]any{"guestRequester": map[string]any{
+			"did": "did:plc:guest", "state": "Verified", "message": "ok", "reportedAt": "2026-10-30T00:00:00Z"}}},
+	}})
+	if c.GuestRequester == nil || *c.GuestRequester != (GuestRequester{DID: "did:plc:guest", State: "Verified", Message: "ok"}) {
+		t.Fatalf("guestRequester: %+v", c.GuestRequester)
+	}
+}
