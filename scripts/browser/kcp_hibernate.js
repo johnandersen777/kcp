@@ -438,7 +438,13 @@ export function startHibernation({
   let want = false; // a hide: capture as soon as kcp is idle
   let soon = false; // a flush: capture once still, at most every SOON_GAP_MS
   let hideAt = -Infinity;
-  let asks = 0; // request()/requestSoon() calls: those during a capture are not answered by it
+  // Asks made during a capture are not answered by it (its seqs are older):
+  // wantAsks counts the ones that set want (a hide, or a flush right after
+  // one), asks every ask. Only a hide keeps want across a capture; a flush
+  // during a capture keeps soon, which stays throttled (re-check page-rc131b
+  // 64ea075ce: one hide plus a flush every few seconds chained captures).
+  let asks = 0;
+  let wantAsks = 0;
   let running = null; // the in-flight save
   let disabled = false;
   let lastReason = "";
@@ -475,6 +481,8 @@ export function startHibernation({
     }
     const background = !want && !soon;
     const asked = asks;
+    const wantAsked = wantAsks;
+    const startedAt = now();
     let done;
     running = new Promise((resolve) => (done = resolve));
     const t0 = performance.now();
@@ -489,12 +497,18 @@ export function startHibernation({
       const meta = await store.save(go, () => ({ ...extra(), seqs: seqs(), key, owner: owner?.token ?? null }), gzip, stillOwner);
       lastSeqs = meta.extra.seqs;
       lastAt = now();
-      if (asks === asked) {
+      if (wantAsks === wantAsked) {
         want = false;
-        soon = false;
         hideAt = -Infinity; // one capture per hide
+      } else if (hideAt <= startedAt) {
+        // This capture already followed the hide; the hide's flush that
+        // landed during it gets one more capture, later flushes are ordinary.
+        hideAt = -Infinity;
       }
-      everyMs = background ? Math.min(everyMs * 2, MAX_EVERY_MS) : EVERY_MS;
+      if (asks === asked) {
+        soon = false;
+        everyMs = background ? Math.min(everyMs * 2, MAX_EVERY_MS) : EVERY_MS;
+      }
       log("info", `snapshot saved to ${store.kind}: ${(meta.bytes / 1048576).toFixed(0)} MiB memory, ` +
         `${(meta.stored / 1048576).toFixed(0)} MiB stored${gzip ? " (gzip)" : ""}, capture ${meta.stats.captureMs}ms, ` +
         `copy ${meta.stats.copyMs ?? 0}ms, write ${meta.stats.writeMs}ms, total ${ms(t0)}ms`);
@@ -508,7 +522,7 @@ export function startHibernation({
       if (err?.name === "QuotaExceededError") disabled = true;
       // A failed capture counts for the gaps: no retry every second.
       lastAt = now();
-      if (asks === asked) want = false;
+      if (wantAsks === wantAsked) want = false;
     } finally {
       running = null;
       done();
@@ -519,6 +533,7 @@ export function startHibernation({
     /** The tab is being hidden: capture as soon as kcp is idle. */
     request() {
       asks++;
+      wantAsks++;
       want = true;
       hideAt = now();
       everyMs = EVERY_MS;
@@ -534,6 +549,7 @@ export function startHibernation({
       asks++;
       everyMs = EVERY_MS;
       if (now() - hideAt < HIDE_FLUSH_MS) {
+        wantAsks++;
         want = true;
         void tick();
         return;
