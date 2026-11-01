@@ -355,7 +355,7 @@ Deno.test("the first load of a new build leaves a snapshot the next reload can u
   // forceApply (set on the first load of a new build) is not part of the key,
   // so its snapshot matches the next, ordinary, load of the same build.
   const worker = await Deno.readTextFile(new URL("./kcp_worker.js", import.meta.url));
-  if (!/JSON\.stringify\(\{ \.\.\.init\.socialweb, restore: undefined, forceApply: undefined \}\)/.test(worker)) {
+  if (!/JSON\.stringify\(\{ \.\.\.init\.socialweb, restore: undefined, forceApply: undefined, noopLog: init\.noopLog \|\| undefined \}\)/.test(worker)) {
     throw new Error("snapshot key must leave out restore and forceApply");
   }
   if (!/async function restoreSnapshot\(\) \{[\s\S]{0,200}if \(init\.socialweb\?\.forceApply\) \{[\s\S]{0,200}return null;/.test(worker)) {

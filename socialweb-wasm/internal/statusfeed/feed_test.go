@@ -219,8 +219,8 @@ func TestNamedPrefersThePagesOwnObject(t *testing.T) {
 	if got := named(items, "requester", identityResource); got.Name != "requester" || got.Pending != nil {
 		t.Fatalf("named = %+v, want requester without a pending action", got)
 	}
-	if got := named(items[1:], "requester", identityResource); got.Name != "guest" {
-		t.Fatalf("named without requester = %+v, want the first by name", got)
+	if got := named(items[1:], "requester", identityResource); got != nil {
+		t.Fatalf("named without requester = %+v, want nil (never another identity)", got)
 	}
 	if got := named(nil, "requester", identityResource); got != nil {
 		t.Fatalf("named(nil) = %+v, want nil", got)

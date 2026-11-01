@@ -287,7 +287,8 @@ log("info", `kcp.wasm ${mib(wasmBytes)} MiB downloaded + compiled in ${compileMs
 const snapshotKey = await hibernate.snapshotKey(
   await wasmHash,
   init.execUrl,
-  JSON.stringify({ ...init.socialweb, restore: undefined, forceApply: undefined }),
+  // noopLog is boot state too: a restored heap keeps the logging it booted with.
+  JSON.stringify({ ...init.socialweb, restore: undefined, forceApply: undefined, noopLog: init.noopLog || undefined }),
 );
 const restored = await restoreSnapshot();
 if (init.debugMemory) {

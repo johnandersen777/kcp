@@ -310,7 +310,7 @@ func (f *Feed) objects(gvr schema.GroupVersionResource) []*unstructured.Unstruct
 func (f *Feed) build() State {
 	var state State
 	// The page's own objects by name: root can hold other MarketIdentities
-	// (the first by name was shown before, whatever it was).
+	// (session owners); none called requester reads as Pending.
 	state.MarketRequester = named(f.objects(v1alpha1.MarketRequesterGVR), "app", requesterResource)
 	state.MarketIdentity = named(f.objects(v1alpha1.MarketIdentityGVR), "requester", identityResource)
 	state.Requester = first(f.objects(v1alpha1.RequesterGVR), requesterResource)
@@ -334,14 +334,16 @@ func (f *Feed) build() State {
 	return state
 }
 
-// named is the item called name, or the first by name when none is.
+// named is the item called name, or nil: never another object in its
+// place (root also holds session-owner MarketIdentities of other DIDs, which
+// the panel must not show as the page's own; review page-rc134 F5).
 func named(items []*unstructured.Unstructured, name string, conv func(*unstructured.Unstructured) *Resource) *Resource {
 	for _, u := range items {
 		if u.GetName() == name {
 			return conv(u)
 		}
 	}
-	return first(items, conv)
+	return nil
 }
 
 func first(items []*unstructured.Unstructured, conv func(*unstructured.Unstructured) *Resource) *Resource {
