@@ -2464,10 +2464,6 @@ function infraQueued(run) {
   return next;
 }
 
-function patchInfra(path, patch) {
-  return infraQueued(() => kcpREST("PATCH", path, patch, "application/merge-patch+json"));
-}
-
 async function waitInfraGone(path, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -2534,18 +2530,18 @@ async function sessionInfra() {
       });
       infra = await waitInfraGone(path);
     } else if (vmshell.infraRecordStale(binding)) {
-      await patchInfra(path, { spec: { record } });
-      infra = await kcpREST("GET", path);
+      infra = await infraQueued(() => vmshell.composeInfra({
+        rest: kcpREST,
+        api: SOCIALWEB_API,
+        infra: name,
+        update: (spec) => ({ ...spec, record }),
+      }));
     }
   }
   if (!infra) {
-    const manifest = vmshell.sessionInfraManifest(name, undefined, record);
-    try {
-      infra = await kcpREST("POST", `${SOCIALWEB_API}/ephemeralinfras`, manifest);
-    } catch (err) {
-      if (kcpStatus(err) !== 409) throw err;
-      infra = await kcpREST("GET", path);
-    }
+    // Created by the page's composer apply too (the GET above found none).
+    const apply = vmshell.infraApply(SOCIALWEB_API, name, vmshell.sessionInfraManifest(name, undefined, record).spec);
+    infra = await infraQueued(() => kcpREST("PATCH", apply.path, apply.body, apply.contentType));
     addLog("info", `EphemeralInfra ${name} holds this tab's VMs`);
   }
   const synced = await waitInfraRecord(name, did);
@@ -2556,22 +2552,12 @@ async function sessionInfra() {
 // Sets the state of contract short in the session infra (Requested adds it).
 // addContract prunes released entries only when the record reaches 64.
 function setInfraContract(infraName, entry, secret) {
-  const path = `${SOCIALWEB_API}/ephemeralinfras/${infraName}`;
-  const run = async () => {
-    const infra = await kcpREST("GET", path);
-    const { contracts, dropped } = vmshell.addContract(infra.spec?.contracts ?? [], entry);
-    const patch = { spec: { contracts } };
-    if (secret) {
-      patch.spec.secrets = [
-        ...(infra.spec?.secrets ?? []).filter((x) => !dropped.includes(x.contract) && x.contract !== secret.contract),
-        secret,
-      ];
-    } else if (dropped.length > 0) {
-      patch.spec.secrets = (infra.spec?.secrets ?? []).filter((x) => !dropped.includes(x.contract));
-    }
-    await kcpREST("PATCH", path, patch, "application/merge-patch+json");
-  };
-  return infraQueued(run);
+  return infraQueued(() => vmshell.composeInfra({
+    rest: kcpREST,
+    api: SOCIALWEB_API,
+    infra: infraName,
+    update: (spec) => vmshell.withInfraContract(spec, entry, secret),
+  }));
 }
 
 // A VM that ends without the Release button (guest exit, bidder release or
