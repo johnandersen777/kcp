@@ -30,7 +30,7 @@ import {
 import { buildDiagram, nodeID } from "./diagram.js";
 import { cancelOAuthPopup, OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
 import { GRACE_MS, normalizeHandle, signInURL, signInView } from "./identity_ui.js";
-import { assembleSnapshot, openBestBackend, snapshotRecords } from "./state_store.js";
+import { assembleSnapshot, createPersister, openBestBackend, snapshotRecords } from "./state_store.js";
 import * as vmshell from "./vmshell.js";
 import * as webrtcGuest from "./webrtc_guest.js";
 import * as sshCmd from "./ssh_cmd.js";
@@ -606,7 +606,7 @@ function attachKcp(worker) {
     } else if (data.type === "persist") {
       persistKcp(data.snapshot, data.seq);
     } else if (data.type === "socialweb-persist") {
-      schedulePersist(data.snapshot, socialwebStateKey, data.seq);
+      void persister.schedule(socialwebStateKey, data.snapshot, data.seq);
     } else if (data.type === "log") {
       addLog(data.level ?? "info", `kcp: ${data.message}`);
       const message = String(data.message);
@@ -681,28 +681,17 @@ function persistKcp(snapshot, seq) {
   });
 }
 
-const persistTimers = new Map();
-const persistInFlight = new Set();
-function schedulePersist(snapshot, key = stateKey, seq = 0) {
-  if (persistTimers.has(key)) clearTimeout(persistTimers.get(key));
-  persistTimers.set(key, setTimeout(async () => {
-    persistTimers.delete(key);
-    if (persistInFlight.has(key)) {
-      schedulePersist(snapshot, key, seq);
-      return;
-    }
-    persistInFlight.add(key);
-    try {
-      const backend = await stateBackend();
-      if (seq) await backend.apply({ puts: [[key, snapshot], [`${key}-seq`, seq]] });
-      else await backend.save(key, snapshot);
-    } catch (err) {
-      addLog("warn", `state save failed (${key}): ${err instanceof Error ? err.message : err}`);
-    } finally {
-      persistInFlight.delete(key);
-    }
-  }, 250));
-}
+// Whole-snapshot keys (state_store.js createPersister): one save at a time
+// per key, the newest wins. The socialweb vault snapshot saves at once, not
+// debounced: in rc127 it holds the requester's atirc revoke marker and
+// atircMinted, and a reload right after such a write must not lose it.
+// Pending saves start at once when the tab is hidden or unloads (below).
+const persister = createPersister({
+  backend: stateBackend,
+  immediate: [socialwebStateKey],
+  onError: (key, err) => addLog("warn", `state save failed (${key}): ${err instanceof Error ? err.message : err}`),
+});
+addEventListener("pagehide", () => void persister.flushAll());
 
 // socialweb skips its provider manifests when the restored kcp state already
 // has Ready APIBindings, so state saved by an older kcp.wasm would keep that
@@ -862,7 +851,9 @@ function noteKcpAnswer() {
 
 // Capture when the tab is hidden: the next visit restores from it.
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") kcpWorker?.postMessage({ type: "hibernate" });
+  if (document.visibilityState !== "hidden") return;
+  void persister.flushAll();
+  kcpWorker?.postMessage({ type: "hibernate" });
 });
 
 // Deletes the stored snapshot; the next load cold boots. The running worker
