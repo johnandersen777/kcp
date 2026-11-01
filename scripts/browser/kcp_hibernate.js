@@ -44,8 +44,9 @@ limitations under the License.
 // Any other problem deletes the snapshot and cold boots.
 //
 // Re-capture: whenever the sequence moved since the last capture, the worker
-// is idle and the state has been still for QUIET_MS, at most every EVERY_MS;
-// right away when the page asks (visibilitychange to hidden).
+// is idle and the state has been still for QUIET_MS, at most every EVERY_MS
+// (doubling up to MAX_EVERY_MS while only background writes come); right
+// away when the page asks (visibilitychange to hidden).
 
 import { busy, capture, instrument, restore, SNAPSHOT_FORMAT } from "./wasm_snapshot.js";
 
@@ -55,9 +56,17 @@ const DIR = "kcp-snapshot";
 const IDB = "kcp-snapshot";
 // ponytail: fixed interval; back off if long sessions keep the state dirty.
 const EVERY_MS = 60 * 1000;
+// Background captures (no flush or hide in between) double the gap up to
+// this: an idle tab writes every 5-10 s, and a capture a minute is ~5 GB/h
+// of writes on a phone (re-check page-rc131b f360fdd27, 2).
+const MAX_EVERY_MS = 10 * 60 * 1000;
 // Capture once the persisted state has been still this long (boot and the
-// socialweb compose write in bursts), unless the page is going away.
-const QUIET_MS = 30 * 1000;
+// socialweb compose write in bursts), unless the page is going away. A live
+// page persists a write every 5-10 s even when idle, so a longer quiet period
+// never came and an idle tab never captured; a hide capture (~5 s) does not
+// finish before a reload or close unloads the page (page-rc131 dev boot
+// timing: three cold boots in a row).
+const QUIET_MS = 3 * 1000;
 const CHUNK = 4 << 20;
 
 /** The kcp-wasm state database's owner key (state_store.js OWNER_KEY). */
@@ -421,10 +430,21 @@ export function startHibernation({
   timers = globalThis, now = Date.now,
 }) {
   let lastSeqs = captured;
-  let lastAt = 0;
+  // Boot grace: the first background capture waits a full EVERY_MS, so it
+  // does not land during boot and the socialweb compose at peak heap
+  // (re-check page-rc131b f360fdd27, 1).
+  let lastAt = now();
+  let everyMs = EVERY_MS;
   let want = false; // a hide: capture as soon as kcp is idle
   let soon = false; // a flush: capture once still, at most every SOON_GAP_MS
   let hideAt = -Infinity;
+  // Asks made during a capture are not answered by it (its seqs are older):
+  // wantAsks counts the ones that set want (a hide, or a flush right after
+  // one), asks every ask. Only a hide keeps want across a capture; a flush
+  // during a capture keeps soon, which stays throttled (re-check page-rc131b
+  // 64ea075ce: one hide plus a flush every few seconds chained captures).
+  let asks = 0;
+  let wantAsks = 0;
   let running = null; // the in-flight save
   let disabled = false;
   let lastReason = "";
@@ -451,7 +471,7 @@ export function startHibernation({
       if (t - changedAt < SOON_QUIET_MS || (lastAt && t - lastAt < SOON_GAP_MS)) return;
     } else {
       if (t - changedAt < QUIET_MS) return;
-      if (lastAt && t - lastAt < EVERY_MS) return;
+      if (t - lastAt < everyMs) return;
     }
     const reason = !ready() ? "kcp or socialweb not ready, or a request is in flight" : busy(go);
     if (reason) {
@@ -459,6 +479,10 @@ export function startHibernation({
       lastReason = reason;
       return;
     }
+    const background = !want && !soon;
+    const asked = asks;
+    const wantAsked = wantAsks;
+    const startedAt = now();
     let done;
     running = new Promise((resolve) => (done = resolve));
     const t0 = performance.now();
@@ -473,9 +497,18 @@ export function startHibernation({
       const meta = await store.save(go, () => ({ ...extra(), seqs: seqs(), key, owner: owner?.token ?? null }), gzip, stillOwner);
       lastSeqs = meta.extra.seqs;
       lastAt = now();
-      want = false;
-      soon = false;
-      hideAt = -Infinity; // one capture per hide
+      if (wantAsks === wantAsked) {
+        want = false;
+        hideAt = -Infinity; // one capture per hide
+      } else if (hideAt <= startedAt) {
+        // This capture already followed the hide; the hide's flush that
+        // landed during it gets one more capture, later flushes are ordinary.
+        hideAt = -Infinity;
+      }
+      if (asks === asked) {
+        soon = false;
+        everyMs = background ? Math.min(everyMs * 2, MAX_EVERY_MS) : EVERY_MS;
+      }
       log("info", `snapshot saved to ${store.kind}: ${(meta.bytes / 1048576).toFixed(0)} MiB memory, ` +
         `${(meta.stored / 1048576).toFixed(0)} MiB stored${gzip ? " (gzip)" : ""}, capture ${meta.stats.captureMs}ms, ` +
         `copy ${meta.stats.copyMs ?? 0}ms, write ${meta.stats.writeMs}ms, total ${ms(t0)}ms`);
@@ -489,7 +522,7 @@ export function startHibernation({
       if (err?.name === "QuotaExceededError") disabled = true;
       // A failed capture counts for the gaps: no retry every second.
       lastAt = now();
-      want = false;
+      if (wantAsks === wantAsked) want = false;
     } finally {
       running = null;
       done();
@@ -499,8 +532,11 @@ export function startHibernation({
   return {
     /** The tab is being hidden: capture as soon as kcp is idle. */
     request() {
+      asks++;
+      wantAsks++;
       want = true;
       hideAt = now();
+      everyMs = EVERY_MS;
       void tick();
     },
     /**
@@ -510,7 +546,10 @@ export function startHibernation({
      */
     requestSoon() {
       if (lastSeqs && sameSeqs(lastSeqs, seqs())) return;
+      asks++;
+      everyMs = EVERY_MS;
       if (now() - hideAt < HIDE_FLUSH_MS) {
+        wantAsks++;
         want = true;
         void tick();
         return;

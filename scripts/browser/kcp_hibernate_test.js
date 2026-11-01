@@ -138,6 +138,7 @@ function clockedLoop({ captured = { kcp: 9, socialweb: 0 } } = {}) {
       return { extra: e, bytes: 0, stored: 0, stats: {} };
     },
   };
+  c.store = store;
   c.loop = startHibernation({
     go: fakeGo(),
     key: KEY,
@@ -163,6 +164,7 @@ function clockedLoop({ captured = { kcp: 9, socialweb: 0 } } = {}) {
 
 Deno.test("capture after a flush: once the seqs are still, never for a no-op flush", async () => {
   const c = clockedLoop();
+  await c.run(15); // past the SOON_GAP_MS boot grace
   c.loop.requestSoon(); // a flush that wrote nothing new
   await c.run(5);
   assertEquals(c.saved, [], "no capture without new records");
@@ -171,18 +173,52 @@ Deno.test("capture after a flush: once the seqs are still, never for a no-op flu
   await c.run(2);
   assertEquals(c.saved, [], "not before SOON_QUIET_MS of still seqs");
   await c.run(3);
-  assertEquals(c.saved.map((x) => x.kcp), [10], "captured a few seconds after the flush, long before QUIET_MS (30 s)");
+  assertEquals(c.saved.map((x) => x.kcp), [10], "captured a few seconds after the flush");
 });
 
-Deno.test("no request: moving seqs capture only after the 30 s quiet period", async () => {
+Deno.test("no request: background writes capture once still, at most every 60 s", async () => {
   const c = clockedLoop();
+  await c.run(60); // past the boot grace
   c.loop.requestSoon(); // unchanged seqs: not armed
   await c.run(1);
   c.seqs.kcp = 10; // a background write, no flush
+  await c.run(2);
+  assertEquals(c.saved, [], "nothing before QUIET_MS of still seqs");
+  await c.run(2);
+  assertEquals(c.saved.map((x) => x.kcp), [10], "the regular capture");
+});
+
+Deno.test("an idle tab that persists a write every 5-10 s captures with a doubling gap, none during boot", async () => {
+  const c = clockedLoop();
+  // 30 min of a live idle page: a write every 7 s, never 30 s quiet
+  await c.run(1800, (i) => {
+    if (i % 7 === 0) c.seqs.kcp++;
+  });
+  const at = c.saved.map((x) => (x.at - 1_000_000) / 1000);
+  assert(at[0] >= 60 && at[0] <= 70, `boot grace: first capture after 60 s, at ${JSON.stringify(at)}`);
+  const gaps = at.slice(1).map((x, i) => x - at[i]);
+  // 60 s, 120 s, 240 s, 480 s, then capped at 600 s (each +up to 7 s for still seqs)
+  const want = [120, 240, 480, 600, 600];
+  for (let i = 0; i < gaps.length; i++) {
+    assert(gaps[i] >= want[Math.min(i, want.length - 1)] && gaps[i] <= want[Math.min(i, want.length - 1)] + 10, `gaps ${JSON.stringify(gaps)}`);
+  }
+  assert(c.saved.length <= 6, `captures at ${JSON.stringify(at)} s`);
+});
+
+Deno.test("a flush or hide resets the background gap to 60 s", async () => {
+  const c = clockedLoop();
+  await c.run(900, (i) => {
+    if (i % 7 === 0) c.seqs.kcp++;
+  });
+  const before = c.saved.length; // 60 s, +120 s, +240 s, +480 s: the gap is now long
+  c.seqs.kcp++;
+  c.loop.requestSoon(); // a contract step change flushed
   await c.run(20);
-  assertEquals(c.saved, [], "nothing before the quiet period");
-  await c.run(15);
-  assertEquals(c.saved.length, 1, "the regular capture");
+  assertEquals(c.saved.length, before + 1, "the flush captured");
+  await c.run(80, (i) => {
+    if (i % 7 === 0) c.seqs.kcp++;
+  });
+  assertEquals(c.saved.length, before + 2, "next background capture after 60 s again");
 });
 
 Deno.test("a typical VM lifecycle captures at most about twice", async () => {
@@ -204,10 +240,10 @@ Deno.test("a typical VM lifecycle captures at most about twice", async () => {
     if (i % 5 === 0) c.loop.requestSoon();
   });
   await c.run(10);
-  // [62 s: Held settled, 141 s: the regular 30 s-quiet capture of a
-  // background write, 208 s: Released settled]: two from flushes.
+  // [62 s: Held settled, then the background writes at most once a minute,
+  // 208 s: Released settled]: two from flushes.
   const at = c.saved.map((x) => (x.at - 1_000_000) / 1000);
-  assert(c.saved.length <= 3, `captures at ${JSON.stringify(at)} s`);
+  assert(c.saved.length <= 4, `captures at ${JSON.stringify(at)} s`);
   assertEquals(at.filter((s) => (s > 60 && s <= 70) || s > 195).length, 2, "one per settle point");
   // the two settle points are captured right away
   const settledHeld = c.saved.find((x) => x.at > 1_000_000 + 60_000 && x.at <= 1_000_000 + 70_000);
@@ -244,6 +280,75 @@ Deno.test("a hide whose flush lands after the hide's tick still captures at once
   assertEquals(c.saved.length, 1, "a flush long after the hide waits for still seqs");
   await c.run(4);
   assertEquals(c.saved.map((x) => x.kcp), [10, 11]);
+});
+
+Deno.test("a hide during an in-flight capture still captures at once afterwards", async () => {
+  const c = clockedLoop();
+  await c.run(59, (i) => {
+    if (i === 0) c.seqs.kcp = 10;
+  });
+  assertEquals(c.saved, [], "boot grace");
+  // the background capture of seq 10 is due on the next tick; hold its save open
+  let release, entered;
+  const gate = new Promise((r) => (release = r));
+  const inSave = new Promise((r) => (entered = r));
+  const save = c.store.save;
+  c.store.save = async (go, extra, gzip, beforeCommit) => {
+    const e = extra(); // the real capture takes memory and seqs at once
+    entered();
+    await gate;
+    return save(go, () => e, gzip, beforeCommit);
+  };
+  c.t += 1000;
+  const inflight = c.tick();
+  await inSave;
+  c.seqs.kcp = 11; // the hide's flush lands while the capture runs
+  c.loop.request(); // hidden
+  release();
+  await inflight;
+  assertEquals(c.saved.map((x) => x.kcp), [10], "the in-flight capture has the pre-hide seqs");
+  await c.run(1);
+  assertEquals(c.saved.map((x) => x.kcp), [10, 11], "the hide still captured at once");
+});
+
+Deno.test("one hide plus a flush every 3 s during 5 s captures: two captures, then throttled", async () => {
+  const c = clockedLoop();
+  await c.run(60); // past the boot grace, nothing new
+  const save = c.store.save;
+  let waits = [];
+  c.store.save = async (go, extra, gzip, beforeCommit) => {
+    const e = extra(); // memory and seqs are taken when the capture starts
+    const until = c.t + 5000; // a phone capture takes ~5 s
+    await new Promise((r) => waits.push({ until, r }));
+    return save(go, () => e, gzip, beforeCommit);
+  };
+  const step = async (each) => {
+    c.t += 1000;
+    each?.();
+    const due = waits.filter((w) => c.t >= w.until);
+    waits = waits.filter((w) => c.t < w.until);
+    due.forEach((w) => w.r());
+    await new Promise((r) => setTimeout(r, 0));
+    // a tick that starts a capture resolves only when its save does
+    await Promise.race([c.tick(), new Promise((r) => setTimeout(r, 0))]);
+  };
+  c.seqs.kcp = 10;
+  c.loop.request(); // hidden; capture 1 starts at once
+  let i = 0;
+  const flushEvery3s = () => {
+    if (++i % 3 === 0) {
+      c.seqs.kcp++;
+      c.loop.requestSoon();
+    }
+  };
+  for (let s = 0; s < 14; s++) await step(flushEvery3s);
+  const first = c.saved.length;
+  for (let s = 0; s < 30; s++) await step(flushEvery3s);
+  const later = c.saved.length;
+  const pending = waits.length;
+  waits.forEach((w) => w.r()); // let an in-flight capture finish before the test ends
+  await new Promise((r) => setTimeout(r, 0));
+  assertEquals([first, later, pending], [2, 2, 0], `captures ${JSON.stringify(c.saved.map((x) => [(x.at - 1_000_000) / 1000, x.kcp]))}`);
 });
 
 function assert(condition, message) {
