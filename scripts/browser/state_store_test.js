@@ -472,3 +472,32 @@ Deno.test("page wiring: owner claimed before kcp boots; refusals stop saving; Re
   assert(/includes\("--all"\)/.test(app) && /await resetState\(\{ all \}\)/.test(app), "reset --all");
   assert(/The copies hold secrets/.test(app), "banner warns that backups hold secrets");
 });
+
+Deno.test("page wiring: hidden, pagehide and spec-writing actions flush the kcp worker's held writes", async () => {
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  assert(/addEventListener\("pagehide", \(\) => void flushKcpSoon\("pagehide"\)\)/.test(app), "pagehide flushes kcp");
+  assert(/visibilityState !== "hidden"\) return;\s*void persister\.flushAll\(\);\s*void flushKcpSoon\("hidden"\);/.test(app), "hidden flushes kcp");
+  const fn = app.slice(app.indexOf("function flushKcpSoon"), app.indexOf("function flushKcpSoon") + 700);
+  assert(/if \(!kcpWorker \|\| !kcpStateOwned\(\) \|\| kcpPersistOff\) return Promise\.resolve\(\);/.test(fn), "only a running, owning, saving kcp");
+  assert(/flushKcpWorker\(kcpWorker, 3000\)/.test(fn) && /await kcpPersistQueue/.test(fn), "posts persist-flush and waits for the writes");
+  assert(/kcpFlushAgain = true/.test(fn), "a flush asked during one runs again after it");
+  assert(/if \(channel === "kcp"\) kcpPersistOff = true;/.test(app), "fail-closed kcp has nothing to flush");
+  const flush = app.slice(app.indexOf("function flushKcpWorker"), app.indexOf("function flushKcpWorker") + 400);
+  assert(/worker\.postMessage\(\{ type: "persist-flush" \}\)/.test(flush), "the flush message the worker answers");
+  const worker = await Deno.readTextFile(new URL("./kcp_worker.js", import.meta.url));
+  assert(/type === "persist-flush"[\s\S]{0,200}callGo\("kcpPersistFlush"/.test(worker), "worker calls Go's kcpPersistFlush");
+  // Each spec-writing action flushes right after its write succeeded.
+  const after = (fnName, write, label) => {
+    const body = app.slice(app.indexOf(fnName));
+    const w = body.indexOf(write);
+    const f = body.indexOf(`flushKcpSoon("${label}")`);
+    assert(w >= 0 && f > w && f - w < 200, `${label} flushes after ${write}`);
+  };
+  after("async function requestVM", "await setInfraContract(", "Request VM");
+  after("async function releaseContract", "vmshell.requestRelease(", "Release");
+  after("function r2Action", "await createContractEvent(", "Start R2");
+  const gc = app.slice(app.indexOf("async function collectOtherTabInfras"), app.indexOf("// Sets the state of contract short"));
+  assert((gc.match(/flushKcpSoon\("infra GC"\)/g) ?? []).length === 3, "GC delete, rebind-delete and rebind flush");
+  assert(/"Release again"[\s\S]{0,200}releaseContract\(name\)/.test(app), "Release again goes through releaseContract");
+  assert(/Promise\.race\(\[flushKcpSoon\("reload"\), sleep\(3000\)\]\)\.then\(go, go\)/.test(app), "d.reload flushes first");
+});

@@ -724,13 +724,17 @@ const persister = createPersister({
   onError: (key, err) => stateWriteFailed(`state save (${key})`, err),
 });
 addEventListener("pagehide", () => void persister.flushAll());
+addEventListener("pagehide", () => void flushKcpSoon("pagehide"));
 
 // --- saved state this build cannot read (rc129) -------------------------------
 // Go reports a kcp or socialweb value it could not read and never persists
 // that channel then, so nothing is saved over it. The raw value is copied to
 // <channel>-unreadable-<time> first, then the error is shown.
 let restoredRaw = { kcp: "", socialweb: "" };
+// Set when Go runs kcp without saving (its saved state was unreadable).
+let kcpPersistOff = false;
 async function restoreUnreadable(channel, message) {
+  if (channel === "kcp") kcpPersistOff = true;
   const raw = restoredRaw[channel] ?? "";
   let backup = null;
   try {
@@ -1095,8 +1099,43 @@ function noteKcpAnswer() {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "hidden") return;
   void persister.flushAll();
+  void flushKcpSoon("hidden");
   kcpWorker?.postMessage({ type: "hibernate" });
 });
+
+// The kcp coalescer holds writes for up to 10 s (750 ms quiet), so a status
+// written just before a reload (a contract turning Held), or a Release
+// clicked just before the tab closes, would be lost and the older state
+// restored. On hidden, pagehide and after every user action that writes spec
+// (Request VM, Release, Start R2, the infra GC) the worker persists them at
+// once (kcpPersistFlush); the messages land through the kcp persist queue.
+// Only a running kcp of the owning tab that saves at all (not fail-closed).
+// A call while one runs flushes again after it (the new write may be later).
+let kcpFlushRunning = null;
+let kcpFlushAgain = false;
+// Returns a promise that settles once the flush landed (or at once when
+// there is nothing to flush). An unload does not wait for it: pagehide is
+// best effort, which is why every spec-writing action flushes itself.
+function flushKcpSoon(why) {
+  if (!kcpWorker || !kcpStateOwned() || kcpPersistOff) return Promise.resolve();
+  if (kcpFlushRunning) {
+    kcpFlushAgain = true;
+    return kcpFlushRunning;
+  }
+  kcpFlushRunning = flushKcpWorker(kcpWorker, 3000)
+    .then(async (flushed) => {
+      await kcpPersistQueue;
+      if (!flushed) addLog("debug", `kcp flush after ${why} unanswered`);
+    })
+    .finally(() => {
+      kcpFlushRunning = null;
+      if (kcpFlushAgain) {
+        kcpFlushAgain = false;
+        void flushKcpSoon(why);
+      }
+    });
+  return kcpFlushRunning;
+}
 
 // Deletes the stored snapshot; the next load cold boots. The running worker
 // stops capturing until reload.
@@ -2816,6 +2855,7 @@ async function collectOtherTabInfras(did) {
           await kcpREST("DELETE", `${SOCIALWEB_API}/ephemeralinfras/${step.name}`).catch((err) => {
             if (kcpStatus(err) !== 404) throw err;
           });
+          void flushKcpSoon("infra GC");
           addLog("info", `EphemeralInfra ${step.name} of another tab deleted: ${step.reason}`);
         } else if (step.action === "rebind-delete") {
           // Its record repo does not resolve: deleting now would orphan the
@@ -2830,6 +2870,7 @@ async function collectOtherTabInfras(did) {
             timeoutMs: INFRA_GC_REBIND_MS,
             pollMs: INFRA_RECORD_POLL_MS,
           });
+          void flushKcpSoon("infra GC");
           if (settled) {
             addLog("info", `EphemeralInfra ${step.name} of another tab deleted after rebinding its record: ${step.reason}`);
           } else {
@@ -2843,6 +2884,7 @@ async function collectOtherTabInfras(did) {
             infra: step.name,
             update: (spec) => (vmshell.infraRecordStale(spec.record) ? { ...spec, record } : null),
           }));
+          void flushKcpSoon("infra GC");
           addLog("info", `EphemeralInfra ${step.name} of another tab kept and its record rebound: ${step.reason}${live}`);
         } else {
           addLog("info", `EphemeralInfra ${step.name} of another tab left alone: ${step.reason}${live}`);
@@ -2964,6 +3006,7 @@ async function requestVM() {
     }
     const { contract, secret } = vmshell.infraContract({ infra: infraName, short, wootty, agent, sshKeys, association: association.subject, guestTools });
     await setInfraContract(infraName, contract, secret);
+    void flushKcpSoon("Request VM");
     setAppStatus(computeStatusEl, `${name} requested; waiting for bids`, "ok");
     addLog("ok", `ComputeContract ${name} requested from discovered bidders with ${shells}`);
     // Show what is in flight; the user can watch it go Held in the terminal.
@@ -2993,6 +3036,7 @@ async function releaseContract(name) {
       serialize: infraQueued,
     });
     computeReleaseAsked.set(name, requestedAt);
+    void flushKcpSoon("Release");
   } catch (err) {
     if (previous === undefined) computeReleaseAsked.delete(name);
     else computeReleaseAsked.set(name, previous);
@@ -3173,6 +3217,7 @@ function r2Action(contract) {
     button.disabled = true;
     try {
       await createContractEvent(webrtcGuest.r2StartEvent(name, Math.random().toString(36).slice(2, 8), { agent: computeAgentEl.checked }));
+      void flushKcpSoon("Start R2");
       addLog("info", `asked ${name} to start R2`);
     } catch (err) {
       button.disabled = false;
@@ -3806,13 +3851,17 @@ const debugHandle = {
   log: (message) => addLog("info", `debug: ${message}`),
   lock: () => kcpLock.state,
   banners: () => banners.ids().map((id) => [id, banners.text(id)]),
+  // Flushes kcp's held writes first (at most 3 s): a reload does not wait
+  // for the pagehide flush.
   reload: (query) => {
     debugSend("info", "debug: reloading");
     debugFlush();
-    setTimeout(() => {
-      if (query === undefined) location.reload();
-      else location.search = query;
-    }, 300);
+    const go = () =>
+      setTimeout(() => {
+        if (query === undefined) location.reload();
+        else location.search = query;
+      }, 300);
+    Promise.race([flushKcpSoon("reload"), sleep(3000)]).then(go, go);
     return "reloading";
   },
   // Wipe this origin's saved state (what "clear website data" would do for
