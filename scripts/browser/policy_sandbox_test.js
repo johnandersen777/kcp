@@ -3,6 +3,36 @@
 
 import { connect, frameSrcdoc, policyEngineStatus, probe, rewriteNodeImports, runInWorker } from "./policy_sandbox.js";
 
+Deno.test("a throwing program prints no data: URL and none of its source", async () => {
+  // review page-rc134 F1: the program is a data: URL of its whole source
+  const r = await run(`const secret = "ghp_SECRET123"; JSON.parse("{bad");`);
+  eq(r.exitCode, 1, "throws");
+  eq(r.stderr.includes("data:"), false, `no data: URL in stderr: ${r.stderr.slice(0, 200)}`);
+  eq(r.stderr.includes("SECRET123") || r.stderr.includes("ghp_"), false, "no source text in stderr");
+  eq(r.stderr.includes("SyntaxError"), true, "the error itself is kept");
+});
+
+Deno.test("the scrub removes a whole data: URL, ( ) and ' included", async () => {
+  // what an engine that ignores sourceURL would print
+  const r = await run(`console.error("at data:text/javascript," + encodeURIComponent("f(x); g('ghp_SECRET123')") + ":1:2 next");`);
+  eq(r.stderr, "at policy-program.js next\n", "scrubbed to the next space");
+});
+
+Deno.test("the node: rewrite stays linear and leaves spliced data alone", async () => {
+  // review page-rc134 F2/F4: hostile spliced JSON must not stall the frame or match
+  const hostile = "const data = " + JSON.stringify("import { ".repeat(40_000) + " x from 'node:crypto' import 'node:fs'") + ";";
+  const t0 = performance.now();
+  const out = rewriteNodeImports(hostile);
+  const ms = performance.now() - t0;
+  eq(ms < 200, true, `rewrite took ${ms.toFixed(0)} ms`);
+  eq(out, hostile, "string data is not rewritten");
+  // export forms (F3)
+  const ex = rewriteNodeImports(`export { Buffer as B } from "node:buffer";\nexport * from "node:crypto";`);
+  eq(ex.includes(`const { Buffer: B } = await import("data:text/javascript,`), true, "export named");
+  eq(ex.includes("export { B };"), true, "re-export binding");
+  eq(ex.includes(`is not supported in the browser policy sandbox`), true, "export * fails clearly");
+});
+
 function assert(cond, message) {
   if (!cond) throw new Error(message);
 }
@@ -82,7 +112,28 @@ Deno.test("kill ends a run early", async () => {
 });
 
 Deno.test("node: imports of the bundled actions resolve to shims", async () => {
-  eq(rewriteNodeImports(`import x from "node:crypto";`).startsWith(`import x from "data:text/javascript,`), true, "rewrite");
+  // WebKit denies static data: imports in the Worker: every form becomes a top-level await
+  const forms = rewriteNodeImports(`import x from "node:crypto";
+import { a, b as c } from 'node:buffer';
+import d, { e } from "node:crypto";
+import * as ns from "node:dns/promises";
+import "node:buffer";
+const m = await import("node:crypto");
+import { y } from "./not-node.js";`);
+  eq(/\bimport\s[^(]*\bfrom\s*["']data:/.test(forms) || /\bimport\s*["']data:/.test(forms), false, "no static data: import left");
+  eq(forms.includes(`const { default: x } = await import("data:text/javascript,`), true, "default");
+  eq(forms.includes(`const { a, b: c } = await import("data:text/javascript,`), true, "named + as");
+  eq(forms.includes(`const { default: d, e } = await import("data:text/javascript,`), true, "default + named");
+  eq(forms.includes(`const ns = await import("data:text/javascript,`), true, "namespace");
+  eq(/await import\("data:text\/javascript,[^"]*"\);\nconst m/.test(forms), true, "side effect");
+  eq(forms.includes(`const m = await import("data:text/javascript,`), true, "dynamic");
+  eq(forms.includes(`import { y } from "./not-node.js";`), true, "other specifiers untouched");
+  // the bundled actions repeat aliased imports of one module (esbuild output)
+  const repeated = await run(`import { Buffer as Buffer2 } from "node:buffer";
+import { Buffer as Buffer3 } from "node:buffer";
+import crypto from "node:crypto";
+console.log(Buffer2 === Buffer3, Buffer2.from("hi").toString("utf8"), typeof crypto.randomBytes);`);
+  eq([repeated.exitCode, repeated.stdout], [0, "true hi function\n"], "repeated aliased imports");
   const r = await run(`import { Buffer } from "node:buffer";
 import crypto from "node:crypto";
 import * as nc from "node:crypto";

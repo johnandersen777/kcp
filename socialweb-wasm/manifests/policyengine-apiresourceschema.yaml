@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-2.policyengines.policy.socialweb.computer
+  name: v1alpha1-3.policyengines.policy.socialweb.computer
 spec:
   group: policy.socialweb.computer
   names:
@@ -80,7 +80,16 @@ spec:
                     enum:
                       - deno
                       - browser
+                      - embedded
                   browser:
+                    type: object
+                    properties:
+                      timeoutSeconds:
+                        type: integer
+                        format: int32
+                        default: 120
+                        minimum: 1
+                  embedded:
                     type: object
                     properties:
                       timeoutSeconds:

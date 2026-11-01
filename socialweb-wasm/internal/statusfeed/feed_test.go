@@ -205,3 +205,24 @@ func TestContractAtircToken(t *testing.T) {
 		t.Fatalf("mint failed: %+v", got)
 	}
 }
+
+func TestNamedPrefersThePagesOwnObject(t *testing.T) {
+	obj := func(name, reason string) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": name}, "status": map[string]any{"phase": "Ready"}}}
+		if reason != "" {
+			u.Object["status"].(map[string]any)["pendingAction"] = map[string]any{"kind": "signInAgain", "reason": reason}
+		}
+		return u
+	}
+	// "guest" sorts before "requester"; the page must show its own identity.
+	items := []*unstructured.Unstructured{obj("requester", ""), obj("guest", "ScopeUpgrade")}
+	if got := named(items, "requester", identityResource); got.Name != "requester" || got.Pending != nil {
+		t.Fatalf("named = %+v, want requester without a pending action", got)
+	}
+	if got := named(items[1:], "requester", identityResource); got != nil {
+		t.Fatalf("named without requester = %+v, want nil (never another identity)", got)
+	}
+	if got := named(nil, "requester", identityResource); got != nil {
+		t.Fatalf("named(nil) = %+v, want nil", got)
+	}
+}

@@ -53,14 +53,15 @@ func startHeapDebug() {
 	}()
 }
 
-// startNoopLog is debug-only: with KCP_NOOP_LOG=1 it logs one line per no-op
-// update (key, verb, subresource, user), to find which controller re-applies
-// unchanged objects. Noisy; off by default.
+// startNoopLog is debug-only: with KCP_NOOP_LOG=1 it logs one line per
+// update, no-op or written (key, verb, subresource, user): which controller
+// re-applies unchanged objects, and what an idle page keeps writing.
+// Noisy; off by default.
 func startNoopLog() {
 	if os.Getenv("KCP_NOOP_LOG") != "1" {
 		return
 	}
-	storage.NoopLog = func(ctx context.Context, key string) {
+	storage.UpdateLog = func(ctx context.Context, key string, written bool) {
 		verb, sub, user := "", "", ""
 		if ri, ok := genericapirequest.RequestInfoFrom(ctx); ok {
 			verb, sub = ri.Verb, ri.Subresource
@@ -68,7 +69,11 @@ func startNoopLog() {
 		if u, ok := genericapirequest.UserFrom(ctx); ok {
 			user = u.GetName()
 		}
-		fmt.Fprintf(os.Stderr, "noop update: %s verb=%s subresource=%s user=%s\n", key, verb, sub, user)
+		kind := "noop"
+		if written {
+			kind = "written"
+		}
+		fmt.Fprintf(os.Stderr, "update %s: %s verb=%s subresource=%s user=%s\n", kind, key, verb, sub, user)
 	}
 }
 

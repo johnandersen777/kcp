@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-14.marketidentities.socialweb.computer
+  name: v1alpha1-15.marketidentities.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -155,6 +155,8 @@ spec:
               signOutGeneration:
                 type: integer
                 format: int64
+              signInRequestedAt:
+                type: string
             required:
               - mode
           status:

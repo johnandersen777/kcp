@@ -33,6 +33,22 @@ export function signInURL(identity, local = {}, now = Date.now()) {
   return url;
 }
 
+// The server-side apply that asks socialweb for a new sign-in URL (r134
+// spec.signInRequestedAt, field manager socialweb.computer/signin).
+export function signInLinkRequest(api, now = new Date()) {
+  return {
+    method: "PATCH",
+    path: `${api}/marketidentities/requester?fieldManager=${encodeURIComponent("socialweb.computer/signin")}&force=true`,
+    contentType: "application/apply-patch+yaml",
+    body: {
+      apiVersion: "socialweb.computer/v1alpha1",
+      kind: "MarketIdentity",
+      metadata: { name: "requester" },
+      spec: { signInRequestedAt: now.toISOString() },
+    },
+  };
+}
+
 export function friendlyError(message) {
   const text = String(message ?? "").trim();
   const known = [

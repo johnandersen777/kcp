@@ -29,7 +29,7 @@ import {
 } from "https://esm.sh/just-bash@3.6.0/browser";
 import { buildDiagram, nodeID } from "./diagram.js";
 import { cancelOAuthPopup, OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
-import { GRACE_MS, normalizeHandle, signInURL, signInView } from "./identity_ui.js";
+import { GRACE_MS, normalizeHandle, signInURL, signInView, signInLinkRequest } from "./identity_ui.js";
 import {
   assembleSnapshot,
   backendNotice,
@@ -2509,7 +2509,7 @@ function identityAction(action) {
   const run = { start: startSignIn, open: openSignInPopup, switch: switchAccount, signOut: signOutIdentity,
     cancel: cancelOAuthPopup,
     // A new link for a permission upgrade; the old failure no longer applies.
-    refresh: () => (setSignIn({ error: "" }), restartSignIn()) }[action];
+    refresh: () => (setSignIn({ error: "" }), requestSignInLink()) }[action];
   if (!run) return;
   const fail = (err) => {
     const message = err instanceof Error ? err.message : String(err);
@@ -2529,6 +2529,16 @@ async function startSignIn() {
   identityGeneration++;
   setSignIn({ step: "preparing", error: "" });
   await patchRequesterIdentity();
+}
+
+// A permission upgrade asks for a new link by stamping the MarketIdentity
+// (socialweb r134 spec.signInRequestedAt, its own field manager): the spec
+// change reissues the URL at once, where clearing status.pendingAction waited
+// for the 15 min expiry. Not a new sign-in, so a queued Request VM keeps going.
+async function requestSignInLink() {
+  const req = signInLinkRequest(SOCIALWEB_API);
+  await kcpREST(req.method, req.path, req.body, req.contentType);
+  addLog("info", "asked socialweb for a new sign-in link");
 }
 
 // Builds before rc110 can reissue a spent URL after a failed callback; clear

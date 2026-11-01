@@ -5,7 +5,7 @@
 // persists from the same stored base, so seqs alone cannot tell a stale
 // holder's capture from the owner's: both outcomes are tested here.
 
-import { readOwner, restampOwner, snapshotRejection, startHibernation, tryRestore } from "./kcp_hibernate.js";
+import { readOwner, restampOwner, snapshotKey, snapshotRejection, startHibernation, tryRestore } from "./kcp_hibernate.js";
 import { createIndexedDBBackend } from "./state_store.js";
 import { fakeIndexedDB, fakeKeyRange } from "./fake_indexeddb_for_tests.js";
 
@@ -349,6 +349,21 @@ Deno.test("one hide plus a flush every 3 s during 5 s captures: two captures, th
   waits.forEach((w) => w.r()); // let an in-flight capture finish before the test ends
   await new Promise((r) => setTimeout(r, 0));
   assertEquals([first, later, pending], [2, 2, 0], `captures ${JSON.stringify(c.saved.map((x) => [(x.at - 1_000_000) / 1000, x.kcp]))}`);
+});
+
+Deno.test("the first load of a new build leaves a snapshot the next reload can use", async () => {
+  // forceApply (set on the first load of a new build) is not part of the key,
+  // so its snapshot matches the next, ordinary, load of the same build.
+  const worker = await Deno.readTextFile(new URL("./kcp_worker.js", import.meta.url));
+  if (!/JSON\.stringify\(\{ \.\.\.init\.socialweb, restore: undefined, forceApply: undefined, noopLog: init\.noopLog \|\| undefined \}\)/.test(worker)) {
+    throw new Error("snapshot key must leave out restore and forceApply");
+  }
+  if (!/async function restoreSnapshot\(\) \{[\s\S]{0,200}if \(init\.socialweb\?\.forceApply\) \{[\s\S]{0,200}return null;/.test(worker)) {
+    throw new Error("a forceApply load must cold boot, not restore");
+  }
+  const forced = await snapshotKey("w", "data:,exec", JSON.stringify({ origin: "o", forceApply: undefined }));
+  const plain = await snapshotKey("w", "data:,exec", JSON.stringify({ origin: "o" }));
+  assertEquals(forced, plain);
 });
 
 function assert(condition, message) {
