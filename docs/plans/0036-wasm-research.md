@@ -130,3 +130,9 @@ relative to ~/src/kcp/socialweb-computer-kcp at origin/main.
 - Not covered: R2's own agents (grandchildren, atircParentRef unused in the workaround); CLI path blocked by the run request option parsing bug (fixed on r2bin-fix 853e2adf, 8294bacd).
 - Release: outer contract Released 17:17:31.9Z from the page; contract-scoped association requester_associate-9c02c8bc668311f157676fe1dce9c79f-xjw6w5wbmgcdh in alice's repo -> getRecord 400 RecordNotFound (deleted); hat-7 orphan check 17:17:44Z clean. R2's own nested contract Released 17:16:31.8Z (releaseOk).
 - Revoke: atirc revocations.ndjson revoked_at 2026-10-30T17:17:30Z for r2-xjw6w5wbmgcdh.aliceoa.bsky.social and aliceoa-3mz4bihylhh2s.aliceoa.bsky.social (atirc-dev, server-side). V1 PASS incl cleanup.
+
+## V1 grandchild run (2026-10-30, rc125 workaround)
+
+- Prod page 4cba14c3a, alice, Agent + R2: outer Held 17:23:29Z on hat-7; VM agent aliceoa-3mz4ca3etg627 joined.
+- R2 started as the agent user with --agent --hold: did:plc:reephqeca6eeq7hohvikcmot Pending 17:26:15Z -> Verified 17:26:16Z; child token r2-regb26j7a4jna.aliceoa.bsky.social minted 17:26:17Z; R2 joined and stayed subscribed 17:26:28Z ("r2: online (agent run)").
+- R2's own RFP accepted by hat-7 17:26:42Z (repo did:plc:reephqeca6eeq7hohvikcmot); nested VM Held 17:26:59Z; `run request agent r2-agent` -> agentStart -> grandchild agent joined atirc as vm-3mz4cgbnb6z22.r2-regb26j7a4jna.aliceoa.bsky.social (token minted below R2's via atircParentRef). PASS: alice -> R2 -> R2 VM agent.
