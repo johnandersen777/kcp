@@ -349,3 +349,9 @@ Open questions for the owner:
   `Config.Sandbox` injection plus the `Fenced` condition (smaller socialweb diff, no API field)?
 - Before rollout step 4: does aliceoa's Tangled vouch graph include the lead's bidder operators?
   If not, every winner is rejected (`ContractOutcomePolicyRejected`, `runner.go:490-493`).
+
+## Results
+
+- 2026-10-30 headless Chrome (drives-oauth, dev fence page, fenced-sandbox e97abe788 @ socialweb 8d79dff0, alice signed in, no VM): `policy sandbox: fenced, ready (ProbePassed: idbPlanted=yes cachePlanted=yes origin=null shim=ok dom=none idb=denied:SecurityError cache=denied:SecurityError opfs=denied:SecurityError bc=silent frameOrigin=null parent=blocked timeout=killed rerun=ok)` at 09:16:25Z. PASS on Chromium.
+- Fixed on the way: (1) the page PolicyEngine had no sandbox provider (defaulted to deno, CreateFailed); socialweb 8d79dff0 adds `PolicyEngineSettings.sandbox` and the page createRoot sets `provider=browser` (576416dcf). (2) Chromium refuses module Workers from `blob:null` in the opaque frame ("Refused to cross-origin redirects of the top-level worker script"); the per-run Worker now starts from `data:`, CSP `worker-src data:` (e97abe788). Check: `scripts/browser-dev/policy-sandbox-check.ts`.
+- Pending: iOS Safari check of this build (owner, 14:00Z).
