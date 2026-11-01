@@ -52,9 +52,33 @@ function patchThen() {
   };
 }
 
+// A Worker Go starts (the sandbox runner, socialweb internal/sandbox/worker)
+// answers through event listeners, not a Promise, and does not survive a
+// restore: Go would wait out its run timeout for a stand-in that never
+// answers. So a capture waits until every Go-started Worker is terminated.
+const goWorkers = new Set();
+let workerPatched = false;
+
+function patchWorker() {
+  const Base = globalThis.Worker;
+  if (workerPatched || typeof Base !== "function") return;
+  workerPatched = true;
+  globalThis.Worker = class extends Base {
+    constructor(...args) {
+      super(...args);
+      if (goDepth > 0) goWorkers.add(this);
+    }
+    terminate() {
+      goWorkers.delete(this);
+      return super.terminate();
+    }
+  };
+}
+
 // instrument must run right after `new Go()`, before run() or restore().
 export function instrument(go) {
   patchThen();
+  patchWorker();
   const make = go._makeFuncWrapper.bind(go);
   go._makeFuncWrapper = (id) => {
     const fn = make(id);
@@ -96,6 +120,7 @@ export function busy(go) {
   if (go.exited) return "Go program has exited";
   if (goDepth > 0 || go._pendingEvent) return "inside a Go callback";
   if (goAwaits > 0) return `Go awaits ${goAwaits} promise(s)`;
+  if (goWorkers.size > 0) return `${goWorkers.size} Go-started Worker(s) running`;
   if (!Object.keys(go._inst?.exports ?? {}).some((n) => n.startsWith("__snap_g"))) {
     return "wasm globals are not exported (scripts/wasm_globals.js)";
   }
@@ -186,6 +211,7 @@ export function capture(go, extra = {}) {
     else if (funcIds.has(v)) e = { k: "func", id: funcIds.get(v) };
     else if (paths.has(v)) e = { k: "path", p: paths.get(v) };
     else if (v instanceof Uint8Array) e = { k: "u8", v: b64(v) };
+    else if (isSocket(v)) e = socketEntry(v);
     else {
       e = { k: "unknown", t: typeof v, c: v?.constructor?.name ?? String(v) };
       unknown.push({ id, rc, t: e.t, c: e.c, keys: v ? Object.keys(v).slice(0, 8) : [] });
@@ -216,6 +242,61 @@ export function capture(go, extra = {}) {
   };
   meta.stats.captureMs = Math.round(performance.now() - t0);
   return { meta, memory };
+}
+
+// A WebSocket does not survive a restore: the new page never opened it, so its
+// handlers would never fire and Go would wait out its read timeout (wsconn: 2
+// min) before redialing. capture records the onclose func wrapper Go set on
+// it; restore puts a closed stand-in in its place and, once Go runs, fires
+// that onclose with an abnormal close so Go redials at once.
+export function isSocket(v) {
+  return typeof globalThis.WebSocket === "function" && v instanceof globalThis.WebSocket;
+}
+
+export function socketEntry(v) {
+  const onclose = funcIds.get(v.onclose);
+  return onclose === undefined ? { k: "socket" } : { k: "socket", onclose };
+}
+
+const SOCKET_CLOSED = 3;
+
+// The close a restored socket gets. socialweb wsconn matches this code and
+// reason to redial at once with its backoff reset; keep them in step.
+export const RESTORE_CLOSE_CODE = 1006;
+export const RESTORE_CLOSE_REASON = "restored from a memory snapshot";
+
+export function deadSocket() {
+  return {
+    readyState: SOCKET_CLOSED,
+    binaryType: "arraybuffer",
+    onopen: null,
+    onmessage: null,
+    onerror: null,
+    onclose: null,
+    close() {},
+    send() {
+      throw new Error("this WebSocket did not survive the memory snapshot");
+    },
+  };
+}
+
+// closeRestoredSockets fires each restored socket's onclose: the wrapper Go
+// set before the capture, or the one it set on the stand-in since (null if Go
+// already closed the conn).
+export function closeRestoredSockets(go, sockets) {
+  for (const { socket, onclose } of sockets) {
+    const handler = typeof socket.onclose === "function"
+      ? socket.onclose
+      : onclose === undefined
+      ? null
+      : go._values.find((v, i) => i >= GO_ROOTS && funcIds.get(v) === onclose) ?? go._makeFuncWrapper(onclose);
+    if (!handler) continue;
+    try {
+      handler.call(socket, { type: "close", code: RESTORE_CLOSE_CODE, reason: RESTORE_CLOSE_REASON, wasClean: false });
+    } catch (err) {
+      console.warn("closing a restored WebSocket:", err);
+    }
+  }
 }
 
 function armTimeout(go, id, delay) {
@@ -256,6 +337,7 @@ export async function restore(go, module, meta, fill) {
   go._goRefCounts = new Array(GO_ROOTS).fill(Infinity);
   go._ids = new Map([[0, 1], [null, 2], [true, 3], [false, 4], [globalThis, 5], [go, 6]]);
   const missing = [];
+  const sockets = [];
   meta.values.forEach((e, i) => {
     const id = GO_ROOTS + i;
     let v;
@@ -267,6 +349,9 @@ export async function restore(go, module, meta, fill) {
     else if (e.k === "path") {
       v = resolvePath(e.p);
       if (v === undefined) missing.push(e.p.join("."));
+    } else if (e.k === "socket") {
+      v = deadSocket();
+      sockets.push({ socket: v, onclose: e.onclose });
     } else v = e.t === "function" ? function unrestorable() {} : { unrestorable: e.c };
     go._values[id] = v;
     go._goRefCounts[id] = e.rc ?? 0;
@@ -294,6 +379,7 @@ export async function restore(go, module, meta, fill) {
     resume() {
       for (const id of meta.timeouts) armTimeout(go, id, 0);
       if (meta.timeouts.length === 0) setTimeout(() => go._resume(), 0);
+      setTimeout(() => closeRestoredSockets(go, sockets), 0);
     },
     timings: {
       instantiateMs: Math.round(t.instantiate - t.start),

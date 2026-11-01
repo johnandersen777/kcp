@@ -788,7 +788,7 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		informerfactoryhack.Wrap(c.KubeSharedInformerFactory),
 		admissionPluginInitializers,
 		opts.GenericControlPlane,
-		opts.Extra.ShardReplicaCount,
+		opts.Extra.APIExtensionsMasterCount(),
 		conversionFactory)
 	if err != nil {
 		return nil, fmt.Errorf("error configuring api extensions: %w", err)

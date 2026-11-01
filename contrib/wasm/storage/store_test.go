@@ -793,3 +793,78 @@ func TestDeltaSnapshotRoundTrip(t *testing.T) {
 		t.Fatalf("message after restore: full=%t err=%v, want full", isFull, err)
 	}
 }
+
+// MergeWith inserts only keys the live store does not hold, as creates would
+// (new resource version, ADDED event), and leaves live objects alone.
+func TestMergeWithInsertsOnlyAbsentKeys(t *testing.T) {
+	ctx := context.Background()
+	saved := New()
+	defer saved.Close()
+	for _, name := range []string{"kept", "back"} {
+		if err := saved.Create(ctx, key(name), newFetch(name), nil, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap, err := saved.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	live := New()
+	defer live.Close()
+	newer := newFetch("kept")
+	newer.Labels = map[string]string{"live": "yes"}
+	for _, obj := range []*fetchv1alpha1.Fetch{newFetch("other"), newer} {
+		if err := live.Create(ctx, key(obj.Name), obj, nil, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w, err := live.Watch(ctx, prefix, kstorage.ListOptions{ResourceVersion: "3", Recursive: true, Predicate: kstorage.Everything})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+
+	added, err := live.MergeWith(snap, func(_ string, raw []byte) (runtime.Object, error) { return decodeFetch(raw) })
+	if err != nil || added != 1 {
+		t.Fatalf("MergeWith = %d, %v; want 1 inserted", added, err)
+	}
+	var kept fetchv1alpha1.Fetch
+	if err := live.Get(ctx, key("kept"), kstorage.GetOptions{}, &kept); err != nil {
+		t.Fatal(err)
+	}
+	if kept.Labels["live"] != "yes" || kept.ResourceVersion != "3" {
+		t.Fatalf("live object changed: labels %v rv %s", kept.Labels, kept.ResourceVersion)
+	}
+	var back fetchv1alpha1.Fetch
+	if err := live.Get(ctx, key("back"), kstorage.GetOptions{}, &back); err != nil {
+		t.Fatalf("merged object missing: %v", err)
+	}
+	if back.ResourceVersion != "4" {
+		t.Fatalf("merged object rv = %s, want 4 (the live store's next)", back.ResourceVersion)
+	}
+	var list fetchv1alpha1.FetchList
+	if err := live.GetList(ctx, prefix, kstorage.ListOptions{Recursive: true}, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 3 {
+		t.Fatalf("live items = %d, want 3 (nothing deleted)", len(list.Items))
+	}
+	select {
+	case ev := <-w.ResultChan():
+		if ev.Type != watch.Added || ev.Object.(*fetchv1alpha1.Fetch).Name != "back" {
+			t.Fatalf("event = %s %s, want ADDED back", ev.Type, ev.Object.(*fetchv1alpha1.Fetch).Name)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no ADDED event for the merged object")
+	}
+	select {
+	case ev := <-w.ResultChan():
+		t.Fatalf("unexpected second event %s", ev.Type)
+	case <-time.After(100 * time.Millisecond):
+	}
+	// Merging again inserts nothing.
+	if added, err := live.MergeWith(snap, func(_ string, raw []byte) (runtime.Object, error) { return decodeFetch(raw) }); err != nil || added != 0 {
+		t.Fatalf("second MergeWith = %d, %v; want 0", added, err)
+	}
+}

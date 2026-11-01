@@ -84,6 +84,10 @@ type ExtraOptions struct {
 	ConversionCELTransformationTimeout    time.Duration
 	RootIdentitiesFile                    string
 	BatteriesIncluded                     []string
+	// SingleAPIServer declares that this server is the only apiserver
+	// serving its storage (an embedded or single-process kcp, e.g. one
+	// backed by memory:// storage). See APIExtensionsMasterCount.
+	SingleAPIServer bool
 	// DEVELOPMENT ONLY. AdditionalMappingsFile is the path to a file that contains additional mappings
 	// for the mini-front-proxy to use. The file should be in the format of the
 	// --miniproxy-mapping-file flag of the front-proxy. Do NOT expose this flag to users via main server options.
@@ -91,6 +95,32 @@ type ExtraOptions struct {
 	AdditionalMappingsFile string
 
 	ServiceAccountCache *kcpserviceaccount.Cache
+}
+
+// APIExtensionsMasterCount returns the apiserver count kcp passes to the
+// apiextensions server (its ExtraConfig.MasterCount, the upstream HA
+// signal):
+//
+//   - ShardReplicaCount > 1: the replica count. The CRD handler delays
+//     establishing new CRDs by 5 s and sleeps 2 s on creates within 2 s of
+//     a CRD becoming Established, so every replica has seen the CRD.
+//   - SingleAPIServer: 1, "known to be the only apiserver". The kcp
+//     apiextensions patch (scripts/prepare-kcp-patched-modules.sh) skips the
+//     2 s create sleep only for exactly 1.
+//   - otherwise 0, "not declared": no establishing delay (as for 1) and the
+//     2 s create sleep stays.
+//
+// Upstream only compares MasterCount with "> 1", so 0 and 1 behave the same
+// in an unpatched build.
+func (o ExtraOptions) APIExtensionsMasterCount() int {
+	switch {
+	case o.ShardReplicaCount > 1:
+		return o.ShardReplicaCount
+	case o.SingleAPIServer:
+		return 1
+	default:
+		return 0
+	}
 }
 
 type completedOptions struct {
@@ -199,6 +229,7 @@ func (o *Options) AddFlags(fss *cliflag.NamedFlagSets) {
 	// The --shard-replica-count is passed along and lands as
 	// masterCount in upstream which then causes a 5s delay on startup.
 	fs.IntVar(&o.Extra.ShardReplicaCount, "shard-replica-count", o.Extra.ShardReplicaCount, "Number of kcp server replicas serving this shard. Values greater than 1 delay CRD establishment by 5 seconds so all replicas can warm their caches before the CRD is served.")
+	fs.BoolVar(&o.Extra.SingleAPIServer, "single-apiserver", o.Extra.SingleAPIServer, "Declare that this kcp server is the only apiserver serving its storage (no other replica shares it). Builds with the kcp apiextensions patch (scripts/prepare-kcp-patched-modules.sh) then skip the 2 second HA wait on creates right after a CRD becomes Established. Cannot be combined with --shard-replica-count greater than 1.")
 	fs.StringToStringVar(&o.Extra.ShardLabels, "shard-labels", o.Extra.ShardLabels, "Additional labels to set on this shard's Shard object, e.g. region=us-east-1. The Shard object is owned by the shard; labels are part of its configuration.")
 	fs.StringVar(&o.Extra.ShardVirtualWorkspaceCAFile, "shard-virtual-workspace-ca-file", o.Extra.ShardVirtualWorkspaceCAFile, "Path to a CA certificate file that is valid for the virtual workspace server.")
 	fs.StringVar(&o.Extra.ShardVirtualWorkspaceURL, "shard-virtual-workspace-url", o.Extra.ShardVirtualWorkspaceURL, "An external URL address of a virtual workspace server associated with this shard. Defaults to shard's base address.")
@@ -263,6 +294,9 @@ func (o *CompletedOptions) Validate() []error {
 
 	if o.Extra.ShardReplicaCount < 1 {
 		errs = append(errs, fmt.Errorf("--shard-replica-count must be at least 1"))
+	}
+	if o.Extra.SingleAPIServer && o.Extra.ShardReplicaCount > 1 {
+		errs = append(errs, fmt.Errorf("--single-apiserver cannot be combined with --shard-replica-count=%d", o.Extra.ShardReplicaCount))
 	}
 
 	differential := false
