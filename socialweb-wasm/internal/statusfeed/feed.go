@@ -70,8 +70,8 @@ type Contract struct {
 	// status.atircRevokes (Pending|Done|Abandoned), run before Released.
 	Step         string `json:"step,omitempty"`
 	AtircRevokes string `json:"atircRevokes,omitempty"`
-	// R2Release is status.contract.r2Release: the A8 cascade's guest
-	// answer (phase values from assoc-b's rc127 commit; passed through raw).
+	// R2Release is status.contract.r2Release: the A8 cascade's guest answer
+	// (phase Requested|Released|Failed|TimedOut; ok is omitted when false).
 	R2Release *R2Release `json:"r2Release,omitempty"`
 
 	SecretsFetchedAt string    `json:"secretsFetchedAt,omitempty"`
@@ -91,8 +91,8 @@ type Contract struct {
 	GuestRequester *GuestRequester `json:"guestRequester,omitempty"`
 }
 
-// R2Release is the guest requester's answer to guest.r2Release; OK is nil
-// until it answered.
+// R2Release is the guest requester's answer to guest.r2Release; the phase
+// decides (OK is nil unless true).
 type R2Release struct {
 	Phase       string `json:"phase,omitempty"`
 	OK          *bool  `json:"ok,omitempty"`

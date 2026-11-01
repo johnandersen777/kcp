@@ -322,13 +322,18 @@ export function schemaHasAgent(schema) {
  */
 export function releaseNotes(contract, contractEvents = []) {
   const notes = [];
-  // status.contract.r2Release (rc127): the guest's answer, when the status has it.
+  // status.contract.r2Release (rc127, socialweb 34f74335): phase
+  // Requested|Released|Failed|TimedOut; ok is omitted when false, so the
+  // phase decides.
   const r2 = contract?.r2Release;
   if (r2) {
-    const phase = r2.phase ? ` [${r2.phase}]` : "";
-    if (r2.ok === true) notes.push(`R2 release: guest released (${r2.answeredAt ?? "?"})${phase}`);
-    else if (r2.ok === false) notes.push(`R2 release: FAILED/TIMED OUT: ${r2.message || "no message"}${phase}`);
-    else notes.push(`R2 release: asked ${r2.requestedAt ?? "?"}, waiting${phase}`);
+    const why = r2.message || "no message";
+    notes.push({
+      Requested: `R2 release: asked ${r2.requestedAt ?? "?"}, waiting (up to 12 min)`,
+      Released: `R2 release: guest released ${r2.answeredAt ?? "?"}`,
+      Failed: `R2 release: FAILED: ${why}`,
+      TimedOut: "R2 release: TIMED OUT after 12 min; bidder backstop releases R2's VMs after the association expires",
+    }[r2.phase] ?? `R2 release: [${r2.phase ?? "unknown"}] ${why}`);
   }
   const asked = contractEvents.find((e) => e?.contract === contract?.name && e.direction === "outbound" &&
     e.nsid === "com.publicdomainrelay.temp.compute.events.guest.r2Release");
