@@ -27,7 +27,6 @@ import (
 	"github.com/johnandersen777/socialweb-computer-kcp/api/v1alpha1"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/app/compose"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/app/marketrequester"
-	"github.com/johnandersen777/socialweb-computer-kcp/internal/sandbox/worker"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/atproto/oauth"
 	atpds "github.com/johnandersen777/socialweb-computer-kcp/internal/atproto/pds"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/atproto/pdsclient"
@@ -40,7 +39,7 @@ import (
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/infra"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketidentity"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/marketintents"
-	policyenginectl "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/policyengine"
+	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/policy"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/repos"
 	ctlruntime "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/runtime"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/runtime/kcpapply"
@@ -49,11 +48,11 @@ import (
 	contractexposure "github.com/johnandersen777/socialweb-computer-kcp/internal/exposure"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/marketidentity/atproto"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/oauthcallback"
-	pecontroller "github.com/johnandersen777/socialweb-computer-kcp/internal/policyengine/controller"
 
 	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserinfra/exposure"
 	bvault "github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserinfra/vault"
 	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browserinfra/vaulthost"
+	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/browsersandbox"
 )
 
 type Config struct {
@@ -312,17 +311,13 @@ func Start(parent context.Context, cfg Config) (*Orchestrator, error) {
 	}); err != nil {
 		return nil, err
 	}
-	engines := pecontroller.NewEngineManager(pecontroller.NewDefaultEngineFactory(pecontroller.Config{
-		Sandbox:        worker.New(),
-		DisableActions: true,
-		Log: func(level, msg string, meta map[string]any) {
-			log.Info(msg, "level", level)
-		},
-	}))
-	if _, err := policyenginectl.Register(mgr, policyenginectl.Options{
-		Bus: cfg.Bus, Engines: engines, Log: log,
+	// Policy runs in the page's fenced sandbox (plan 0037): the PolicyEngine's
+	// spec.sandbox.provider browser opens browsersandbox, whose probe sets the
+	// Fenced and Ready conditions.
+	if err := policy.Register(mgr, policy.Options{
+		Bus: cfg.Bus, OpenSandbox: browsersandbox.Open, Log: log,
 	}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("socialweb: policy controllers: %w", err)
 	}
 	if _, err := marketintents.Register(mgr, marketintents.Options{
 		Bus:     cfg.Bus,

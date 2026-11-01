@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	commonv1 "github.com/johnandersen777/socialweb-computer-kcp/api/common/v1alpha1"
+	policyv1alpha1 "github.com/johnandersen777/socialweb-computer-kcp/api/policy/v1alpha1"
 	"github.com/johnandersen777/socialweb-computer-kcp/api/v1alpha1"
 	"github.com/johnandersen777/socialweb-computer-kcp/internal/app/compose"
 	ctlruntime "github.com/johnandersen777/socialweb-computer-kcp/internal/controllers/runtime"
@@ -252,7 +253,13 @@ func (p *pass) desired(ctx context.Context, plan compose.AccountPlan, id *v1alph
 		Comms:                o.Spec.Comms,
 		SuspendParticipation: o.Spec.Suspend,
 	}
-	out := []compose.Desired{compose.PolicyEngineDesired()}
+	// The page runs policy in its fenced browser sandbox (plan 0037), as
+	// createRoot sets the webrtc ingress provider; native hosts keep deno.
+	engine := compose.PolicyEngineDesired()
+	engineSpec := engine.Spec.(policyv1alpha1.PolicyEngineSpec)
+	engineSpec.Sandbox = &policyv1alpha1.PolicySandboxConfig{Provider: policyv1alpha1.PolicySandboxProviderBrowser}
+	engine.Spec = engineSpec
+	out := []compose.Desired{engine}
 	if plan.Local {
 		pdsSpec, err := compose.AppPdsSpec(stateRoot, network, pdsHandle, vault, hostnames, pdsPublicURL, requireIngress, ingressRef)
 		if err != nil {
