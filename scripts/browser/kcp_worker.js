@@ -320,7 +320,14 @@ self.onmessage = (event) => {
   if (type === "persist-flush") {
     const flushId = event.data?.id;
     callGo("kcpPersistFlush", {}, 8000)
-      .then((out) => self.postMessage({ type: "persist-flushed", id: flushId, flushed: Boolean(out?.flushed) }))
+      .then((out) => {
+        self.postMessage({ type: "persist-flushed", id: flushId, flushed: Boolean(out?.flushed) });
+        // The records just written are newer than the last memory snapshot,
+        // so the next load would cold boot ("persisted state is newer").
+        // Capture again soon: the loop captures only when the seqs moved,
+        // once kcp is idle, one capture at a time (rc131 cold-boot fix).
+        if (out?.flushed) hibernation?.request();
+      })
       .catch((err) => self.postMessage({ type: "persist-flushed", id: flushId, flushed: false, error: String(err?.message ?? err) }));
     return;
   }

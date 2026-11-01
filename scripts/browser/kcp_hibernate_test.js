@@ -122,3 +122,42 @@ Deno.test("page wiring: snapshots get this tab's token and the previous owner's 
     if (!worker.includes(needle)) throw new Error(`worker lacks ${needle}`);
   }
 });
+
+// rc131 cold boots: a flush writes records newer than the last snapshot, so
+// the worker asks for a capture right after it; it happens only when the
+// seqs moved, without waiting for the 30 s quiet period.
+Deno.test("capture after a flush: only when the seqs moved, at once", async () => {
+  let seqs = { kcp: 9, socialweb: 0 };
+  const saved = [];
+  const store = {
+    kind: "fake",
+    async save(_go, extra, _gzip, beforeCommit) {
+      const e = extra();
+      await beforeCommit();
+      saved.push(e.seqs.kcp);
+      return { extra: e, bytes: 0, stored: 0, stats: {} };
+    },
+  };
+  const loop = startHibernation({
+    go: fakeGo(),
+    key: KEY,
+    ready: () => true,
+    seqs: () => ({ ...seqs }),
+    extra: () => ({}),
+    captured: { kcp: 9, socialweb: 0 }, // the snapshot this load restored
+    store,
+    log: () => {},
+    timers: { setInterval: () => 0 },
+  });
+  loop.request(); // a flush that wrote nothing new
+  await settle();
+  assertEquals(saved, [], "no capture without new records");
+  seqs = { kcp: 10, socialweb: 0 }; // the flush persisted one message
+  loop.request();
+  await settle();
+  assertEquals(saved, [10], "captured right after the flush, inside the quiet period");
+  const worker = await Deno.readTextFile(new URL("./kcp_worker.js", import.meta.url));
+  if (!/flushed: Boolean\(out\?\.flushed\) \}\);[\s\S]{0,400}if \(out\?\.flushed\) hibernation\?\.request\(\);/.test(worker)) {
+    throw new Error("the worker asks for a capture after each flush");
+  }
+});
