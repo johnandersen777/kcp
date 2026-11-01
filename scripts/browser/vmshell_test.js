@@ -32,6 +32,7 @@ import {
   secretsBundle,
   shellLink,
   RELEASE_FIELD_MANAGER,
+  releaseWorkPending,
   canReleaseAgain,
   phaseLabel,
   releaseAnswered,
@@ -551,4 +552,19 @@ Deno.test("release: every page release path goes through requestRelease", async 
   const callers = [...app.matchAll(/releaseContract\(name\)/g)].length;
   assert(callers === 4, `releaseContract callers (definition, Release, Release again, d.release): ${callers}`);
   assert(!/release:\s*true|merge-patch/.test(demo) && /d\.release\(/.test(demo), "the demo's leftover sweep uses d.release");
+});
+
+Deno.test("beforeunload: warns while release work runs in this tab", async () => {
+  assert(releaseWorkPending({ phase: "Held", release: true }), "release in progress");
+  assert(releaseWorkPending({ phase: "Released", atircRevokes: "Pending" }), "token revokes pending after Released");
+  assert(releaseWorkPending({ phase: "Failed", release: true, atircRevokes: "Pending" }), "token revokes pending after Failed");
+  assert(releaseWorkPending({ phase: "Releasing", step: "releasingGuestRequester" }), "R2 cascade waiting");
+  assert(releaseWorkPending({ name: "c", phase: "Failed", release: true, releaseFailed: true,
+    releaseRequestedAt: "2026-10-30T12:00:00.000Z", releaseAnsweredAt: "2026-10-30T11:00:00.000Z" }), "re-release pending");
+  assert(!releaseWorkPending({ phase: "Held" }), "a held VM");
+  assert(!releaseWorkPending({ phase: "Released", release: true, atircRevokes: "Done" }), "released, revokes done");
+  assert(!releaseWorkPending({ phase: "Failed", release: true, atircRevokes: "Abandoned" }), "abandoned: nothing left to run");
+  assert(!releaseWorkPending(null), "missing");
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  assert(/computeReleasing = contracts\.some\(vmshell\.releaseWorkPending\)/.test(app), "beforeunload state uses releaseWorkPending");
 });

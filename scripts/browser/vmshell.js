@@ -193,6 +193,15 @@ export function isReleasing(contract) {
   return (Boolean(contract?.release) && !FINISHED.has(contract?.phase ?? "Pending")) || releasePending(contract);
 }
 
+/**
+ * Release work this tab's requester still runs for the contract: a release in
+ * progress (isReleasing), atirc token revokes Pending, or the A8 cascade
+ * waiting for the guest requester. Closing the tab then would stall it.
+ */
+export function releaseWorkPending(contract) {
+  return isReleasing(contract) || contract?.atircRevokes === "Pending" || contract?.step === "releasingGuestRequester";
+}
+
 // Release requests (socialweb rc127 H1, computecontracts 30): every Release
 // server-side applies spec.release with spec.releaseRequestedAt (now); the
 // requester copies the request it answered into status.release.requestedAt

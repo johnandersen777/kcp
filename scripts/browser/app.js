@@ -2694,8 +2694,10 @@ async function releaseContract(name) {
 }
 
 // The release runs in this tab's requester: closing the tab mid-release
-// leaves the guest running until the bidder's release deadline. A reload
-// resumes it, but warn before the tab goes away.
+// leaves the guest running until the bidder's release deadline, and pending
+// atirc token revokes or the R2 release cascade stall (rows' state:
+// vmshell.releaseWorkPending). A reload resumes them, but warn before the tab
+// goes away.
 addEventListener("beforeunload", (event) => {
   if (!computeReleasing) return;
   event.preventDefault();
@@ -3191,7 +3193,7 @@ function applyComputeState(state) {
   void markFinishedInfraContracts(contracts);
   const active = contracts.filter(vmshell.isActive);
   if (computeBusy && active.length > 0) computeBusy = false;
-  computeReleasing = contracts.some(vmshell.isReleasing);
+  computeReleasing = contracts.some(vmshell.releaseWorkPending);
   const ready = state.marketIdentity?.phase === "Ready";
   computeRequestEl.disabled = computeBusy || !ready || active.length > 0;
   if (ready && computeAgentRowEl.hidden) void agentServed().then((served) => { computeAgentRowEl.hidden = !served; });
