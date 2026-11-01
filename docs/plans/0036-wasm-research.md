@@ -143,4 +143,4 @@ relative to ~/src/kcp/socialweb-computer-kcp at origin/main.
 
 - CLI requester alice (QR, no handle) signed in 18:04:12Z; hat-7 accept nrmujbwskqbxk 18:04:21Z; VM agent aliceoa-3mz4ejuf5fy2k joined.
 - In the VM, as the agent user (no root, no chmod, no units): `socialweb-computer run request --name r2 --guest-requester --agent --hold`.
-- R2 DID did:plc:jsueozcdhc3usuofmc6vih2p 18:06:52Z -> association ref 18:07:00Z (subhandle r2-nrmujbwskqbxk.aliceoa, no atirc sub) -> R2 RFP 3mz4eox6uxb22 bid by hat-7 (rc126 tangled-vouch) 18:07:17Z -> R2 VM Held 18:08:30Z -> `run request agent r2` -> grandchild vm-3mz4eox6uxb22 online. PASS, no workaround.
+- R2 DID did:plc:jsueozcdhc3usuofmc6vih2p 18:06:52Z -> association ref 18:07:00Z (subhandle r2-nrmujbwskqbxk.aliceoa, no atirc sub) -> R2 RFP 3mz4eox6uxb22 (hat-7 bid 18:07:17Z under rc126 tangled-vouch but lost; another rc126 bidder hosts the R2 VM) -> R2 VM Held 18:08:30Z -> `run request agent r2` -> grandchild vm-3mz4eox6uxb22 online. PASS, no workaround.
