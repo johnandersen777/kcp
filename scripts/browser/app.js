@@ -1047,6 +1047,8 @@ async function spawnKcp(useSnapshot = true) {
       oauthRedirectUri: `${location.origin}/oauth/callback/requester`,
       forceApply: buildChanged || localStorage.getItem("socialweb.forceApply") === "1",
       commsMode: localStorage.getItem("socialweb.commsMode") ?? "Firehose",
+      // Record retention sweep: off unless "DryRun" or "Delete" (socialweb-wasm pageRetention).
+      retention: localStorage.getItem("socialweb.retention") ?? undefined,
       statusFeed: localStorage.getItem("socialweb.statusFeed") !== "0",
       restore: socialwebSnapshot,
     },
