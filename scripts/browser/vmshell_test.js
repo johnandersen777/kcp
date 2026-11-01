@@ -46,6 +46,8 @@ import {
   pageInfraSpec,
   withInfraContract,
   createInfra,
+  dropOwnersPatch,
+  staleSpecOwners,
   releaseOffered,
   latestStamp,
   releaseTimedOut,
@@ -722,6 +724,59 @@ Deno.test("release: a plain Failed contract whose guest may still run offers Rel
   assert(k.writes().length === 1 && k.writes()[0].body.spec.release === true, JSON.stringify(k.writes()));
   const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
   assert(/if \(vmshell\.releaseOffered\(contract\) && !computeReleaseAsked\.has\(name\)\)/.test(app), "the row's Release button uses releaseOffered");
+});
+
+Deno.test("composeInfra: a migrated infra is taken over and Go-http-client's co-ownership dropped before a prune", async () => {
+  const goOwns = { manager: "Go-http-client", operation: "Update", fieldsV1: { "f:spec": { "f:contracts": {},
+    "f:secrets": { "k:{\"contract\":\"vmshell-ab\"}": {}, "k:{\"contract\":\"vmshell-zz\"}": {} } } } };
+  const ctrl = { manager: "socialweb.computer/ephemeralinfra", operation: "Update", fieldsV1: { "f:status": {} } };
+  const pageApply = { manager: "socialweb.computer/page", operation: "Apply", fieldsV1: { "f:spec": { "f:contracts": {} } } };
+  assert(JSON.stringify(staleSpecOwners({ metadata: { managedFields: [goOwns, ctrl, pageApply] } })) === JSON.stringify([goOwns]), "Go-http-client only");
+  const created = { manager: "socialweb.computer/page", operation: "Update", fieldsV1: { "f:spec": { "f:record": {} } } };
+  assert(staleSpecOwners({ metadata: { managedFields: [created, ctrl] } }).length === 1, "the create POST's Update entry too");
+  assert(staleSpecOwners({ metadata: { managedFields: [ctrl, pageApply] } }).length === 0, "nothing stale");
+  const patch = dropOwnersPatch({ metadata: { resourceVersion: "9", managedFields: [pageApply, goOwns, ctrl] } }, [goOwns]);
+  assert(JSON.stringify(patch) === JSON.stringify([{ op: "test", path: "/metadata/resourceVersion", value: "9" },
+    { op: "replace", path: "/metadata/managedFields", value: [pageApply, ctrl] }]), JSON.stringify(patch));
+
+  const infra = sessionInfra();
+  infra.spec.secrets.push({ contract: "vmshell-zz", secretsRef: { mount: "m", path: "z" } });
+  infra.metadata.managedFields = [goOwns, ctrl];
+  const calls = [];
+  const rest = (method, path, body, contentType) => {
+    calls.push({ method, path, contentType, body: structuredClone(body) });
+    if (method === "GET") return Promise.resolve(structuredClone(infra));
+    const bump = () => infra.metadata.resourceVersion = String(Number(infra.metadata.resourceVersion) + 1);
+    if (contentType === "application/json-patch+json") {
+      if (body[0].value !== infra.metadata.resourceVersion) return Promise.reject(Object.assign(new Error("422"), { status: 422 }));
+      infra.metadata.managedFields = body[1].value;
+      bump();
+      return Promise.resolve(structuredClone(infra));
+    }
+    if (body.metadata.resourceVersion !== infra.metadata.resourceVersion) return Promise.reject(Object.assign(new Error("409"), { status: 409 }));
+    const kept = Object.fromEntries(Object.entries(infra.spec).filter(([field]) => !INFRA_PAGE_FIELDS.includes(field)));
+    infra.spec = { ...kept, ...structuredClone(body.spec) };
+    infra.metadata.managedFields = [pageApply, ...infra.metadata.managedFields.filter((m) => m !== pageApply && m.manager !== "socialweb.computer/page")];
+    bump();
+    return Promise.resolve(structuredClone(infra));
+  };
+  // a prune: drop vmshell-zz's entry and secret
+  await composeInfra({ rest, api: API, infra: "t", update: (spec) => ({ ...spec,
+    contracts: spec.contracts.filter((c) => c.name !== "vmshell-zz"), secrets: spec.secrets.filter((x) => x.contract !== "vmshell-zz") }) });
+  const writes = calls.filter((c) => c.method !== "GET");
+  assert(JSON.stringify(writes.map((w) => w.contentType)) ===
+    '["application/apply-patch+yaml","application/json-patch+json","application/apply-patch+yaml"]', JSON.stringify(writes.map((w) => w.contentType)));
+  assert(writes[0].body.spec.secrets.length === 2 && writes[0].body.spec.contracts.length === 2, "the takeover applies the spec as read");
+  assert(writes[1].path === `${API}/ephemeralinfras/t?fieldManager=socialweb.computer%2Fpage`, writes[1].path);
+  assert(writes[1].body[1].value.every((m) => m.manager !== "Go-http-client"), "Go-http-client dropped");
+  assert(writes[2].body.metadata.resourceVersion === infra.metadata.resourceVersion.replace(/\d+/, (n) => String(Number(n) - 1)), "the prune read again");
+  assert(writes[2].body.spec.secrets.length === 1 && writes[2].body.spec.contracts.length === 1, "the prune applied");
+  assert(staleSpecOwners(infra).length === 0, "nothing stale left");
+
+  // nothing stale: one apply, no takeover
+  calls.length = 0;
+  await composeInfra({ rest, api: API, infra: "t", update: (spec) => spec });
+  assert(calls.filter((c) => c.method !== "GET").length === 1, "one apply");
 });
 
 Deno.test("createInfra: POST if absent; a 409 reads and re-applies the full spec with its resourceVersion", async () => {
