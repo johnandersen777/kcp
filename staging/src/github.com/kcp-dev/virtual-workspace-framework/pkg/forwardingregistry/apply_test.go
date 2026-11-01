@@ -302,6 +302,17 @@ func (b *ssaBackend) managedFieldsJSONPatch(gr schema.GroupResource, namespace, 
 	patched := live.DeepCopy()
 	for _, op := range ops {
 		switch {
+		case op.Op == "test" && op.Path == "/metadata/uid":
+			var uid string
+			if err := json.Unmarshal(op.Value, &uid); err != nil {
+				return true, nil, apierrors.NewBadRequest(err.Error())
+			}
+			if uid != string(live.GetUID()) {
+				// As the apiserver answers a failed JSON patch test.
+				return true, nil, apierrors.NewInvalid(schema.GroupKind{Group: gr.Group, Kind: noxuKind.Kind}, a.Name, field.ErrorList{
+					field.Invalid(field.NewPath("patch"), string(a.Patch), "testing value /metadata/uid failed"),
+				})
+			}
 		case op.Op == "replace" && op.Path == "/metadata/resourceVersion":
 			var rv string
 			if err := json.Unmarshal(op.Value, &rv); err != nil {
@@ -1110,30 +1121,98 @@ func TestApplyThroughVirtualWorkspaceCreate(t *testing.T) {
 		require.Nil(t, h.backend.get("default", "foo"))
 	})
 
-	t.Run("a write between the Create and the upgrade keeps the created object", func(t *testing.T) {
-		t.Parallel()
-		h := newVWHarness(t, nil)
-		var once sync.Once
+	// beforeUpgrades runs write before each of the first n managedFields
+	// upgrade JSON patches reaches the backend.
+	beforeUpgrades := func(h *vwHarness, n int, write func()) {
+		var mu sync.Mutex
+		seen := 0
 		h.client.PrependReactor("patch", "noxus", func(action kcptesting.Action) (bool, runtime.Object, error) {
 			if action.(kcptesting.PatchActionImpl).PatchType == types.JSONPatchType {
-				once.Do(func() {
-					// Another client writes in between.
-					live := h.backend.get("default", "foo")
-					require.NoError(t, unstructured.SetNestedField(live.Object, "x", "spec", "other"))
-					h.backend.set(live)
-				})
+				mu.Lock()
+				seen++
+				doWrite := seen <= n
+				mu.Unlock()
+				if doWrite {
+					write()
+				}
 			}
 			return false, nil, nil
 		})
+	}
+	writeOther := func(h *vwHarness) func() {
+		return func() {
+			live := h.backend.get("default", "foo")
+			require.NoError(t, unstructured.SetNestedField(live.Object, "x", "spec", "other"))
+			h.backend.set(live)
+		}
+	}
+	providerOps := func(obj *unstructured.Unstructured) []metav1.ManagedFieldsOperationType {
+		var ops []metav1.ManagedFieldsOperationType
+		for _, e := range managedFieldsOf(obj, "provider", "") {
+			ops = append(ops, e.Operation)
+		}
+		return ops
+	}
 
+	t.Run("a write between the Create and the upgrade is retried on a fresh Get", func(t *testing.T) {
+		t.Parallel()
+		h := newVWHarness(t, nil)
+		beforeUpgrades(h, 2, writeOther(h))
+
+		before := h.backend.numCalls()
+		res := h.apply("", "provider", specApplyAB)
+		require.Equal(t, http.StatusOK, res.code, res.body)
+		require.Equal(t, 3, countCalls(h.backend.callsSince(before), "patch//"+string(types.JSONPatchType)), "%v", h.backend.callsSince(before))
+		live := h.backend.get("default", "foo")
+		require.Equal(t, []metav1.ManagedFieldsOperationType{metav1.ManagedFieldsOperationApply}, providerOps(live), describeManagedFields(live))
+		other, _, _ := unstructured.NestedString(live.Object, "spec", "other")
+		require.Equal(t, "x", other, "the concurrent write must be kept")
+		require.Equal(t, live.GetResourceVersion(), res.obj.GetResourceVersion(), "the response is the upgraded object")
+	})
+
+	t.Run("writes before every upgrade attempt keep the created object", func(t *testing.T) {
+		t.Parallel()
+		h := newVWHarness(t, nil)
+		beforeUpgrades(h, 100, writeOther(h))
+
+		before := h.backend.numCalls()
 		res := h.apply("", "provider", specApplyAB)
 		require.Equal(t, http.StatusOK, res.code, "the create succeeded, so the request does: %s", res.body)
+		require.Equal(t, 3, countCalls(h.backend.callsSince(before), "patch//"+string(types.JSONPatchType)), "at most 3 attempts: %v", h.backend.callsSince(before))
 		b, _, _ := unstructured.NestedString(res.obj.Object, "spec", "b")
 		require.Equal(t, "2", b)
 		live := h.backend.get("default", "foo")
-		entries := managedFieldsOf(live, "provider", "")
-		require.Len(t, entries, 1, describeManagedFields(live))
-		require.Equal(t, metav1.ManagedFieldsOperationUpdate, entries[0].Operation, "the pinned upgrade must not apply onto a changed object")
+		require.Equal(t, []metav1.ManagedFieldsOperationType{metav1.ManagedFieldsOperationUpdate}, providerOps(live), "the pinned upgrade must not apply onto a changed object: %s", describeManagedFields(live))
+	})
+
+	t.Run("a recreated object is never upgraded", func(t *testing.T) {
+		t.Parallel()
+		h := newVWHarness(t, nil)
+		recreatedFields := []metav1.ManagedFieldsEntry{{
+			Manager: "provider", Operation: metav1.ManagedFieldsOperationUpdate, APIVersion: "mygroup.example.com/v1beta1",
+			FieldsType: "FieldsV1", FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:spec":{".":{},"f:secret":{}}}`)},
+		}}
+		// Delete and recreate by another client, with the same manager name,
+		// and (only possible in this fake) the same resourceVersion, so only
+		// the uid tells the objects apart.
+		beforeUpgrades(h, 1, func() {
+			h.backend.mu.Lock()
+			defer h.backend.mu.Unlock()
+			key := h.backend.key("default", "foo")
+			recreated := hiddenNoxu()
+			recreated.SetResourceVersion(h.backend.objects[key].GetResourceVersion())
+			recreated.SetManagedFields(recreatedFields)
+			h.backend.objects[key] = recreated
+		})
+
+		before := h.backend.numCalls()
+		res := h.apply("", "provider", specApplyAB)
+		require.Equal(t, http.StatusOK, res.code, res.body)
+		require.Equal(t, 1, countCalls(h.backend.callsSince(before), "patch//"+string(types.JSONPatchType)), "no retry on another object: %v", h.backend.callsSince(before))
+		require.Equal(t, types.UID("uid-foo"), res.obj.GetUID(), "the response is the created object")
+		live := h.backend.get("default", "foo")
+		require.Equal(t, types.UID("uid-consumer"), live.GetUID())
+		require.Equal(t, recreatedFields, live.GetManagedFields(), "the recreated object must not be touched")
 	})
 
 	t.Run("omitted fields are removed after a create", func(t *testing.T) {

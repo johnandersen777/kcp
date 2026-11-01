@@ -63,6 +63,15 @@ import (
 //     admission did not touch is added, so the applier does not adopt fields
 //     it never set. Any other change fails the request: forwarding the apply
 //     without it would store something other than what validation admitted.
+//
+// Note for authors of virtual workspace mutating admission plugins: on this
+// update path, a mutation other than adding or changing labels or
+// annotations or adding finalizers (e.g. setting a spec or status field,
+// adding owner references, removing anything) makes every server-side apply
+// on an existing object answer 500 InternalError (admissionChangesFrom). On
+// the create path (createAsApply) the whole admitted object is created, so
+// all mutations are kept there. Such a plugin needs the schema-aware
+// forwarding this storage does not have yet.
 func forwardApply(
 	ctx context.Context,
 	delegate dynamic.ResourceInterface,
@@ -149,10 +158,14 @@ func isFieldManagerConflict(err error) bool {
 //
 // The backend records the creating manager with operation Update, so a later
 // apply omitting a field would not remove it. Unless this is a dry run, a JSON
-// patch pinned to the created resourceVersion then turns that Update entry
-// into the manager's Apply entry (client-go csaupgrade). If that fails, e.g.
-// on a concurrent write, the created object is returned anyway: the object
-// then keeps the Update entry, as before apply forwarding.
+// patch then turns that Update entry into the manager's Apply entry (client-go
+// csaupgrade). The patch is pinned to the object's resourceVersion and uid, so
+// it never lands on a changed or recreated object. On a Conflict (a write in
+// between) it is retried, up to createUpgradeAttempts times in all, each time
+// on a fresh Get of the object, as long as it is still the created one (same
+// uid). If it still fails, the created object is returned anyway: the object
+// then keeps the Update entry, as before apply forwarding (see the one-time
+// csaupgrade migration for such objects).
 func createAsApply(
 	ctx context.Context,
 	delegate dynamic.ResourceInterface,
@@ -164,20 +177,54 @@ func createAsApply(
 		return created, err
 	}
 
-	manager := options.FieldManager
-	upgrade, err := csaupgrade.UpgradeManagedFieldsPatch(created, sets.New(manager), manager)
-	if err != nil || len(upgrade) == 0 {
-		if err != nil {
-			klog.FromContext(ctx).V(2).Info("not upgrading the managed fields of a created object", "name", created.GetName(), "manager", manager, "err", err)
+	logger := klog.FromContext(ctx).WithValues("name", created.GetName(), "namespace", created.GetNamespace(), "manager", options.FieldManager)
+	current := created
+	for attempt := 1; ; attempt++ {
+		upgraded, retryable, err := upgradeCreatorToApply(ctx, delegate, current, created.GetUID(), options.FieldManager)
+		if err == nil {
+			if upgraded == nil {
+				return current, nil // nothing to upgrade
+			}
+			return upgraded, nil
 		}
-		return created, nil
+		if !retryable || attempt >= createUpgradeAttempts {
+			logger.Info("Created object through server-side apply, but could not record its field manager as Apply; it keeps an Update entry, so a later apply omitting a field set at create time does not remove it", "attempts", attempt, "err", err)
+			return created, nil
+		}
+		current, err = delegate.Get(ctx, created.GetName(), metav1.GetOptions{})
+		if err != nil || current.GetUID() != created.GetUID() {
+			logger.Info("Created object through server-side apply, but it was deleted or replaced before its field manager could be recorded as Apply", "attempts", attempt, "err", err)
+			return created, nil
+		}
 	}
-	upgraded, err := delegate.Patch(ctx, created.GetName(), types.JSONPatchType, upgrade, metav1.PatchOptions{})
+}
+
+// createUpgradeAttempts is how often createAsApply tries to upgrade the
+// creator's Update entry to Apply.
+const createUpgradeAttempts = 3
+
+// upgradeCreatorToApply sends the csaupgrade JSON patch for obj, pinned to its
+// resourceVersion and to uid. It returns nil, false, nil if there is nothing
+// to upgrade, and whether an error is worth a retry on a fresh Get.
+func upgradeCreatorToApply(ctx context.Context, delegate dynamic.ResourceInterface, obj *unstructured.Unstructured, uid types.UID, manager string) (*unstructured.Unstructured, bool, error) {
+	upgrade, err := csaupgrade.UpgradeManagedFieldsPatch(obj, sets.New(manager), manager)
+	if err != nil || len(upgrade) == 0 {
+		return nil, false, err
+	}
+	var ops []interface{}
+	if err := json.Unmarshal(upgrade, &ops); err != nil {
+		return nil, false, err
+	}
+	ops = append([]interface{}{map[string]interface{}{"op": "test", "path": "/metadata/uid", "value": string(uid)}}, ops...)
+	patch, err := json.Marshal(ops)
 	if err != nil {
-		klog.FromContext(ctx).V(2).Info("could not upgrade the managed fields of a created object", "name", created.GetName(), "manager", manager, "err", err)
-		return created, nil
+		return nil, false, err
 	}
-	return upgraded, nil
+	upgraded, err := delegate.Patch(ctx, obj.GetName(), types.JSONPatchType, patch, metav1.PatchOptions{})
+	if err != nil {
+		return nil, apierrors.IsConflict(err), err
+	}
+	return upgraded, false, nil
 }
 
 // applyPatchBody returns the apply patch to send to the backend, see
