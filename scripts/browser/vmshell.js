@@ -144,7 +144,7 @@ export function infraRecordURI(infra, did, name) {
  * record is full. Never drops an active entry. Returns the dropped names so
  * the caller can remove their secrets.
  *
- * The policy always runs (owner rule): an active entry without
+ * The always-run rule (owner rule): an active entry without
  * REQUESTER_POLICY is refused, and every other active entry in the record
  * (one an older page or the synced PDS record left without it, or with
  * another policy) is written back with it.

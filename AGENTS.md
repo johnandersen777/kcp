@@ -60,6 +60,9 @@ Notes:
 - Commit the user's own uncommitted edits in the main checkout before merging
   (small commit of their diff), never discard them.
 - Browser unit tests: `cd scripts/browser && deno test --allow-read --allow-net`.
+- Policy suite, page half (`always-run/page/...`, names shared with socialweb's
+  policy tests): `scripts/browser-dev/policy-suite.sh` (deno tests, the headless
+  Chrome fence check, the js/wasm browsersandbox Go tests; needs `.work`).
   Storage tests: `cd contrib/wasm/storage && GOTOOLCHAIN=go1.26.9 go test ./`.
 
 ## Dev server, public URL, phone
