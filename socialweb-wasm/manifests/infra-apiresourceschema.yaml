@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-5.infras.socialweb.computer
+  name: v1alpha1-7.infras.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -63,6 +63,12 @@ spec:
                         type: string
                     userData:
                       type: string
+                    computeKind:
+                      type: string
+                      enum:
+                        - vm
+                        - deno
+                      default: vm
                     policy:
                       type: string
                     policyArgs:
@@ -101,6 +107,12 @@ spec:
                       x-kubernetes-list-type: map
                       x-kubernetes-list-map-keys:
                         - tag
+                    agent:
+                      type: object
+                      properties:
+                        envFile:
+                          type: string
+                          default: /etc/atirc/atirc.env
                   required:
                     - name
               secrets:
