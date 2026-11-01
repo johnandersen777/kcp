@@ -49,6 +49,8 @@ export const REQUESTER_SCOPE = [
   "repo:com.publicdomainrelay.temp.compute.events.guest.secrets?action=create&action=update",
   "repo:com.publicdomainrelay.temp.compute.events.guest.agentStart?action=create&action=update",
   "repo:com.publicdomainrelay.temp.compute.events.guest.secretsUpdated?action=create&action=update",
+  "repo:com.publicdomainrelay.temp.compute.events.guest.r2Start?action=create&action=update",
+  "repo:com.publicdomainrelay.temp.compute.events.guest.r2Release?action=create&action=update",
   "repo:computer.socialweb.temp.policy.ghalite?action=create&action=update",
   "repo:computer.socialweb.temp.policy.typescript?action=create&action=update",
   "repo:com.fedproxy.rbac?action=create&action=update&action=delete",

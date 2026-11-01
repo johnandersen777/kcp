@@ -322,3 +322,77 @@ export async function openBestBackend(
     reason: null,
   };
 }
+
+/**
+ * Per-key snapshot saver for the page's IndexedDB state. Each key's saves run
+ * one at a time, in arrival order, and the newest snapshot wins: a save
+ * queued while another is in flight replaces any older queued one, so an
+ * older snapshot never overwrites a newer one. (No seq comparison: a kcp
+ * worker restarted after a snapshot discard counts seq from 0 again.) Keys in `immediate` save at once (the socialweb
+ * vault: its revoke marker and atircMinted must survive a reload right after
+ * the write); the others are debounced by delayMs. flushAll() starts every
+ * pending save now (visibilitychange to hidden, pagehide).
+ *
+ * @param {{backend: () => Promise<object>, delayMs?: number, immediate?: string[],
+ *   onError?: (key: string, err: unknown) => void, timers?: {setTimeout: Function, clearTimeout: Function}}} options
+ */
+export function createPersister(
+  { backend, delayMs = 250, immediate = [], onError = () => {}, timers = globalThis },
+) {
+  const now = new Set(immediate);
+  const queued = new Map();
+  const debounce = new Map();
+  const running = new Map();
+
+  async function save(key, { snapshot, seq }) {
+    const store = await backend();
+    if (seq) await store.apply({ puts: [[key, snapshot], [`${key}-seq`, seq]] });
+    else await store.save(key, snapshot);
+  }
+
+  function flush(key) {
+    if (debounce.has(key)) {
+      timers.clearTimeout(debounce.get(key));
+      debounce.delete(key);
+    }
+    if (running.has(key)) return running.get(key);
+    if (!queued.has(key)) return Promise.resolve();
+    const run = (async () => {
+      while (queued.has(key)) {
+        const next = queued.get(key);
+        queued.delete(key);
+        try {
+          await save(key, next);
+        } catch (err) {
+          onError(key, err);
+        }
+      }
+    })().finally(() => running.delete(key));
+    running.set(key, run);
+    return run;
+  }
+
+  return {
+    schedule(key, snapshot, seq = 0) {
+      queued.set(key, { snapshot, seq });
+      if (now.has(key)) {
+        // Behind an in-flight save: its loop picks this one up next.
+        const inFlight = running.get(key);
+        return inFlight ? inFlight : flush(key);
+      }
+      if (debounce.has(key)) timers.clearTimeout(debounce.get(key));
+      debounce.set(key, timers.setTimeout(() => {
+        debounce.delete(key);
+        void flush(key);
+      }, delayMs));
+      return Promise.resolve();
+    },
+    flushAll() {
+      const keys = new Set([...queued.keys(), ...debounce.keys(), ...running.keys()]);
+      return Promise.all([...keys].map(flush));
+    },
+    pending() {
+      return queued.size + running.size;
+    },
+  };
+}

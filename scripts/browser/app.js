@@ -30,7 +30,7 @@ import {
 import { buildDiagram, nodeID } from "./diagram.js";
 import { cancelOAuthPopup, OAUTH_CALLBACK_MESSAGE, openOAuthPopup } from "./oauth.js";
 import { GRACE_MS, normalizeHandle, signInURL, signInView } from "./identity_ui.js";
-import { assembleSnapshot, openBestBackend, snapshotRecords } from "./state_store.js";
+import { assembleSnapshot, createPersister, openBestBackend, snapshotRecords } from "./state_store.js";
 import * as vmshell from "./vmshell.js";
 import * as webrtcGuest from "./webrtc_guest.js";
 import * as sshCmd from "./ssh_cmd.js";
@@ -606,7 +606,7 @@ function attachKcp(worker) {
     } else if (data.type === "persist") {
       persistKcp(data.snapshot, data.seq);
     } else if (data.type === "socialweb-persist") {
-      schedulePersist(data.snapshot, socialwebStateKey, data.seq);
+      void persister.schedule(socialwebStateKey, data.snapshot, data.seq);
     } else if (data.type === "log") {
       addLog(data.level ?? "info", `kcp: ${data.message}`);
       const message = String(data.message);
@@ -681,28 +681,17 @@ function persistKcp(snapshot, seq) {
   });
 }
 
-const persistTimers = new Map();
-const persistInFlight = new Set();
-function schedulePersist(snapshot, key = stateKey, seq = 0) {
-  if (persistTimers.has(key)) clearTimeout(persistTimers.get(key));
-  persistTimers.set(key, setTimeout(async () => {
-    persistTimers.delete(key);
-    if (persistInFlight.has(key)) {
-      schedulePersist(snapshot, key, seq);
-      return;
-    }
-    persistInFlight.add(key);
-    try {
-      const backend = await stateBackend();
-      if (seq) await backend.apply({ puts: [[key, snapshot], [`${key}-seq`, seq]] });
-      else await backend.save(key, snapshot);
-    } catch (err) {
-      addLog("warn", `state save failed (${key}): ${err instanceof Error ? err.message : err}`);
-    } finally {
-      persistInFlight.delete(key);
-    }
-  }, 250));
-}
+// Whole-snapshot keys (state_store.js createPersister): one save at a time
+// per key, the newest wins. The socialweb vault snapshot saves at once, not
+// debounced: in rc127 it holds the requester's atirc revoke marker and
+// atircMinted, and a reload right after such a write must not lose it.
+// Pending saves start at once when the tab is hidden or unloads (below).
+const persister = createPersister({
+  backend: stateBackend,
+  immediate: [socialwebStateKey],
+  onError: (key, err) => addLog("warn", `state save failed (${key}): ${err instanceof Error ? err.message : err}`),
+});
+addEventListener("pagehide", () => void persister.flushAll());
 
 // socialweb skips its provider manifests when the restored kcp state already
 // has Ready APIBindings, so state saved by an older kcp.wasm would keep that
@@ -862,7 +851,9 @@ function noteKcpAnswer() {
 
 // Capture when the tab is hidden: the next visit restores from it.
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") kcpWorker?.postMessage({ type: "hibernate" });
+  if (document.visibilityState !== "hidden") return;
+  void persister.flushAll();
+  kcpWorker?.postMessage({ type: "hibernate" });
 });
 
 // Deletes the stored snapshot; the next load cold boots. The running worker
@@ -2416,7 +2407,8 @@ let lastFeedState = null;
 let computeBusy = false;
 let computeReleasing = false;
 let computeLastRender = "";
-const computeReleaseAsked = new Set();
+// Contract name -> the spec.releaseRequestedAt this tab last sent.
+const computeReleaseAsked = new Map();
 // Contracts already marked Released in the tab infra after a terminal phase.
 const infraAutoReleased = new Set();
 let infraAutoSync = false;
@@ -2674,29 +2666,30 @@ async function requestVM() {
   // computeBusy clears when the status feed shows the new contract.
 }
 
+// Every Release (button, Release again, d.release, the demo's leftover
+// sweep) applies spec.release with a fresh spec.releaseRequestedAt, then
+// marks a session-infra entry Released (vmshell.requestRelease).
 async function releaseContract(name) {
-  computeReleaseAsked.add(name);
+  const previous = computeReleaseAsked.get(name);
+  computeReleaseAsked.set(name, new Date().toISOString()); // hides Release again while in flight
   computeLastRender = "";
+  let requestedAt;
   try {
-    // A session-infra contract is released through its infra (the infra
-    // controller owns the ComputeContract spec); older ones directly.
-    const cc = await kcpREST("GET", `${SOCIALWEB_API}/computecontracts/${name}`).catch(() => null);
-    const owner = (cc?.metadata?.ownerReferences ?? []).find((o) => o.kind === "EphemeralInfra");
-    const short = cc?.metadata?.labels?.["infra.socialweb.computer/contract"];
-    const infra = owner && await kcpREST("GET", `${SOCIALWEB_API}/ephemeralinfras/${owner.name}`).catch(() => null);
-    const entry = (infra?.spec?.contracts ?? []).find((c) => c.name === short || name.endsWith(`-${c.name}`));
-    if (infra && entry) {
-      await setInfraContract(owner.name, { ...entry, state: "Released" }, null);
-    } else {
-      await kcpREST("PATCH", `${SOCIALWEB_API}/computecontracts/${name}`, { spec: { release: true } },
-        "application/merge-patch+json");
-    }
+    requestedAt = await vmshell.requestRelease({
+      rest: kcpREST,
+      api: SOCIALWEB_API,
+      name,
+      setInfraContract: (infra, entry) => setInfraContract(infra, entry, null),
+    });
+    computeReleaseAsked.set(name, requestedAt);
   } catch (err) {
-    computeReleaseAsked.delete(name);
+    if (previous === undefined) computeReleaseAsked.delete(name);
+    else computeReleaseAsked.set(name, previous);
     setAppStatus(computeStatusEl, String(err.message ?? err), "err");
     return;
   }
-  addLog("info", `ComputeContract ${name} released`);
+  computeLastRender = "";
+  addLog("info", `ComputeContract ${name} released (releaseRequestedAt ${requestedAt})`);
   void webrtcGuest.deleteSSHKey(name).catch(() => {});
 }
 
@@ -2711,15 +2704,27 @@ addEventListener("beforeunload", (event) => {
 
 function computeRow(contract) {
   const name = contract.name;
-  const phase = contract.phase ?? "Pending";
   const li = document.createElement("li");
   const head = document.createElement("div");
   const title = document.createElement("strong");
   title.textContent = name;
   const phaseEl = document.createElement("span");
-  phaseEl.className = `phase-${phase}`;
-  phaseEl.textContent = ` ${phase}${contract.release && phase !== "Released" ? " · releasing" : ""}`;
+  const label = vmshell.phaseLabel(contract);
+  phaseEl.className = `phase-${label.phase}`;
+  phaseEl.textContent = label.text;
   head.append(title, phaseEl);
+  if (vmshell.canReleaseAgain(contract, computeReleaseAsked.get(name))) {
+    // A release the requester gave up on (ReleaseFailed): a newer
+    // releaseRequestedAt restarts it without a tab reload.
+    const again = document.createElement("button");
+    again.type = "button";
+    again.textContent = "Release again";
+    again.addEventListener("click", () => {
+      again.disabled = true;
+      void releaseContract(name);
+    });
+    head.append(again);
+  }
   if (vmshell.isActive(contract) && !computeReleaseAsked.has(name)) {
     const release = document.createElement("button");
     release.type = "button";
@@ -2736,10 +2741,11 @@ function computeRow(contract) {
     contract.chosenDid ? `bidder ${contract.chosenDid}` : "",
     contract.association ? `Associated ${contract.association}` : "",
     contract.associationMessage ? `association: ${contract.associationMessage}` : "",
+    ...vmshell.releaseNotes(contract, lastFeedState?.contractEvents ?? []),
     contract.guestRequester ? `R2: ${contract.guestRequester.did} ${contract.guestRequester.state ?? "Pending"}` +
       `${contract.guestRequester.message ? ` (${contract.guestRequester.message})` : ""}` : "",
     contract.secretsFetchedAt ? `secrets fetched ${contract.secretsFetchedAt}` : "",
-    contract.message ?? "",
+    vmshell.releasePending(contract) ? "" : contract.message ?? "",
   ].filter(Boolean).join(" · ");
   li.append(head, detail);
   if (vmshell.isActive(contract) && shellsOf(contract).mine) li.append(shellAction(contract));
@@ -2768,7 +2774,7 @@ function shellAction(contract) {
   if (!s.webrtc && !s.link) {
     el.className = "detail";
     if (contract.phase === "Held") el.textContent = "Held; the shells are starting…";
-    el.append(...agentAction(contract));
+    el.append(...agentAction(contract), ...r2Action(contract));
     return el;
   }
   // SSH over WebRTC runs in the page terminal and falls back to the web shell
@@ -2795,7 +2801,7 @@ function shellAction(contract) {
   const note = document.createElement("span");
   note.className = "detail";
   note.textContent = s.link ? "" : s.wootty ? " web shell starting (usually 1-3 min after Held)" : "";
-  el.append(note, ...agentAction(contract));
+  el.append(note, ...agentAction(contract), ...r2Action(contract));
   return el;
 }
 
@@ -2828,6 +2834,39 @@ function agentAction(contract) {
   const note = document.createElement("span");
   note.className = "detail";
   note.textContent = last ? ` agent ${last.phase ?? "Pending"}${last.message ? `: ${last.message}` : ""}` : "";
+  return [button, note];
+}
+
+// The Start R2 button (plan 0036 A7): on a Held contract running R2 that
+// associates itself, an outbound guest.r2Start ContractEvent asks the guest's
+// socialweb-computer to start R2 (with the agent when the Agent box is
+// checked). Shown only once the served ContractEvent schema has the NSID and
+// spec.r2Start (socialweb rc127).
+function r2Action(contract) {
+  const name = contract.name;
+  if (!r2StartServed || !vmshell.r2StartShown(contract) || computeReleaseAsked.has(name)) return [];
+  const last = (lastFeedState?.contractEvents ?? [])
+    .filter((e) => e.contract === name && e.direction === "outbound" && e.nsid === webrtcGuest.NSID_R2_START)
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || a.name.localeCompare(b.name))
+    .at(-1);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Start R2";
+  button.title = "start socialweb-computer (R2) on the VM";
+  button.disabled = Boolean(last) && (last.phase ?? "Pending") === "Pending";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await createContractEvent(webrtcGuest.r2StartEvent(name, Math.random().toString(36).slice(2, 8), { agent: computeAgentEl.checked }));
+      addLog("info", `asked ${name} to start R2`);
+    } catch (err) {
+      button.disabled = false;
+      setAppStatus(computeStatusEl, `${name}: starting R2 failed: ${err.message ?? err}`, "err");
+    }
+  });
+  const note = document.createElement("span");
+  note.className = "detail";
+  note.textContent = last ? ` R2 ${last.phase ?? "Pending"}${last.message ? `: ${last.message}` : ""}` : "";
   return [button, note];
 }
 
@@ -2914,21 +2953,27 @@ function toastReadyShells(contracts) {
 // (socialweb rc109 dropped spec.tunnels[].shell; the lead's rc110 restores
 // it next to webrtc) and whether the agent can (plan 0035 spec.agent). Read
 // once through kcpREST, retried after an error.
-let contractSchemaPromise = null;
-function contractSchema() {
+// The ContractEvent schema (same export) gates the Start R2 button.
+const servedSchemas = new Map();
+function servedSchema(resource) {
   const provider = "/clusters/root:socialweb-provider";
-  contractSchemaPromise ??= (async () => {
-    const exported = await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha2/apiexports/computecontracts`);
-    const schema = (exported?.spec?.resources ?? []).find((r) => r.name === "computecontracts")?.schema;
-    if (!schema) return null;
-    return await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha1/apiresourceschemas/${schema}`);
-  })().catch((err) => {
-    contractSchemaPromise = null;
-    addLog("warn", `could not read the ComputeContract schema; requesting without wootty or the agent: ${err.message ?? err}`);
-    return null;
-  });
-  return contractSchemaPromise;
+  if (!servedSchemas.has(resource)) {
+    servedSchemas.set(resource, (async () => {
+      const exported = await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha2/apiexports/computecontracts`);
+      const schema = (exported?.spec?.resources ?? []).find((r) => r.name === resource)?.schema;
+      if (!schema) return null;
+      return await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha1/apiresourceschemas/${schema}`);
+    })().catch((err) => {
+      servedSchemas.delete(resource);
+      addLog("warn", `could not read the ${resource} schema; the features it gates (wootty, agent, R2) stay off: ${err.message ?? err}`);
+      return null;
+    }));
+  }
+  return servedSchemas.get(resource);
 }
+const contractSchema = () => servedSchema("computecontracts");
+// null until the served ContractEvent schema was read once.
+let r2StartServed = null;
 async function woottyServed() {
   return vmshell.schemaHasShell(await contractSchema());
 }
@@ -3151,6 +3196,13 @@ function applyComputeState(state) {
   computeRequestEl.disabled = computeBusy || !ready || active.length > 0;
   if (ready && computeAgentRowEl.hidden) void agentServed().then((served) => { computeAgentRowEl.hidden = !served; });
   if (ready && computeGuestToolsRowEl.hidden) void guestToolsServed().then((served) => { computeGuestToolsRowEl.hidden = !served; });
+  if (ready && r2StartServed === null) {
+    r2StartServed = false;
+    void servedSchema("contractevents").then((schema) => {
+      r2StartServed = webrtcGuest.schemaHasR2Start(schema);
+      if (r2StartServed) applyComputeState(lastFeedState);
+    });
+  }
   if (!computeBusy && !computeStatusEl.classList.contains("err")) {
     setAppStatus(computeStatusEl,
       !ready ? "sign in to request a VM"
