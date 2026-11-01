@@ -227,6 +227,25 @@ Deno.test("a hide captures at once; the worker asks requestSoon after a flush", 
   if (!/type === "hibernate"\) \{\s*hibernation\?\.request\(\);/.test(worker)) throw new Error("hide uses request");
 });
 
+Deno.test("a hide whose flush lands after the hide's tick still captures at once", async () => {
+  const c = clockedLoop();
+  c.loop.request(); // hidden: the flush has not persisted yet, seqs unchanged
+  await c.run(1);
+  assertEquals(c.saved, [], "nothing new yet");
+  c.seqs.kcp = 10; // the hide's flush persists
+  c.loop.requestSoon();
+  await new Promise((r) => setTimeout(r, 10));
+  assertEquals(c.saved.map((x) => x.kcp), [10], "captured without the SOON_QUIET_MS/SOON_GAP_MS wait");
+  // later flushes are ordinary again
+  await c.run(20);
+  c.seqs.kcp = 11;
+  c.loop.requestSoon();
+  await c.run(1);
+  assertEquals(c.saved.length, 1, "a flush long after the hide waits for still seqs");
+  await c.run(4);
+  assertEquals(c.saved.map((x) => x.kcp), [10, 11]);
+});
+
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }

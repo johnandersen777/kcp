@@ -410,6 +410,11 @@ export async function tryRestore({ go, module, key, seqs, owner = undefined, sto
 // (review page-rc131 2e7d88ba5, 1). A hide (request) still captures at once.
 export const SOON_QUIET_MS = 3 * 1000;
 export const SOON_GAP_MS = 15 * 1000;
+// A hide flushes and asks for a capture together; the flush can persist after
+// the hide's tick found nothing new. A flush this soon after a hide still
+// captures at once (re-check page-rc131 fb6899fe2): iOS freezes a hidden tab
+// within seconds.
+export const HIDE_FLUSH_MS = 10 * 1000;
 
 export function startHibernation({
   go, key, ready, seqs, extra, captured = null, gzip = false, store = pickStore(), log, owner = null,
@@ -419,6 +424,7 @@ export function startHibernation({
   let lastAt = 0;
   let want = false; // a hide: capture as soon as kcp is idle
   let soon = false; // a flush: capture once still, at most every SOON_GAP_MS
+  let hideAt = -Infinity;
   let running = null; // the in-flight save
   let disabled = false;
   let lastReason = "";
@@ -493,14 +499,21 @@ export function startHibernation({
     /** The tab is being hidden: capture as soon as kcp is idle. */
     request() {
       want = true;
+      hideAt = now();
       void tick();
     },
     /**
      * kcp just flushed: capture once the seqs were still SOON_QUIET_MS and
      * SOON_GAP_MS after the last capture, and only if they moved since it.
+     * Within HIDE_FLUSH_MS of a hide it is the hide's flush: at once.
      */
     requestSoon() {
       if (lastSeqs && sameSeqs(lastSeqs, seqs())) return;
+      if (now() - hideAt < HIDE_FLUSH_MS) {
+        want = true;
+        void tick();
+        return;
+      }
       soon = true;
     },
     async discard() {
