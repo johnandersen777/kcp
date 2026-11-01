@@ -3908,6 +3908,8 @@ const debugHandle = {
   },
   log: (message) => addLog("info", `debug: ${message}`),
   lock: () => kcpLock.state,
+  // kcp's held writes now, as a phase change or an action would.
+  flush: () => flushKcpSoon("debug").then(() => "flushed"),
   banners: () => banners.ids().map((id) => [id, banners.text(id)]),
   // Flushes kcp's held writes first (at most 3 s): a reload does not wait
   // for the pagehide flush.
