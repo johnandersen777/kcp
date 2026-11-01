@@ -57,9 +57,10 @@ func TestAgentProjection(t *testing.T) {
 func TestAssociationProjection(t *testing.T) {
 	c := contract(&unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{"name": "c"},
-		"status":   map[string]any{"association": map[string]any{"uri": "at://did:plc:me/computer.socialweb.market.association/k", "cid": "bafy"}},
+		"status": map[string]any{"association": map[string]any{"uri": "at://did:plc:me/computer.socialweb.market.association/k", "cid": "bafy"},
+			"associationMessage": "subject refused"},
 	}})
-	if c.Association != "at://did:plc:me/computer.socialweb.market.association/k" {
+	if c.Association != "at://did:plc:me/computer.socialweb.market.association/k" || c.AssociationMessage != "subject refused" {
 		t.Fatalf("status.association: %+v", c)
 	}
 }
