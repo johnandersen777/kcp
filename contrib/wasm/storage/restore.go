@@ -260,6 +260,36 @@ func CheckSnapshot(data []byte) error {
 	return nil
 }
 
+// SnapshotResources is SnapshotAll limited to the keys that contain one of
+// fragments (e.g. "/registry/socialweb.computer/ephemeralinfras/"): a small
+// envelope of chosen objects for MergeAll after a restart, when the whole
+// store is too big to persist (the iOS app). Keys RestoreAll would drop are
+// left out, as in SnapshotAll.
+func SnapshotResources(fragments []string) ([]byte, error) {
+	keep := func(key string) bool {
+		if skipSnapshotKey(key) {
+			return false
+		}
+		for _, fragment := range fragments {
+			if fragment != "" && strings.Contains(key, fragment) {
+				return true
+			}
+		}
+		return false
+	}
+	out := message{Version: allVersion, Stores: map[string]*Snapshot{}}
+	for name, store := range SharedStores() {
+		part, err := store.snapshotWhere(keep)
+		if err != nil {
+			return nil, fmt.Errorf("snapshotting store %q: %w", name, err)
+		}
+		if len(part.Items) > 0 {
+			out.Stores[name] = part
+		}
+	}
+	return json.Marshal(out)
+}
+
 // RestoreAll restores one SnapshotAll envelope. Decoders must already be
 // registered, i.e. the apiserver has installed its APIs. An envelope it
 // cannot read is an ErrUnreadableSnapshot error, never a fresh start: a
@@ -322,6 +352,56 @@ func RestoreAll(data []byte) error {
 	}
 	fmt.Fprintf(os.Stderr, "restore: done in %s\n", time.Since(start).Round(time.Millisecond))
 	return nil
+}
+
+// MergeAll inserts the items of one SnapshotAll-shaped envelope whose keys
+// the live stores do not hold (Store.MergeWith): for a running apiserver,
+// unlike RestoreAll, which replaces every store at boot. The same filter and
+// envelope checks apply. Call it once the resources' APIs are installed
+// (their CRDs established) and before the controllers that own them start.
+// It returns how many items it inserted.
+func MergeAll(data []byte) (int, error) {
+	if len(data) == 0 {
+		return 0, nil
+	}
+	if err := CheckSnapshot(data); err != nil {
+		return 0, err
+	}
+	var all All
+	if err := json.Unmarshal(data, &all); err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrUnreadableSnapshot, err)
+	}
+	names := make([]string, 0, len(all.Stores))
+	for name := range all.Stores {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	total := 0
+	for _, name := range names {
+		raw, err := filterSnapshot(all.Stores[name])
+		if err != nil {
+			return total, fmt.Errorf("filtering store %q: %w", name, err)
+		}
+		added, err := Shared(name).MergeWith(raw, func(key string, itemRaw []byte) (runtime.Object, error) {
+			if decode, ok := decoderFor(key); ok {
+				return decode(itemRaw)
+			}
+			var u unstructured.Unstructured
+			if err := u.UnmarshalJSON(itemRaw); err != nil {
+				return nil, fmt.Errorf("decoding unregistered item %q: %w", key, err)
+			}
+			if u.GetAPIVersion() == "" || u.GetKind() == "" {
+				return nil, fmt.Errorf("unregistered item %q has no apiVersion/kind", key)
+			}
+			return &u, nil
+		})
+		total += added
+		if err != nil {
+			return total, fmt.Errorf("merging store %q: %w", name, err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "merge: %d item(s) inserted\n", total)
+	return total, nil
 }
 
 // snapshotFlush carries FlushSnapshot requests to the OnSnapshot loop. It is

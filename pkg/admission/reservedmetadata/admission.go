@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/authentication/user"
+	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	"github.com/kcp-dev/sdk/apis/core"
@@ -135,6 +136,14 @@ func isPrivileged(key string, allowList []string) bool {
 		} else if allowList[i] == key {
 			return false
 		}
+	}
+
+	// kcp-wasm: kcp.io/shard makes the store keep a client-chosen uid and
+	// creationTimestamp (registry/rest/meta.go), and the suffix check below
+	// does not match it (the key ends in "shard"): a non-privileged client
+	// could pick its own uid and spoof ownerReferences.
+	if key == genericapirequest.ShardAnnotationKey {
+		return true
 	}
 
 	return strings.HasSuffix(key, "kcp.io")

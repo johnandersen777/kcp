@@ -271,11 +271,26 @@ GO
     replace_in "${informer}" 's.clock.Now(), initialBufferSize, s.HasSyncedChecker())' 's.clock.Now(), 16, s.HasSyncedChecker())'
   done
 
+fi
+
+# Both modes: the CRD handler sleeps 2s on every create less than 2s after the
+# CRD became Established, so that in HA another apiserver has seen the CRD
+# before a follow-up request lands there. kcp passes MasterCount 1 only when it
+# was told it is the only apiserver of its storage (--single-apiserver, set by
+# contrib/wasm/real for memory:// storage; see
+# ExtraOptions.APIExtensionsMasterCount); 0 (not declared) and >1 keep the
+# sleep. kcp creates objects right after binding their APIs, so this sleep is
+# on the boot critical path several times.
+rm -rf "${work}/apiextensions-apiserver"
+copy_module k8s.io/apiextensions-apiserver "${work}/apiextensions-apiserver"
+replace_in "${work}/apiextensions-apiserver/pkg/apiserver/customresource_handler.go" \
+  '\t\tif justCreated {\n\t\t\ttime.Sleep(2 * time.Second)' \
+  '\t\tif justCreated && r.masterCount != 1 {\n\t\t\ttime.Sleep(2 * time.Second)'
+
+if [[ "${mode}" == "js" ]]; then
   # The CRD handler builds a fresh scale scheme (autoscaling, extensions and
   # apps conversions) for every served CRD version: ~10 MiB of heap in the
   # browser shard. The scheme is read-only once built; share one.
-  rm -rf "${work}/apiextensions-apiserver"
-  copy_module k8s.io/apiextensions-apiserver "${work}/apiextensions-apiserver"
   replace_in "${work}/apiextensions-apiserver/pkg/apiserver/customresource_handler.go" \
     'scaleConverter := scale.NewScaleConverter()' 'scaleConverter := sharedScaleConverter(scale.NewScaleConverter)'
   # The proto models (ToProtoModelsV3, MiBs per CRD) only serve strategic

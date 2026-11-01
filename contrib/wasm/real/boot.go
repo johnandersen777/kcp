@@ -169,6 +169,9 @@ func Boot(parent context.Context, cfg Config) (*Server, error) {
 	opts.GenericControlPlane.GenericServerRunOptions.AdvertiseAddress = net.ParseIP("127.0.0.1")
 	opts.GenericControlPlane.SecureServing.ServerCert.CertDirectory = cfg.RootDir
 	opts.Controllers.EnableLeaderElection = false
+	// memory:// storage lives in this process: no other apiserver can serve
+	// it, so skip the HA wait on creates right after a CRD is Established.
+	opts.Extra.SingleAPIServer = true
 	if cfg.ShardBaseURL != "" {
 		opts.Extra.ShardBaseURL = cfg.ShardBaseURL
 	}

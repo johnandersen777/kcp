@@ -593,16 +593,19 @@ func (s *Server) Run(ctx context.Context) error {
 			logger.Info("bootstrapped root workspace phase 0")
 
 			logger.Info("getting kcp APIExport identities")
-			var identityErr error
-			if err := wait.PollUntilContextCancel(hookCtx, time.Millisecond*500, true, func(ctx context.Context) (bool, error) {
-				if err := s.resolveIdentities(ctx); err != nil {
-					logger.V(3).Info("failed to resolve identities, keeping trying", "err", err)
-					identityErr = err
-					return false, nil
-				}
-				return true, nil
-			}); err != nil {
-				logger.Error(err, "failed to get or create identities: %w", identityErr)
+			// The first resolve usually runs before the APIExport controller
+			// wrote the identities: retry on the next root APIExport event
+			// (the informer runs since the shard workspace bootstrap), with
+			// the old 500ms poll as the fallback.
+			exportChanged, stopExportNotify, err := notifyOnRootAPIExportChange(s.KcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer())
+			if err != nil {
+				logger.Error(err, "failed to watch APIExports for identities")
+				return nil // don't klog.Fatal. This only happens when context is cancelled.
+			}
+			err = resolveUntilDone(hookCtx, exportChanged, identityResolveFallback, s.resolveIdentities)
+			stopExportNotify()
+			if err != nil {
+				logger.Error(err, "failed to get or create identities")
 				return nil // don't klog.Fatal. This only happens when context is cancelled.
 			}
 			logger.Info("finished getting kcp APIExport identities")

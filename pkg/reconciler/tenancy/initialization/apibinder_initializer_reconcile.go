@@ -114,6 +114,11 @@ func (b *APIBinder) reconcile(ctx context.Context, logicalCluster *corev1alpha1.
 
 	requiredExportRefs := map[tenancyv1alpha1.APIExportReference]struct{}{}
 	someExportsMissing := false
+	// kcp-wasm: a failed default APIBinding create (e.g. a transient admission
+	// error at boot) is retried too; returning nil left the workspace
+	// Initializing for good, since nothing else requeues the LogicalCluster
+	// (seen as the iOS embedded requester's Workspace app never Ready).
+	createFailed := false
 
 	for _, wt := range wts {
 		logger := logging.WithObject(logger, wt)
@@ -191,6 +196,7 @@ func (b *APIBinder) reconcile(ctx context.Context, logicalCluster *corev1alpha1.
 				}
 
 				errors = append(errors, err)
+				createFailed = true
 				continue
 			}
 
@@ -210,9 +216,9 @@ func (b *APIBinder) reconcile(ctx context.Context, logicalCluster *corev1alpha1.
 			utilerrors.NewAggregate(errors),
 		)
 
-		if someExportsMissing {
+		if someExportsMissing || createFailed {
 			// Retry if any APIExports are missing, as it's possible they'll show up (cache server slow to catch up,
-			// arrive via replication)
+			// arrive via replication), or if a create failed (rate-limited requeue).
 			return utilerrors.NewAggregate(errors)
 		}
 

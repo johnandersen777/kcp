@@ -122,3 +122,92 @@ func TestFlushSnapshotPersistsPendingWrites(t *testing.T) {
 	default:
 	}
 }
+
+// MergeAll never replaces a store: a fragment brings back its own keys only,
+// and an unreadable envelope changes nothing.
+func TestMergeAllKeepsTheLiveStore(t *testing.T) {
+	name := "merge-all-test"
+	s := Shared(name)
+	ctx := context.Background()
+	RegisterDecoder(prefix, decodeFetch)
+	if err := s.Create(ctx, key("live"), newFetch("live"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	saved := New()
+	defer saved.Close()
+	if err := saved.Create(ctx, key("saved"), newFetch("saved"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := saved.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := json.Marshal(All{Version: allVersion, Stores: map[string]json.RawMessage{name: snap}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MergeAll([]byte(`{"version":2,"stores":{}}`)); !errors.Is(err, ErrUnreadableSnapshot) {
+		t.Fatalf("MergeAll(newer envelope) = %v, want ErrUnreadableSnapshot", err)
+	}
+	added, err := MergeAll(envelope)
+	if err != nil || added != 1 {
+		t.Fatalf("MergeAll = %d, %v; want 1", added, err)
+	}
+	for _, n := range []string{"live", "saved"} {
+		if err := s.Get(ctx, key(n), kstorage.GetOptions{}, newFetch("")); err != nil {
+			t.Fatalf("%s missing after MergeAll: %v", n, err)
+		}
+	}
+}
+
+// SnapshotResources keeps only keys with a fragment, in the envelope MergeAll
+// reads; together they bring chosen objects back after a restart.
+func TestSnapshotResourcesRoundTripsThroughMergeAll(t *testing.T) {
+	name := "snapshot-resources-test"
+	s := Shared(name)
+	ctx := context.Background()
+	RegisterDecoder(prefix, decodeFetch)
+	if err := s.Create(ctx, key("kept"), newFetch("kept"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Create(ctx, "/registry/other.example.com/widgets/dropped", newFetch("dropped"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	data, err := SnapshotResources([]string{prefix, ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckSnapshot(data); err != nil {
+		t.Fatalf("CheckSnapshot: %v", err)
+	}
+	var all All
+	if err := json.Unmarshal(data, &all); err != nil {
+		t.Fatal(err)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(all.Stores[name], &snap); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := snap.Items[key("kept")]; !ok || len(snap.Items) != 1 {
+		t.Fatalf("items = %v, want only %s (an empty fragment matches nothing)", keysOf(snap.Items), key("kept"))
+	}
+
+	if err := s.Delete(ctx, key("kept"), newFetch(""), nil, kstorage.ValidateAllObjectFunc, nil, kstorage.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	added, err := MergeAll(data)
+	if err != nil || added != 1 {
+		t.Fatalf("MergeAll = %d, %v; want 1", added, err)
+	}
+	if err := s.Get(ctx, key("kept"), kstorage.GetOptions{}, newFetch("")); err != nil {
+		t.Fatalf("kept not back after MergeAll: %v", err)
+	}
+}
+
+func keysOf(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

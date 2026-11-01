@@ -255,7 +255,7 @@ func (r *resourceHandler) serveResource(w http.ResponseWriter, req *http.Request
 		}
 	case "patch":
 		if storage, isAble := storage.(rest.Patcher); isAble {
-			return handlers.PatchResource(storage, requestScope, r.admission, supportedTypes)
+			return PatchResource(storage, requestScope, r.admission, supportedTypes)
 		}
 	case "delete":
 		if storage, isAble := storage.(rest.GracefulDeleter); isAble {
@@ -290,7 +290,7 @@ func (r *resourceHandler) serveStatus(w http.ResponseWriter, req *http.Request, 
 		}
 	case "patch":
 		if storage, isAble := storage.(rest.Patcher); isAble {
-			return handlers.PatchResource(storage, requestScope, r.admission, supportedTypes)
+			return PatchResource(storage, requestScope, r.admission, supportedTypes)
 		}
 	}
 	responsewriters.ErrorNegotiated(
