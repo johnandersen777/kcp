@@ -367,6 +367,8 @@ type vwHarness struct {
 	client    *kcpfakedynamic.FakeDynamicClusterClientset
 	apiDef    apidefinition.APIDefinition
 	admission *labelAdmission
+	// admit, when set, replaces admission in the PATCH handler.
+	admit admission.Interface
 }
 
 func newVWHarness(t *testing.T, wrapper forwardingregistry.StorageWrapper) *vwHarness {
@@ -472,7 +474,11 @@ func (h *vwHarness) patch(subresource string, patchType types.PatchType, body, q
 	req = req.WithContext(ctx)
 
 	supportedTypes := []string{string(types.JSONPatchType), string(types.MergePatchType), string(types.ApplyPatchType)}
-	handler := apiserver.PatchResource(storage.(rest.Patcher), scope, h.admission, supportedTypes)
+	var admit admission.Interface = h.admission
+	if h.admit != nil {
+		admit = h.admit
+	}
+	handler := apiserver.PatchResource(storage.(rest.Patcher), scope, admit, supportedTypes)
 
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -1005,4 +1011,95 @@ func TestApplyThroughVirtualWorkspaceCreateRaceHiddenObject(t *testing.T) {
 
 	res := h.apply("", "provider", specApplyA)
 	requireHiddenUntouched(t, h, res)
+}
+
+// mutatingAdmission runs mutate on create and update, for any subresource.
+type mutatingAdmission func(u *unstructured.Unstructured)
+
+func (m mutatingAdmission) Handles(operation admission.Operation) bool {
+	return operation == admission.Create || operation == admission.Update
+}
+
+func (m mutatingAdmission) Admit(_ context.Context, attrs admission.Attributes, _ admission.ObjectInterfaces) error {
+	m(attrs.GetObject().(*unstructured.Unstructured))
+	return nil
+}
+
+// TestApplyThroughVirtualWorkspaceAdmissionMutations shows the forwarded apply
+// carries what mutating admission changed in metadata labels, annotations and
+// finalizers, and that the request fails, without reaching the backend, when
+// admission changed anything the apply cannot express.
+func TestApplyThroughVirtualWorkspaceAdmissionMutations(t *testing.T) {
+	t.Parallel()
+
+	t.Run("labels, annotations and finalizers are forwarded", func(t *testing.T) {
+		t.Parallel()
+		h := newVWHarness(t, nil)
+		h.admit = mutatingAdmission(func(u *unstructured.Unstructured) {
+			lbls := u.GetLabels()
+			if lbls == nil {
+				lbls = map[string]string{}
+			}
+			lbls["admission"] = "label"
+			u.SetLabels(lbls)
+			annotations := u.GetAnnotations()
+			if annotations == nil {
+				annotations = map[string]string{}
+			}
+			annotations["admission"] = "annotation"
+			u.SetAnnotations(annotations)
+			if !sets.New(u.GetFinalizers()...).Has("example.com/admission") {
+				u.SetFinalizers(append(u.GetFinalizers(), "example.com/admission"))
+			}
+		})
+
+		for i := range 2 { // create, then update
+			res := h.apply("", "provider", specApplyA)
+			require.Equal(t, http.StatusOK, res.code, "apply %d: %s", i, res.body)
+			live := h.backend.get("default", "foo")
+			require.Equal(t, "label", live.GetLabels()["admission"])
+			require.Equal(t, "annotation", live.GetAnnotations()["admission"])
+			require.Equal(t, []string{"example.com/admission"}, live.GetFinalizers())
+			require.True(t, ownsField(t, live, "provider", "f:metadata", "f:annotations", "f:admission"), describeManagedFields(live))
+			requireOnlyApply(t, live, "provider", "")
+		}
+	})
+
+	for name, mutate := range map[string]func(u *unstructured.Unstructured){
+		"spec field set": func(u *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(u.Object, "forced", "spec", "policy")
+		},
+		"spec field removed": func(u *unstructured.Unstructured) {
+			unstructured.RemoveNestedField(u.Object, "spec", "a")
+		},
+		"label removed": func(u *unstructured.Unstructured) {
+			u.SetLabels(nil)
+		},
+		"finalizer removed": func(u *unstructured.Unstructured) {
+			u.SetFinalizers(nil)
+		},
+		"owner reference added": func(u *unstructured.Unstructured) {
+			u.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "v1", Kind: "ConfigMap", Name: "owner", UID: "uid-owner"}})
+		},
+	} {
+		t.Run(name+" fails closed", func(t *testing.T) {
+			t.Parallel()
+			h := newVWHarness(t, nil)
+			obj := &unstructured.Unstructured{}
+			obj.SetGroupVersionKind(noxuKind)
+			obj.SetNamespace("default")
+			obj.SetName("foo")
+			obj.SetUID("uid-foo")
+			obj.SetLabels(map[string]string{"team": "billing"})
+			obj.SetFinalizers([]string{"example.com/existing"})
+			h.backend.set(obj)
+			h.admit = mutatingAdmission(mutate)
+
+			before := h.backend.numCalls()
+			res := h.apply("", "provider", specApplyA)
+			require.Equal(t, http.StatusInternalServerError, res.code, res.body)
+			require.Contains(t, res.body, "mutating admission")
+			require.Equal(t, 0, countCalls(h.backend.callsSince(before), "patch/"), "nothing must be forwarded: %v", h.backend.callsSince(before))
+		})
+	}
 }
