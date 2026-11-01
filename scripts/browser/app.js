@@ -2794,7 +2794,7 @@ async function waitInfraRecord(name, did, timeoutMs = 60_000) {
 // object. Existing record bindings are repaired, and the record must be
 // synced before the caller adds its first contract (the first sync pulls an
 // existing record and would otherwise erase it).
-async function sessionInfra() {
+async function sessionInfra(onStep = () => {}) {
   const did = identityState?.phase === "Ready" ? identityState.did : "";
   if (!did) throw new Error("sign in before requesting a VM");
   try {
@@ -2841,6 +2841,7 @@ async function sessionInfra() {
     infra = await infraQueued(() => vmshell.createInfra({ rest: kcpREST, api: SOCIALWEB_API, name, spec }));
     addLog("info", `EphemeralInfra ${name} holds this tab's VMs`);
   }
+  onStep("syncing its record");
   const synced = await waitInfraRecord(name, did);
   addLog("info", `EphemeralInfra ${name} record ${vmshell.infraRecordURI(synced, did, name)}`);
   return synced;
@@ -3017,7 +3018,10 @@ async function requestVM() {
     computeBusy = true;
     computeRequestEl.disabled = true;
     const sshKeys = [];
-    const infraName = (await sessionInfra()).metadata.name;
+    // The infra and its PDS record take a while (~18 s seen on dev); say so.
+    const progress = (step) => setAppStatus(computeStatusEl, `requesting a VM: ${step}…`, "warn");
+    progress("preparing this tab's infra");
+    const infraName = (await sessionInfra((step) => progress(step))).metadata.name;
     const short = vmshell.contractName();
     const name = vmshell.infraContractName(infraName, short);
     const wootty = await woottyServed();
@@ -3045,6 +3049,7 @@ async function requestVM() {
       });
     }
     const { contract, secret } = vmshell.infraContract({ infra: infraName, short, wootty, agent, sshKeys, association: association.subject, guestTools });
+    progress("creating the contract");
     await setInfraContract(infraName, contract, secret);
     void flushKcpSoon("Request VM");
     setAppStatus(computeStatusEl, `${name} requested; waiting for bids`, "ok");
@@ -3661,9 +3666,6 @@ function renderIngress(entries) {
 
 async function start() {
   startDebugControl();
-  // Listeners first: a click on a button the feed enables early reaches
-  // requestVM / identityAction, which wait for kcp (kcpWorkerReady).
-  initSocialwebUI();
   // One kcp per origin: wait here while another tab of this browser runs it.
   await acquireKcpLock();
   // Before kcp boots (its first persist): later writes of a tab that loses
@@ -4031,6 +4033,15 @@ window.addEventListener("resize", () => {
 });
 
 setStatus("starting…", "running");
+// Listeners first, outside start(), so no boot step that throws or hangs
+// (debug control, the kcp lock, kcp, restoreShell) can skip them: a click on
+// a button the feed enables early reaches requestVM / identityAction, which
+// wait for kcp (kcpWorkerReady).
+try {
+  initSocialwebUI();
+} catch (err) {
+  addLog("error", `binding the identity and compute buttons failed: ${err instanceof Error ? err.message : err}`);
+}
 start().catch((err) => {
   setStatus("failed", "disconnected");
   retryEl.hidden = false;
