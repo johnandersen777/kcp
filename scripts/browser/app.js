@@ -2451,7 +2451,7 @@ function renderIdentity() {
   if (view.state === "signedIn") signIn.step = "idle";
   identityView = view;
   identitySignInEl.textContent = view.primary.label;
-  identitySignInEl.disabled = Boolean(view.primary.disabled);
+  identitySignInEl.disabled = !socialwebUIReady || Boolean(view.primary.disabled);
   identitySecondaryEl.hidden = !view.secondary;
   identitySecondaryEl.textContent = view.secondary?.label ?? "";
   identityHandleEl.disabled = view.busy;
@@ -2612,7 +2612,15 @@ function applyState(state) {
   }
 }
 
+// Bound at page init, before kcp boots (start()): the status feed can report
+// MarketIdentity Ready from restored state before kcp is ready, and a button
+// it enables must already have its listener (session 9xc9tc: a Request VM
+// click vanished). Until then applyComputeState and renderIdentity keep the
+// buttons disabled.
+let socialwebUIReady = false;
 function initSocialwebUI() {
+  if (socialwebUIReady) return;
+  socialwebUIReady = true;
   const storedMode = localStorage.getItem(identityPrefs.mode);
   identityModeEl.value = storedMode === "localRepo" ? "oauthBrowser" : (storedMode ?? "oauthBrowser");
   if (storedMode === "localRepo") {
@@ -3588,7 +3596,7 @@ function applyComputeState(state) {
   if (computeBusy && active.length > 0) computeBusy = false;
   computeReleasing = seen.some(vmshell.releaseWorkPending);
   const ready = state.marketIdentity?.phase === "Ready";
-  computeRequestEl.disabled = computeBusy || !ready || active.length > 0;
+  computeRequestEl.disabled = !socialwebUIReady || computeBusy || !ready || active.length > 0;
   if (ready && computeAgentRowEl.hidden) void agentServed().then((served) => { computeAgentRowEl.hidden = !served; });
   if (ready && computeGuestToolsRowEl.hidden) void guestToolsServed().then((served) => { computeGuestToolsRowEl.hidden = !served; });
   if (ready && r2StartServed === null) {
@@ -3653,6 +3661,9 @@ function renderIngress(entries) {
 
 async function start() {
   startDebugControl();
+  // Listeners first: a click on a button the feed enables early reaches
+  // requestVM / identityAction, which wait for kcp (kcpWorkerReady).
+  initSocialwebUI();
   // One kcp per origin: wait here while another tab of this browser runs it.
   await acquireKcpLock();
   // Before kcp boots (its first persist): later writes of a tab that loses
@@ -3685,7 +3696,6 @@ async function start() {
 
   void poll();
   setInterval(() => void poll(), Math.max(intervalMs, 5000));
-  initSocialwebUI();
   void typeBootSteps(BOOT_STEPS);
 }
 
