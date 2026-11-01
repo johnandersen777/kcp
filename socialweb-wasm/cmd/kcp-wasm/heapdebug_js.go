@@ -98,8 +98,10 @@ func startNoopLog() {
 // resourceVersion and managedFields always change with a write and are
 // skipped.
 func changedPaths(path string, a, b any, depth int, out *[]string) {
-	switch path {
-	case ".metadata.resourceVersion", ".metadata.managedFields":
+	// By last segment: internal types without JSON tags (a Lease) inline
+	// their ObjectMeta, so these sit at the top level there.
+	switch path[strings.LastIndex(path, ".")+1:] {
+	case "resourceVersion", "managedFields", "ResourceVersion", "ManagedFields":
 		return
 	}
 	am, aok := a.(map[string]any)
