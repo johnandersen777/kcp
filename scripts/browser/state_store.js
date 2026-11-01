@@ -323,6 +323,45 @@ export async function openBestBackend(
   };
 }
 
+/** The banner the page shows while state lives only in memory. */
+export const MEMORY_FALLBACK_MESSAGE =
+  "This browser is not saving state: a reload loses your sign-in, VMs and tokens";
+
+/**
+ * What the page says about the backend openBestBackend picked: the #log line
+ * (at "ok"/"warn", never the filtered debug level, so probes always see it)
+ * and, for memory, the banner and console warning text.
+ */
+export function backendNotice({ kind, reason }) {
+  const line = `kcp state backend: ${kind}`;
+  if (kind !== "memory") return { level: "ok", line, banner: null, warn: null };
+  const why = reason ? ` (IndexedDB unavailable: ${reason?.message ?? reason})` : " (no IndexedDB)";
+  return { level: "warn", line: `${line}${why}`, banner: MEMORY_FALLBACK_MESSAGE, warn: `${MEMORY_FALLBACK_MESSAGE}${why}` };
+}
+
+/** The visible error for saved state of channel ("kcp" or "socialweb") that could not be read. */
+export function unreadableMessage(channel) {
+  return `saved ${channel} state could not be read; not saving over it`;
+}
+
+/**
+ * Copies a saved value the running build could not read to
+ * `<channel>-unreadable-<time>` before anything else happens, so a later
+ * build (or a person) can still recover it. A value already backed up under
+ * that channel is not copied again. Returns the backup key (or the existing
+ * one's marker "" when it was a duplicate).
+ */
+export async function backupUnreadable(backend, channel, raw, now = new Date()) {
+  if (typeof raw !== "string" || raw === "") return null;
+  const prefix = `${channel}-unreadable-`;
+  const existing = await backend.loadPrefix(prefix).catch(() => []);
+  if (existing.includes(raw)) return "";
+  const key = `${prefix}${now.toISOString()}`;
+  // apply, not save: the backup may exceed the per-value limit save enforces.
+  await backend.apply({ puts: [[key, raw]] });
+  return key;
+}
+
 /**
  * Per-key snapshot saver for the page's IndexedDB state. Each key's saves run
  * one at a time, in arrival order, and the newest snapshot wins: a save
@@ -343,6 +382,7 @@ export function createPersister(
   const queued = new Map();
   const debounce = new Map();
   const running = new Map();
+  let stopped = false;
 
   async function save(key, { snapshot, seq }) {
     const store = await backend();
@@ -374,6 +414,7 @@ export function createPersister(
 
   return {
     schedule(key, snapshot, seq = 0) {
+      if (stopped) return Promise.resolve();
       queued.set(key, { snapshot, seq });
       if (now.has(key)) {
         // Behind an in-flight save: its loop picks this one up next.
@@ -393,6 +434,17 @@ export function createPersister(
     },
     pending() {
       return queued.size + running.size;
+    },
+    /**
+     * Drops every save not started yet and ignores later ones: another tab
+     * took this tab's state by force and owns the store now. A save already
+     * running finishes (it cannot be recalled).
+     */
+    stop() {
+      stopped = true;
+      for (const timer of debounce.values()) timers.clearTimeout(timer);
+      debounce.clear();
+      queued.clear();
     },
   };
 }

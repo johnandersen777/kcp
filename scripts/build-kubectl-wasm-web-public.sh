@@ -74,6 +74,8 @@ assets=(
   wasm_snapshot.js
   kcp_hibernate.js
   debug_link.js
+  kcp_lock.js
+  page_banner.js
 )
 wasm_modules=(
   kcp.wasm

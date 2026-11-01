@@ -26,6 +26,7 @@ import (
 	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/socialweb"
 	"github.com/johnandersen777/socialweb-computer-kcp/wasm/internal/statusfeed"
 	"github.com/kcp-dev/kcp/contrib/wasm/real"
+	"github.com/kcp-dev/kcp/contrib/wasm/storage"
 )
 
 type request struct {
@@ -53,15 +54,25 @@ func main() {
 		ShardBaseURL: "https://kcp.local",
 		ReadyTimeout: 3 * time.Minute,
 	}
+	persist := true
 	if initial := js.Global().Get("__kcpInitialState"); initial.Type() == js.TypeString {
 		if raw := initial.String(); raw != "" {
-			cfg.InitialSnapshot = []byte(raw)
+			// Fail closed on a saved state this build cannot read: boot a
+			// fresh kcp that never persists, so no full message replaces the
+			// saved records; the page backs them up and says so.
+			if err := storage.CheckSnapshot([]byte(raw)); err != nil {
+				persist = false
+				restoreFailed("kcp", err)
+			} else {
+				cfg.InitialSnapshot = []byte(raw)
+			}
 		}
 	}
-	cfg.OnSnapshot = func(snapshot []byte) {
-		persist := js.Global().Get("__kcpPersist")
-		if persist.Type() == js.TypeFunction {
-			persist.Invoke(string(snapshot))
+	if persist {
+		cfg.OnSnapshot = func(snapshot []byte) {
+			if fn := js.Global().Get("__kcpPersist"); fn.Type() == js.TypeFunction {
+				fn.Invoke(string(snapshot))
+			}
 		}
 	}
 
@@ -88,6 +99,20 @@ func main() {
 		return nil
 	})
 	js.Global().Set("kcpHandleRequest", handle)
+	// kcpPersistFlush(payload, callbackID) hands __kcpPersist the writes not
+	// persisted yet, before the page gives kcp to another tab; it answers
+	// {"flushed": false} when persistence is off.
+	js.Global().Set("kcpPersistFlush", js.FuncOf(func(_ js.Value, args []js.Value) any {
+		if len(args) < 2 {
+			return nil
+		}
+		id := args[1].Int()
+		go func() {
+			flushed := persist && storage.FlushSnapshot(5*time.Second)
+			js.Global().Call("__kcpResolve", id, fmt.Sprintf(`{"flushed":%t}`, flushed))
+		}()
+		return nil
+	}))
 	js.Global().Set("__kcpWasmReady", true)
 	fmt.Fprintln(os.Stderr, "kcp-wasm: real kcp ready at", srv.BaseURL)
 
@@ -166,6 +191,7 @@ func startSocialweb(srv *real.Server, kcpHandler js.Func) {
 			persist.Invoke(string(snapshot))
 		}
 	}
+	cfg.OnRestoreError = func(err error) { restoreFailed("socialweb", err) }
 	cfg.OnIngress = func(list []exposure.Ingress) {
 		if fn := js.Global().Get("__socialwebIngress"); fn.Type() == js.TypeFunction {
 			raw, _ := json.Marshal(list)
@@ -264,6 +290,16 @@ func startSocialweb(srv *real.Server, kcpHandler js.Func) {
 	js.Global().Set("socialwebHandleRequest", handler)
 	js.Global().Set("__socialwebReady", true)
 	fmt.Fprintln(os.Stderr, "kcp-wasm: socialweb ready")
+}
+
+// restoreFailed tells the page that the saved state of channel ("kcp" or
+// "socialweb") could not be read and will not be saved over.
+func restoreFailed(channel string, err error) {
+	fmt.Fprintf(os.Stderr, "kcp-wasm: saved %s state could not be read; not saving over it: %v\n", channel, err)
+	js.Global().Set("__"+channel+"RestoreError", err.Error())
+	if fn := js.Global().Get("__kcpRestoreFailed"); fn.Type() == js.TypeFunction {
+		fn.Invoke(channel, err.Error())
+	}
 }
 
 func firstNonEmpty(values ...string) string {

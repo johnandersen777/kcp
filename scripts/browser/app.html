@@ -53,6 +53,30 @@
     font-size: 12px;
     cursor: pointer;
   }
+  #banners { display: flex; flex-direction: column; }
+  #banners[hidden] { display: none; }
+  .banner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+  }
+  .banner-warn { background: #3a2f12; color: #f3d38a; }
+  .banner-error { background: #3d1a1a; color: #f4b4b4; }
+  .banner-info { background: var(--panel); color: var(--fg); }
+  .banner-text { flex: 1 1 16em; }
+  .banner button {
+    background: transparent;
+    color: inherit;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    padding: 2px 10px;
+    font: inherit;
+    cursor: pointer;
+  }
   main {
     flex: 1;
     min-height: 0;
@@ -336,6 +360,7 @@
   <span id="status">starting…</span>
   <button id="retry" type="button" hidden>retry</button>
 </header>
+<div id="banners" hidden></div>
 <main>
   <section id="left-pane">
     <div id="terminal-pane"><div id="terminal"></div></div>

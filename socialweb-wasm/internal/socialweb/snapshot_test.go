@@ -137,6 +137,29 @@ func TestParseSnapshotVersions(t *testing.T) {
 	}
 }
 
+// An unreadable saved snapshot fails closed: no restore and no persisting,
+// so the first vault write cannot save an empty vault over it.
+func TestPlanRestoreFailsClosed(t *testing.T) {
+	snapshot, persist, err := planRestore(nil)
+	if snapshot != nil || !persist || err != nil {
+		t.Fatalf("planRestore(empty) = %v, %t, %v; want nothing to restore, persist", snapshot, persist, err)
+	}
+	raw, err := json.Marshal(Snapshot{Version: SnapshotVersion})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, persist, err = planRestore(raw)
+	if snapshot == nil || !persist || err != nil {
+		t.Fatalf("planRestore(valid) = %v, %t, %v; want a snapshot, persist", snapshot, persist, err)
+	}
+	for _, input := range []string{`{"version":`, `{"version":2,"vault":{}}`, `null`, `"x"`} {
+		snapshot, persist, err := planRestore([]byte(input))
+		if snapshot != nil || persist || err == nil {
+			t.Fatalf("planRestore(%s) = %v, %t, %v; want an error and no persisting", input, snapshot, persist, err)
+		}
+	}
+}
+
 // staticSessionStore serves one session without touching disk or network.
 type staticSessionStore struct {
 	data oauthclient.SessionData
