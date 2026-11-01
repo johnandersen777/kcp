@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-36.marketrequesters.socialweb.computer
+  name: v1alpha1-37.marketrequesters.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -989,7 +989,15 @@ spec:
                                   enum:
                                     - deno
                                     - browser
+                                    - embedded
                                 browser:
+                                  type: object
+                                  properties:
+                                    timeoutSeconds:
+                                      type: integer
+                                      format: int32
+                                      minimum: 1
+                                embedded:
                                   type: object
                                   properties:
                                     timeoutSeconds:
