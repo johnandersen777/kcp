@@ -68,6 +68,7 @@ assets=(
   vmshell.js
   webrtc_guest.js
   webrtc_ingress.js
+  policy_sandbox.js
   ssh_worker.js
   ssh_cmd.js
   wasm_snapshot.js
