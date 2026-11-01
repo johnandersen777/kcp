@@ -138,3 +138,9 @@ relative to ~/src/kcp/socialweb-computer-kcp at origin/main.
 - R2's own RFP accepted by hat-7 17:26:42Z (repo did:plc:reephqeca6eeq7hohvikcmot); R2's own VM (separate Firecracker VM on hat-7, nested by ownership, not virtualization) Held 17:26:59Z; `run request agent r2-agent` -> agentStart -> grandchild agent joined atirc as vm-3mz4cgbnb6z22.r2-regb26j7a4jna.aliceoa.bsky.social (token minted below R2's via atircParentRef). PASS: alice -> R2 -> R2 VM agent.
 - Release 17:50:32Z (page): aliceoa-3mz4ca3etg627 revoked 17:50:32Z, r2-regb26j7a4jna 17:50:33Z, left=0. Grandchild sub dropped 17:50:33-34Z while its VM fc-reephqeca6ee-2311a14c was still Running (hat-7 17:50:47Z): subhandle-suffix revoke cascade works.
 - GAP: R2's own contract is not released by the outer release; R2's repo dies with alice's VM, so only a bidder-side release or exp (~24h) frees it. rc127 fix: guest teardown releases R2 held contracts first; bidder TTL backstop.
+
+## V1 rerun on rc126, one command (2026-10-30)
+
+- CLI requester alice (QR, no handle) signed in 18:04:12Z; hat-7 accept nrmujbwskqbxk 18:04:21Z; VM agent aliceoa-3mz4ejuf5fy2k joined.
+- In the VM, as the agent user (no root, no chmod, no units): `socialweb-computer run request --name r2 --guest-requester --agent --hold`.
+- R2 DID did:plc:jsueozcdhc3usuofmc6vih2p 18:06:52Z -> association ref 18:07:00Z (subhandle r2-nrmujbwskqbxk.aliceoa, no atirc sub) -> R2 RFP 3mz4eox6uxb22 bid by hat-7 (rc126 tangled-vouch) 18:07:17Z -> R2 VM Held 18:08:30Z -> `run request agent r2` -> grandchild vm-3mz4eox6uxb22 online. PASS, no workaround.
