@@ -22,7 +22,6 @@ print(json.dumps({"Replace": {
     f"{socialweb}/internal/portscan/scan_js.go": f"{overlay_dir}/portscan/scan_js.go",
     f"{socialweb}/internal/atproto/repo/sqlite.go": f"{overlay_dir}/atproto/repo_sqlite.go",
     f"{socialweb}/internal/atproto/pds/store.go": f"{overlay_dir}/atproto/pds_store.go",
-    f"{socialweb}/internal/app/compose/compose.go": f"{overlay_dir}/compose/compose.go",
 }}, indent=2), file=open(out, "w"))
 PY
 

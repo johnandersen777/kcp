@@ -1024,6 +1024,7 @@ async function spawnKcp(useSnapshot = true) {
     initialState,
     hibernate,
     debugGo: localStorage.getItem("kcp.debugGo") !== "0",
+    noopLog: localStorage.getItem("kcp.noopLog") === "1",
     lowMemory,
     gogcReady: Number(localStorage.getItem("kcp.gogcReady")) || undefined,
     // Profiles only when served by the dev server (it answers HEAD
@@ -2506,7 +2507,9 @@ async function resolveAccount(did) {
 // one and the button becomes Continue sign-in once the PDS has answered.
 function identityAction(action) {
   const run = { start: startSignIn, open: openSignInPopup, switch: switchAccount, signOut: signOutIdentity,
-    cancel: cancelOAuthPopup }[action];
+    cancel: cancelOAuthPopup,
+    // A new link for a permission upgrade; the old failure no longer applies.
+    refresh: () => (setSignIn({ error: "" }), restartSignIn()) }[action];
   if (!run) return;
   const fail = (err) => {
     const message = err instanceof Error ? err.message : String(err);

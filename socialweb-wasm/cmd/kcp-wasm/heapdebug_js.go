@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"syscall/js"
 	"time"
 
+	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
+
 	"github.com/kcp-dev/kcp/contrib/wasm/storage"
 )
 
@@ -24,6 +27,7 @@ import (
 // period. The default (unset) keeps allocation profiling off.
 func startHeapDebug() {
 	startMemStats()
+	startNoopLog()
 	period, _ := strconv.Atoi(os.Getenv("KCP_HEAP_PROFILE"))
 	if period <= 0 {
 		// Allocation profiling samples callers through the wasm pclntab; with
@@ -47,6 +51,25 @@ func startHeapDebug() {
 			}
 		}
 	}()
+}
+
+// startNoopLog is debug-only: with KCP_NOOP_LOG=1 it logs one line per no-op
+// update (key, verb, subresource, user), to find which controller re-applies
+// unchanged objects. Noisy; off by default.
+func startNoopLog() {
+	if os.Getenv("KCP_NOOP_LOG") != "1" {
+		return
+	}
+	storage.NoopLog = func(ctx context.Context, key string) {
+		verb, sub, user := "", "", ""
+		if ri, ok := genericapirequest.RequestInfoFrom(ctx); ok {
+			verb, sub = ri.Verb, ri.Subresource
+		}
+		if u, ok := genericapirequest.UserFrom(ctx); ok {
+			user = u.GetName()
+		}
+		fmt.Fprintf(os.Stderr, "noop update: %s verb=%s subresource=%s user=%s\n", key, verb, sub, user)
+	}
 }
 
 // startMemStats is debug-only and cheap: with KCP_MEMSTATS=<seconds> it logs

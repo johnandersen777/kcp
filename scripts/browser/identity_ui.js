@@ -80,7 +80,9 @@ export function signInView({ requester = true, identity, local = {}, now = Date.
   if (step === "signingOut" && phase === "Ready" && waiting) {
     return view("signingOut", "warn", "Signing out…", "", wait("Signing out…"));
   }
-  if (local.error) return failed(local.error);
+  // Ready stays Ready: an error while signed in (a failed upgrade, sign out
+  // or switch) is shown under it, with Sign out still there.
+  if (local.error && !(phase === "Ready" && identity?.did)) return failed(local.error);
   if (step === "preparing" && !url && (waiting || (phase !== "Failed" && phase !== "Ready"))) {
     const target = normalizeHandle(local.applied) || "bsky.social";
     if (waiting) return view("preparing", "warn", `Preparing sign-in for ${target}…`, "", wait("Preparing…"));
@@ -97,6 +99,21 @@ export function signInView({ requester = true, identity, local = {}, now = Date.
     const detail = handle ? did : "";
     if (other && handle) {
       return view("signedIn", "warn", `Signed in as ${handle}, not ${typed}.`, did, primary, signOut);
+    }
+    // A session granted before the page asked for more scopes keeps working;
+    // socialweb r133 marks it (pendingAction signInAgain, reason ScopeUpgrade)
+    // without leaving Ready. The tap opens its authorize URL; without a usable
+    // one it asks socialweb for a new one (refresh), never a new sign-in: that
+    // would cancel a queued Request VM (review page-rc133 47d636af6, 1).
+    const action = identity.pendingAction;
+    if (action?.kind === "signInAgain" && action.reason === "ScopeUpgrade") {
+      const failed = local.error ? `Granting permissions failed: ${friendlyError(local.error)}` : "";
+      return view("signedIn", "warn", `Signed in as ${handle || did}`,
+        failed || "New permissions are available: sign in again to grant them.",
+        url ? { label: "Grant permissions", action: "open" } : { label: "Get a new sign-in link", action: "refresh" }, signOut);
+    }
+    if (local.error) {
+      return view("signedIn", "warn", `Signed in as ${handle || did}`, friendlyError(local.error), primary, signOut);
     }
     return view("signedIn", "ok", `Signed in as ${handle || did}`, detail, primary, signOut);
   }

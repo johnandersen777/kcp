@@ -12,16 +12,9 @@ mkdir -p "$TMPDIR"
 REV=$(git -c safe.directory='*' -C "$SRC" rev-parse "${REV:?set REV to a socialweb commit}")
 cd "$W"
 if [[ "$(cat .work/socialweb-mirror/.mirror-commit 2>/dev/null)" != "$REV" ]]; then
-  old=$(cat .work/socialweb-mirror/.mirror-commit 2>/dev/null || true)
-  # The compose.go overlay (Config.Rest) is 3-way merged onto the new upstream.
-  if [[ -n "$old" ]]; then
-    t=$(mktemp -d)
-    git -c safe.directory='*' -C "$SRC" show "$old:internal/app/compose/compose.go" > "$t/base.go"
-    git -c safe.directory='*' -C "$SRC" show "$REV:internal/app/compose/compose.go" > "$t/theirs.go"
-    git merge-file -p socialweb-wasm/overlays/compose/compose.go "$t/base.go" "$t/theirs.go" > "$t/merged.go" \
-      || { echo "compose.go overlay conflicts: resolve $t/merged.go" >&2; exit 1; }
-    cp "$t/merged.go" socialweb-wasm/overlays/compose/compose.go
-  fi
+  # compose.Config.Rest is upstream since socialweb a55d436b (no overlay).
+  git -c safe.directory='*' -C "$SRC" merge-base --is-ancestor a55d436b "$REV" \
+    || { echo "REV $REV predates socialweb a55d436b (compose.Config.Rest); the page needs it" >&2; exit 1; }
   rm -rf .work/socialweb-mirror && mkdir -p .work/socialweb-mirror
   git -c safe.directory='*' -C "$SRC" archive "$REV" | tar -x -C .work/socialweb-mirror
   echo "$REV" > .work/socialweb-mirror/.mirror-commit

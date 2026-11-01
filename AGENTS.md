@@ -24,7 +24,7 @@ EventStreams (~900 no-op applies/min); the lead is fixing it.
 | `~/src/kcp/socialweb-computer-kcp` | socialweb source (the lead's; read only for agents; `git -c safe.directory='*'`) |
 | `~/.tmp/claude-kcpwasm` | dev-server debug files (`debug.log`, `control.ndjson`, profiles) and the lead's helpers: `takeover.sh`, `tunnel-watchdog.sh`, `page-hold.ts`, `boot-smoke.ts` |
 | `scripts/browser/` | the page: `app.js`, `kcp_worker.js`, `oauth_refresh_worker.js`, `vmshell.js`, `webrtc_guest.js`, `ssh_cmd.js`, `identity_ui.js`, `debug_link.js` (debug log + control stream) |
-| `socialweb-wasm/` | Go glue: `cmd/kcp-wasm` (wasm main, refresher bridge, memstats), `internal/socialweb/orchestrator.go` (MarketRequester `app`, comms mode, events.Register), `overlays/compose/compose.go` (Config.Rest) |
+| `socialweb-wasm/` | Go glue: `cmd/kcp-wasm` (wasm main, refresher bridge, memstats), `internal/socialweb/orchestrator.go` (MarketRequester `app`, comms mode, events.Register) |
 | `contrib/wasm/storage` | kcp's in-memory storage for wasm (per-resource update counters live here) |
 | `scripts/prepare-kcp-patched-modules.sh` | patches k8s modules for wasm (incl. the JSON fast path for apply bodies) |
 | `scripts/kubectl_wasm_web.ts` | dev server (static files + `/debug/*` hooks) |

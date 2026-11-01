@@ -35,6 +35,11 @@ type PendingAction struct {
 	Kind      string `json:"kind,omitempty"`
 	URL       string `json:"url,omitempty"`
 	ExpiresAt string `json:"expiresAt,omitempty"`
+	// Reason says why a signInAgain is offered (ScopeUpgrade: the session
+	// works, but lacks scopes the page now asks for).
+	Reason string `json:"reason,omitempty"`
+	// MissingScopes names the scope tokens a ScopeUpgrade would add.
+	MissingScopes []string `json:"missingScopes,omitempty"`
 }
 
 // Resource is one watched object reduced to status fields.
@@ -349,6 +354,8 @@ func requesterResource(u *unstructured.Unstructured) *Resource {
 		r.Pending.Kind, _, _ = unstructured.NestedString(action, "kind")
 		r.Pending.URL, _, _ = unstructured.NestedString(action, "url")
 		r.Pending.ExpiresAt, _, _ = unstructured.NestedString(action, "expiresAt")
+		r.Pending.Reason, _, _ = unstructured.NestedString(action, "reason")
+		r.Pending.MissingScopes, _, _ = unstructured.NestedStringSlice(action, "missingScopes")
 	}
 	return r
 }

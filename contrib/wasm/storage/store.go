@@ -494,6 +494,9 @@ func (s *Store) guaranteedUpdate(
 	if exists && objectsEqual(orig, output) {
 		s.mu.Unlock()
 		countUpdate(key, false)
+		if log := NoopLog; log != nil {
+			log(ctx, key)
+		}
 		return existing, m, nil
 	}
 	countUpdate(key, true)
@@ -1169,6 +1172,11 @@ func countUpdate(key string, written bool) {
 		v.(*[2]atomic.Int64)[1].Add(1)
 	}
 }
+
+// NoopLog, when set (debug only, before the apiserver starts), is called
+// after every no-op update with its request context and key: which object a
+// controller keeps re-applying, and by which verb and user.
+var NoopLog func(ctx context.Context, key string)
 
 // TakeUpdateCounts returns and resets the counts: resource -> {written, noop}.
 func TakeUpdateCounts() map[string][2]int64 {

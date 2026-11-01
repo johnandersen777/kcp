@@ -73,6 +73,39 @@ Deno.test("signInView waits out the old status after a tap, then trusts it", () 
   assertEquals(at({}, { ...awaiting, phase: "SessionExpired" }).primary.label, "Sign in again");
 });
 
+Deno.test("signInView offers new permissions without leaving Signed in", () => {
+  const upgrade = {
+    ...ready,
+    pendingAction: { kind: "signInAgain", reason: "ScopeUpgrade", url: URL1, expiresAt: "2026-10-24T12:05:00Z" },
+  };
+  const account = { did: ALICE, handle: "alice.bsky.social" };
+  const v = at({ account }, upgrade);
+  assertEquals([v.state, v.tone, v.text, v.primary.label, v.primary.action, v.secondary.action],
+    ["signedIn", "warn", "Signed in as alice.bsky.social", "Grant permissions", "open", "signOut"]);
+  // once opened (or expired) the tap asks socialweb for a new link, never a new sign-in
+  assertEquals(at({ account, used: [URL1] }, upgrade).primary.action, "refresh");
+  assertEquals(signInView({ identity: upgrade, local: { account }, now: Date.parse("2026-10-24T12:06:00Z") }).primary.action, "refresh");
+  // a failed upgrade sign-in stays signed in, error under it, Sign out still there
+  const failedUp = at({ account, error: "access_denied" }, upgrade);
+  assertEquals([failedUp.state, failedUp.detail, failedUp.secondary.action],
+    ["signedIn", "Granting permissions failed: the sign-in was declined", "signOut"]);
+  // r133 shape without a URL: {kind, reason, message, missingScopes, handle}
+  const noURL = { ...ready, pendingAction: { kind: "signInAgain", reason: "ScopeUpgrade", missingScopes: ["rpc:chat.atirc.revoke?aud=did:web:irc.fedfork.com%23atirc"] } };
+  const start = at({ account }, noURL);
+  assertEquals([start.state, start.primary.label, start.primary.action], ["signedIn", "Get a new sign-in link", "refresh"]);
+  // a signInAgain on a Ready identity without reason ScopeUpgrade is not an upgrade, URL or not
+  assertEquals(at({ account }, { ...ready, pendingAction: { kind: "signInAgain" } }).primary.action, "switch");
+  assertEquals(at({ account }, { ...ready, pendingAction: { kind: "signInAgain", url: URL1 } }).primary.action, "switch");
+  // done: socialweb clears pendingAction
+  assertEquals(at({ account }, ready).primary.action, "switch");
+  // any other error while Ready (a failed sign out) is shown, not swallowed
+  const outFailed = at({ account, error: "kcp is still starting" }, ready);
+  assertEquals([outFailed.state, outFailed.tone, outFailed.detail, outFailed.secondary.action],
+    ["signedIn", "warn", "kcp is still starting", "signOut"]);
+  // a typed other handle still says so first
+  assertEquals(at({ account, typed: "bob.test" }, upgrade).text, "Signed in as alice.bsky.social, not bob.test.");
+});
+
 Deno.test("friendlyError hides package prefixes", () => {
   assertEquals(friendlyError("marketidentity: resolving the configured handle x: not found"),
     "resolving the configured handle x: not found");
