@@ -2509,7 +2509,8 @@ async function sessionInfra() {
   }
   const name = vmshell.originInfraName(location.origin, infraTabId());
   const path = `${SOCIALWEB_API}/ephemeralinfras/${name}`;
-  const repoRef = vmshell.infraRepoRef(did);
+  const record = vmshell.infraRecordBinding(did);
+  const repoRef = record.repoRef;
   let infra = null;
   try {
     infra = await kcpREST("GET", path);
@@ -2529,13 +2530,13 @@ async function sessionInfra() {
         if (kcpStatus(err) !== 404) throw err;
       });
       infra = await waitInfraGone(path);
-    } else if (!binding?.repoRef || (binding.sync && binding.sync !== "Both")) {
-      await patchInfra(path, { spec: { record: { repoRef, sync: "Both" } } });
+    } else if (vmshell.infraRecordStale(binding)) {
+      await patchInfra(path, { spec: { record } });
       infra = await kcpREST("GET", path);
     }
   }
   if (!infra) {
-    const manifest = vmshell.sessionInfraManifest(name, undefined, { repoRef, sync: "Both" });
+    const manifest = vmshell.sessionInfraManifest(name, undefined, record);
     try {
       infra = await kcpREST("POST", `${SOCIALWEB_API}/ephemeralinfras`, manifest);
     } catch (err) {

@@ -91,6 +91,29 @@ export function infraRepoRef(did) {
   return { group: "socialweb.computer", kind: "AtprotoRepo", name: repoName(did) };
 }
 
+// The EventSources the page's compose runs: its MarketRequester has no relay
+// (createRoot), so socialweb's watchSources are the public jetstreams, and
+// the MarketRequester's watch selector links grant subscribing to them.
+export const INFRA_EVENT_SOURCES = ["jetstream-bsky-us-east", "jetstream-bsky-us-west"];
+
+/**
+ * The tab infra's spec.record: synced both ways with the signed-in repo and
+ * watched through the jetstream EventSources (without eventSourceRefs it takes
+ * a per-watch PDS source no link grants: "bus: link denied").
+ */
+export function infraRecordBinding(did) {
+  return {
+    repoRef: infraRepoRef(did),
+    sync: "Both",
+    eventSourceRefs: INFRA_EVENT_SOURCES.map((name) => ({ group: "events.socialweb.computer", kind: "EventSource", name })),
+  };
+}
+
+/** True when a live spec.record needs patching to infraRecordBinding. */
+export function infraRecordStale(binding) {
+  return !binding?.repoRef || (binding.sync && binding.sync !== "Both") || !(binding.eventSourceRefs?.length > 0);
+}
+
 export function infraCondition(infra, type) {
   return (infra?.status?.conditions ?? []).find((condition) => condition?.type === type) ?? null;
 }
