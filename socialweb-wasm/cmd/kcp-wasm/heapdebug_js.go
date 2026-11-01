@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"runtime"
 	"runtime/pprof"
 	"sort"
@@ -17,6 +18,7 @@ import (
 	"syscall/js"
 	"time"
 
+	kruntime "k8s.io/apimachinery/pkg/runtime"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 
 	"github.com/kcp-dev/kcp/contrib/wasm/storage"
@@ -74,6 +76,54 @@ func startNoopLog() {
 			kind = "written"
 		}
 		fmt.Fprintf(os.Stderr, "update %s: %s verb=%s subresource=%s user=%s\n", kind, key, verb, sub, user)
+	}
+	// The field paths a written update changed (values never logged), so a
+	// churn line names the status field a controller keeps rewriting.
+	storage.UpdateDiffLog = func(_ context.Context, key string, before, after kruntime.Object) {
+		var a, b any
+		if raw, err := json.Marshal(before); err == nil {
+			_ = json.Unmarshal(raw, &a)
+		}
+		if raw, err := json.Marshal(after); err == nil {
+			_ = json.Unmarshal(raw, &b)
+		}
+		var paths []string
+		changedPaths("", a, b, 4, &paths)
+		fmt.Fprintf(os.Stderr, "update fields: %s %s\n", key, strings.Join(paths, ","))
+	}
+}
+
+// changedPaths appends the JSON paths where a and b differ, down to depth
+// levels (deeper differences are reported at that level). metadata
+// resourceVersion and managedFields always change with a write and are
+// skipped.
+func changedPaths(path string, a, b any, depth int, out *[]string) {
+	switch path {
+	case ".metadata.resourceVersion", ".metadata.managedFields":
+		return
+	}
+	am, aok := a.(map[string]any)
+	bm, bok := b.(map[string]any)
+	if aok && bok && depth > 0 {
+		keys := map[string]bool{}
+		for k := range am {
+			keys[k] = true
+		}
+		for k := range bm {
+			keys[k] = true
+		}
+		sorted := make([]string, 0, len(keys))
+		for k := range keys {
+			sorted = append(sorted, k)
+		}
+		sort.Strings(sorted)
+		for _, k := range sorted {
+			changedPaths(path+"."+k, am[k], bm[k], depth-1, out)
+		}
+		return
+	}
+	if !reflect.DeepEqual(a, b) {
+		*out = append(*out, path)
 	}
 }
 
