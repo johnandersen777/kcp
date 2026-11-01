@@ -652,6 +652,98 @@ func TestApplyThroughVirtualWorkspaceConflictsForceAndDryRun(t *testing.T) {
 	requireOnlyApply(t, live, "other", "")
 }
 
+func countCalls(calls []string, prefix string) int {
+	n := 0
+	for _, call := range calls {
+		if strings.HasPrefix(call, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestApplyThroughVirtualWorkspaceConflictRetries shows which 409s are retried:
+// only a resourceVersion conflict on the resourceVersion the virtual workspace
+// pinned. Field manager conflicts and conflicts on a resourceVersion the client
+// set are answered right away.
+func TestApplyThroughVirtualWorkspaceConflictRetries(t *testing.T) {
+	t.Parallel()
+
+	withRV := func(body, rv string) string {
+		return strings.Replace(body, "  namespace: default\n", "  namespace: default\n  resourceVersion: \""+rv+"\"\n", 1)
+	}
+
+	t.Run("field manager conflict in the virtual workspace", func(t *testing.T) {
+		t.Parallel()
+		h := newVWHarness(t, nil)
+		require.Equal(t, http.StatusOK, h.apply("", "provider", specApplyA).code)
+
+		before := h.backend.numCalls()
+		res := h.apply("", "other", strings.Replace(specApplyA, `a: "1"`, `a: "x"`, 1))
+		require.Equal(t, http.StatusConflict, res.code, res.body)
+		require.Equal(t, 1, countCalls(h.backend.callsSince(before), "get"), "no retry: %v", h.backend.callsSince(before))
+		require.Equal(t, 0, countCalls(h.backend.callsSince(before), "patch/"))
+	})
+
+	t.Run("field manager conflict in the backend", func(t *testing.T) {
+		t.Parallel()
+		h := newVWHarness(t, nil)
+		require.Equal(t, http.StatusOK, h.apply("", "provider", specApplyA).code)
+		h.client.PrependReactor("patch", "noxus", func(action kcptesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewApplyConflict([]metav1.StatusCause{{
+				Type: metav1.CauseTypeFieldManagerConflict, Message: `conflict with "someone"`, Field: ".spec.a",
+			}}, `Apply failed with 1 conflict: conflict with "someone": .spec.a`)
+		})
+
+		before := h.backend.numCalls()
+		res := h.apply("", "provider", specApplyA)
+		require.Equal(t, http.StatusConflict, res.code, res.body)
+		require.Contains(t, res.body, "conflict with")
+		require.Equal(t, 1, countCalls(h.backend.callsSince(before), "get"), "no retry: %v", h.backend.callsSince(before))
+	})
+
+	t.Run("client resourceVersion differs from the one read", func(t *testing.T) {
+		t.Parallel()
+		h := newVWHarness(t, nil)
+		require.Equal(t, http.StatusOK, h.apply("", "provider", specApplyA).code)
+
+		before := h.backend.numCalls()
+		res := h.apply("", "provider", withRV(specApplyAB, "999"))
+		require.Equal(t, http.StatusConflict, res.code, res.body)
+		require.Equal(t, 1, countCalls(h.backend.callsSince(before), "get"), "no retry: %v", h.backend.callsSince(before))
+		require.Equal(t, 0, countCalls(h.backend.callsSince(before), "patch/"), "a resourceVersion the virtual workspace did not admit must not be forwarded")
+	})
+
+	t.Run("client resourceVersion conflicts in the backend", func(t *testing.T) {
+		t.Parallel()
+		h := newVWHarness(t, nil)
+		require.Equal(t, http.StatusOK, h.apply("", "provider", specApplyA).code)
+		rv := h.backend.get("default", "foo").GetResourceVersion()
+		var once sync.Once
+		h.client.PrependReactor("patch", "noxus", func(action kcptesting.Action) (bool, runtime.Object, error) {
+			once.Do(func() { h.backend.set(h.backend.get("default", "foo")) })
+			return false, nil, nil
+		})
+
+		before := h.backend.numCalls()
+		res := h.apply("", "provider", withRV(specApplyAB, rv))
+		require.Equal(t, http.StatusConflict, res.code, res.body)
+		require.Equal(t, 1, countCalls(h.backend.callsSince(before), "patch/"), "no retry: %v", h.backend.callsSince(before))
+	})
+
+	t.Run("client resourceVersion matches", func(t *testing.T) {
+		t.Parallel()
+		h := newVWHarness(t, nil)
+		require.Equal(t, http.StatusOK, h.apply("", "provider", specApplyA).code)
+		rv := h.backend.get("default", "foo").GetResourceVersion()
+
+		res := h.apply("", "provider", withRV(specApplyAB, rv))
+		require.Equal(t, http.StatusOK, res.code, res.body)
+		b, _, _ := unstructured.NestedString(h.backend.get("default", "foo").Object, "spec", "b")
+		require.Equal(t, "2", b)
+	})
+}
+
 // TestApplyThroughVirtualWorkspaceKeepsOtherPatchTypes shows a merge patch is
 // still computed by the virtual workspace and stored with an update.
 func TestApplyThroughVirtualWorkspaceKeepsOtherPatchTypes(t *testing.T) {

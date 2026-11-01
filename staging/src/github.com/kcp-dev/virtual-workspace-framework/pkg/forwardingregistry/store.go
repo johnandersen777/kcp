@@ -289,6 +289,20 @@ func DefaultDynamicDelegatedStoreFuncs(
 			return delegate.Update(ctx, unstructuredObj, *options, subResources...)
 		}
 
+		if isApply {
+			// Retry only a resourceVersion conflict on the resourceVersion
+			// forwardApply pinned (a write between the Get and the apply).
+			// Field manager conflicts and conflicts on a resourceVersion the
+			// client set do not go away with a fresh Get.
+			var result *unstructured.Unstructured
+			err := retry.OnError(patchConflictRetryBackoff, isPinnedResourceVersionConflict, func() error {
+				var err error
+				result, err = doUpdate()
+				return err
+			})
+			return result, false, unwrapPinnedResourceVersionConflict(err)
+		}
+
 		if requestInfo != nil && requestInfo.Verb == "patch" {
 			var result *unstructured.Unstructured
 			err := retry.RetryOnConflict(patchConflictRetryBackoff, func() error {

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -54,7 +55,11 @@ import (
 //   - metadata.resourceVersion of live (unless the client set one), so the
 //     backend applies onto exactly the object the virtual workspace admitted;
 //     a concurrent write fails with a Conflict, which the caller retries with
-//     a fresh Get, as it does for the Update;
+//     a fresh Get (pinnedResourceVersionConflict). A client resourceVersion
+//     other than live's is answered with Conflict without forwarding. If the
+//     object is deleted between the Get and the apply, the backend rejects the
+//     pinned resourceVersion on its create path; that error is returned as is
+//     (fails closed, not retried);
 //   - labels that the virtual workspace's mutating admission added (e.g. the
 //     APIExport permission claim selector labels) and that the backend would
 //     not keep from the apply alone. The applier owns them, as it owns fields
@@ -73,7 +78,7 @@ func forwardApply(
 	if live == nil {
 		createUID = string(uuid.NewUUID())
 	}
-	data, err := applyPatchBody(applyPatch.Data, admitted, live, createUID, options.FieldManager, strings.Join(subResources, "/"))
+	data, pinnedResourceVersion, err := applyPatchBody(groupResource, name, applyPatch.Data, admitted, live, createUID, options.FieldManager, strings.Join(subResources, "/"))
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +97,48 @@ func forwardApply(
 	if createUID != "" && isUIDInvalid(err) {
 		return nil, apierrors.NewAlreadyExists(groupResource, name)
 	}
+	if pinnedResourceVersion && apierrors.IsConflict(err) && !isFieldManagerConflict(err) {
+		return nil, &pinnedResourceVersionConflict{err: err}
+	}
 	return result, err
+}
+
+// pinnedResourceVersionConflict marks a backend Conflict on the resourceVersion
+// forwardApply pinned: the object changed after the virtual workspace read it,
+// so the apply is worth retrying with a fresh Get.
+type pinnedResourceVersionConflict struct {
+	err error
+}
+
+func (e *pinnedResourceVersionConflict) Error() string { return e.err.Error() }
+func (e *pinnedResourceVersionConflict) Unwrap() error { return e.err }
+
+func isPinnedResourceVersionConflict(err error) bool {
+	var conflict *pinnedResourceVersionConflict
+	return errors.As(err, &conflict)
+}
+
+func unwrapPinnedResourceVersionConflict(err error) error {
+	var conflict *pinnedResourceVersionConflict
+	if errors.As(err, &conflict) {
+		return conflict.err
+	}
+	return err
+}
+
+// isFieldManagerConflict returns whether err is a server-side apply conflict
+// between field managers.
+func isFieldManagerConflict(err error) bool {
+	status, ok := err.(apierrors.APIStatus)
+	if !ok || status.Status().Details == nil {
+		return false
+	}
+	for _, cause := range status.Status().Details.Causes {
+		if cause.Type == metav1.CauseTypeFieldManagerConflict {
+			return true
+		}
+	}
+	return false
 }
 
 // isUIDInvalid returns whether err is the backend rejecting a changed metadata.uid.
@@ -112,28 +158,30 @@ func isUIDInvalid(err error) bool {
 	return false
 }
 
-// applyPatchBody returns the apply patch to send to the backend, see forwardApply.
-func applyPatchBody(data []byte, admitted, live *unstructured.Unstructured, createUID, manager, subresource string) ([]byte, error) {
+// applyPatchBody returns the apply patch to send to the backend, see
+// forwardApply, and whether it pinned the resourceVersion of live.
+func applyPatchBody(groupResource schema.GroupResource, name string, data []byte, admitted, live *unstructured.Unstructured, createUID, manager, subresource string) ([]byte, bool, error) {
 	jsonData, err := yaml.YAMLToJSON(data)
 	if err != nil {
-		return nil, apierrors.NewBadRequest(fmt.Sprintf("error decoding apply patch: %v", err))
+		return nil, false, apierrors.NewBadRequest(fmt.Sprintf("error decoding apply patch: %v", err))
 	}
 	decoder := json.NewDecoder(bytes.NewReader(jsonData))
 	decoder.UseNumber()
 	var patch map[string]interface{}
 	if err := decoder.Decode(&patch); err != nil || patch == nil {
-		return nil, apierrors.NewBadRequest(fmt.Sprintf("error decoding apply patch: %v", err))
+		return nil, false, apierrors.NewBadRequest(fmt.Sprintf("error decoding apply patch: %v", err))
 	}
 
 	metadata := map[string]interface{}{}
 	if m, found := patch["metadata"]; found && m != nil {
 		var ok bool
 		if metadata, ok = m.(map[string]interface{}); !ok {
-			return nil, apierrors.NewBadRequest(fmt.Sprintf("apply patch metadata is a %T, not an object", m))
+			return nil, false, apierrors.NewBadRequest(fmt.Sprintf("apply patch metadata is a %T, not an object", m))
 		}
 	}
 
 	changed := false
+	pinned := false
 
 	if createUID != "" {
 		metadata["uid"] = createUID
@@ -141,9 +189,15 @@ func applyPatchBody(data []byte, admitted, live *unstructured.Unstructured, crea
 	}
 
 	if live != nil && live.GetResourceVersion() != "" {
-		if rv, _ := metadata["resourceVersion"].(string); rv == "" {
+		switch rv, _ := metadata["resourceVersion"].(string); {
+		case rv == "":
 			metadata["resourceVersion"] = live.GetResourceVersion()
 			changed = true
+			pinned = true
+		case rv != live.GetResourceVersion():
+			// The virtual workspace admitted live, not the object at the
+			// client's resourceVersion: do not forward.
+			return nil, false, apierrors.NewConflict(groupResource, name, errors.New(optimisticLockErrorMsg))
 		}
 	}
 
@@ -166,14 +220,18 @@ func applyPatchBody(data []byte, admitted, live *unstructured.Unstructured, crea
 	}
 
 	if !changed {
-		return data, nil
+		return data, pinned, nil
 	}
 	if patchLabels != nil {
 		metadata["labels"] = patchLabels
 	}
 	patch["metadata"] = metadata
-	return json.Marshal(patch)
+	body, err := json.Marshal(patch)
+	return body, pinned, err
 }
+
+// optimisticLockErrorMsg is the message of the registry's resourceVersion Conflict.
+const optimisticLockErrorMsg = "the object has been modified; please apply your changes to the latest version and try again"
 
 // labelOwnedByOthers returns whether a managedFields entry of obj other than the
 // Apply entry of manager on subresource owns the label key.
