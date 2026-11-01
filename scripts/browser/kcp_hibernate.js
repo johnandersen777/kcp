@@ -475,6 +475,7 @@ export function startHibernation({
       lastAt = now();
       want = false;
       soon = false;
+      hideAt = -Infinity; // one capture per hide
       log("info", `snapshot saved to ${store.kind}: ${(meta.bytes / 1048576).toFixed(0)} MiB memory, ` +
         `${(meta.stored / 1048576).toFixed(0)} MiB stored${gzip ? " (gzip)" : ""}, capture ${meta.stats.captureMs}ms, ` +
         `copy ${meta.stats.copyMs ?? 0}ms, write ${meta.stats.writeMs}ms, total ${ms(t0)}ms`);
