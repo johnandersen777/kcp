@@ -116,8 +116,27 @@ function notOwner(message) {
  * seqs and, when owner is not undefined (the fence is on), the owner token
  * the saved state had when this load started.
  */
-export function snapshotRejection(meta, { key, seqs, owner }) {
-  if (meta?.extra?.key !== key) return "the module, wasm_exec.js or the boot configuration changed";
+// keyChanges names what differs between two snapshotKey values (module,
+// wasm_exec.js, boot configuration) and, given both loads' per-field config
+// hashes (confHashes), which configuration fields.
+export function keyChanges(oldKey, newKey, oldConf, newConf) {
+  const [oldFormat, oldWasm, oldExec, oldConfHash] = String(oldKey ?? "").split("-");
+  const [newFormat, newWasm, newExec, newConfHash] = String(newKey ?? "").split("-");
+  const parts = [];
+  if (oldFormat !== newFormat) parts.push("snapshot format");
+  if (oldWasm !== newWasm) parts.push("module");
+  if (oldExec !== newExec) parts.push("wasm_exec.js");
+  if (oldConfHash !== newConfHash) {
+    const fields = oldConf && newConf
+      ? [...new Set([...Object.keys(oldConf), ...Object.keys(newConf)])].filter((k) => oldConf[k] !== newConf[k]).sort()
+      : [];
+    parts.push(fields.length ? `boot configuration (${fields.join(", ")})` : "boot configuration");
+  }
+  return parts.length ? parts.join(", ") : "the key";
+}
+
+export function snapshotRejection(meta, { key, seqs, owner, confHashes }) {
+  if (meta?.extra?.key !== key) return `changed since the capture: ${keyChanges(meta?.extra?.key, key, meta?.extra?.confHashes, confHashes)}`;
   if (!sameSeqs(meta.extra?.seqs, seqs)) {
     return `persisted state is newer (snapshot ${JSON.stringify(meta.extra?.seqs)}, state ${JSON.stringify(seqs)})`;
   }
@@ -366,20 +385,25 @@ const sameSeqs = (a, b) => (a?.kcp ?? 0) === (b?.kcp ?? 0) && (a?.socialweb ?? 0
  *
  * before(meta) runs right before the instance is rebuilt (fs state, JS state).
  */
-export async function tryRestore({ go, module, key, seqs, owner = undefined, store = pickStore(), log, before }) {
+export async function tryRestore({ go, module, key, seqs, owner = undefined, confHashes, store = pickStore(), log, before, outcome = () => {} }) {
   const t0 = performance.now();
   let meta;
   try {
     meta = await store.readMeta();
-    if (!meta) return null;
-    const why = snapshotRejection(meta, { key, seqs, owner });
+    if (!meta) {
+      outcome(`not restored: no snapshot stored (${store.kind})`);
+      return null;
+    }
+    const why = snapshotRejection(meta, { key, seqs, owner, confHashes });
     if (why) {
       log("info", `snapshot discarded: ${why}`);
+      outcome(`not restored: discarded, ${why}`);
       await store.discard();
       return null;
     }
   } catch (err) {
     log("warn", `snapshot unreadable, cold boot: ${err?.message ?? err}`);
+    outcome(`not restored: unreadable, ${err?.message ?? err}`);
     await store.discard().catch(() => {});
     return null;
   }

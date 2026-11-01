@@ -5,7 +5,7 @@
 // persists from the same stored base, so seqs alone cannot tell a stale
 // holder's capture from the owner's: both outcomes are tested here.
 
-import { readOwner, restampOwner, snapshotKey, snapshotRejection, startHibernation, tryRestore } from "./kcp_hibernate.js";
+import { keyChanges, readOwner, restampOwner, snapshotKey, snapshotRejection, startHibernation, tryRestore } from "./kcp_hibernate.js";
 import { createIndexedDBBackend } from "./state_store.js";
 import { fakeIndexedDB, fakeKeyRange } from "./fake_indexeddb_for_tests.js";
 
@@ -355,10 +355,10 @@ Deno.test("the first load of a new build leaves a snapshot the next reload can u
   // forceApply (set on the first load of a new build) is not part of the key,
   // so its snapshot matches the next, ordinary, load of the same build.
   const worker = await Deno.readTextFile(new URL("./kcp_worker.js", import.meta.url));
-  if (!/JSON\.stringify\(\{ \.\.\.init\.socialweb, restore: undefined, forceApply: undefined, noopLog: init\.noopLog \|\| undefined \}\)/.test(worker)) {
+  if (!/const snapshotConf = \{ \.\.\.init\.socialweb, restore: undefined, forceApply: undefined, noopLog: init\.noopLog \|\| undefined \};[\s\S]{0,200}JSON\.stringify\(snapshotConf\)/.test(worker)) {
     throw new Error("snapshot key must leave out restore and forceApply");
   }
-  if (!/async function restoreSnapshot\(\) \{[\s\S]{0,200}if \(init\.socialweb\?\.forceApply\) \{[\s\S]{0,200}return null;/.test(worker)) {
+  if (!/async function restoreSnapshot\(\) \{[\s\S]{0,400}if \(init\.socialweb\?\.forceApply\) \{[\s\S]{0,300}return null;/.test(worker)) {
     throw new Error("a forceApply load must cold boot, not restore");
   }
   const forced = await snapshotKey("w", "data:,exec", JSON.stringify({ origin: "o", forceApply: undefined }));
@@ -378,4 +378,40 @@ Deno.test("restampOwner stamps only the snapshot this load restored", async () =
   assertEquals(await restampOwner(store, "tab-b", restored), false, "another snapshot");
   stored = structuredClone(restored);
   assertEquals(await restampOwner(store, "tab-b", restored), true, "the restored one");
+});
+
+Deno.test("keyChanges names the key parts and config fields that changed", () => {
+  const conf = { origin: "a1", commsMode: "b1", did: "c1" };
+  assertEquals(keyChanges("f2-w1-e1-c1", "f2-w2-e1-c1"), "module");
+  assertEquals(keyChanges("f2-w1-e1-c1", "f2-w1-e2-c1"), "wasm_exec.js");
+  assertEquals(keyChanges("f2-w1-e1-c1", "f2-w1-e1-c2"), "boot configuration", "no field hashes in an old capture");
+  assertEquals(
+    keyChanges("f2-w1-e1-c1", "f2-w1-e1-c2", conf, { ...conf, commsMode: "b2", handle: "h" }),
+    "boot configuration (commsMode, handle)",
+  );
+  assertEquals(keyChanges("f1-w1-e1-c1", "f2-w2-e1-c1"), "snapshot format, module");
+});
+
+Deno.test("snapshotRejection names what changed since the capture", () => {
+  const m = { extra: { key: "f2-w1-e1-c1", seqs: { ...SEQS }, confHashes: { did: "x" } } };
+  assertEquals(
+    snapshotRejection(m, { key: "f2-w1-e1-c2", seqs: SEQS, confHashes: { did: "y" } }),
+    "changed since the capture: boot configuration (did)",
+  );
+});
+
+Deno.test("tryRestore reports every outcome", async () => {
+  const outcomes = [];
+  const outcome = (o) => outcomes.push(o);
+  const none = { kind: "opfs", readMeta: async () => null, discard: async () => {} };
+  assertEquals(await tryRestore({ go: {}, module: null, key: KEY, seqs: SEQS, store: none, log: () => {}, before: () => {}, outcome }), null);
+  const stale = { kind: "opfs", readMeta: async () => meta("tab-a"), discard: async () => {} };
+  await tryRestore({ go: {}, module: null, key: KEY, seqs: SEQS, owner: "tab-b", store: stale, log: () => {}, before: () => {}, outcome });
+  const broken = { kind: "opfs", readMeta: async () => { throw new Error("bad meta"); }, discard: async () => {} };
+  await tryRestore({ go: {}, module: null, key: KEY, seqs: SEQS, store: broken, log: () => {}, before: () => {}, outcome });
+  assertEquals(outcomes, [
+    "not restored: no snapshot stored (opfs)",
+    "not restored: discarded, written by a tab that no longer owned the saved state",
+    "not restored: unreadable, bad meta",
+  ]);
 });
