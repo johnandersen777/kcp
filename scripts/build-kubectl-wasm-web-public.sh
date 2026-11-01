@@ -89,6 +89,17 @@ modules=(
   wasm_exec_cli.js
 )
 
+# Every relative "./x.js" a shipped file references (import, import(), new
+# URL) must ship too: a missing one hangs the page at "waiting for kcp"
+# (policy_sandbox.js, 2e87b895d).
+missing=$(cd "${repo_root}/scripts/browser" &&
+  { grep -ohE "[\"']\./[A-Za-z0-9_.-]+\.js[\"']" "${assets[@]}" || true; } | tr -d "\"'" | sed 's|^\./||' | sort -u |
+  while read -r file; do [[ " ${assets[*]} " == *" ${file} "* ]] || echo "${file}"; done)
+if [[ -n "${missing}" ]]; then
+  echo "shipped page files import files missing from assets in $0:" ${missing} >&2
+  exit 1
+fi
+
 for file in "${modules[@]}"; do
   if [[ ! -f "${artifacts}/${file}" ]]; then
     echo "missing ${artifacts}/${file}" >&2
