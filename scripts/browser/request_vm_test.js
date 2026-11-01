@@ -207,3 +207,12 @@ Deno.test("fix C: the last identity check runs before the key, tokens and vault 
   const last = body.slice(body.indexOf("if (!identityReadyFor(did, gen)) {"));
   assert(/deleteSSHKey\(name\)[\s\S]{0,200}removeItem\(computePrefs\.transport\(name\)\)[\s\S]{0,100}removeItem\(computePrefs\.token\(name\)\)/.test(last), "a sign out in the last moments cleans up");
 });
+
+Deno.test("a tab whose kcp was taken over disables Request VM at once (no feed update needed)", async () => {
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  const fn = app.slice(app.indexOf("async function yieldKcp"), app.indexOf("async function acquireKcpLock"));
+  assert(/kcpGate\.fail\(new Error\(TAKEN_OVER_MESSAGE\)\);[\s\S]{0,120}refreshComputeRequest\(\);/.test(fn), "yieldKcp refreshes the button after failing the gate");
+  // and the rule then disables it
+  const rule = app.slice(app.indexOf("function computeRequestDisabled"), app.indexOf("function computeRequestDisabled") + 500);
+  assert(/kcpGate\.state === "failed"/.test(rule), "a failed gate disables it");
+});

@@ -872,6 +872,8 @@ async function yieldKcp(why) {
   kcpWorker = null;
   kcpWorkerBooting = null;
   kcpGate.fail(new Error(TAKEN_OVER_MESSAGE));
+  // An idle tab gets no feed update after this: disable Request VM now.
+  refreshComputeRequest();
   setStatus("taken over by another tab", "disconnected");
   banners.show("lock", {
     text: TAKEN_OVER_MESSAGE,
