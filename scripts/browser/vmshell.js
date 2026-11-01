@@ -720,6 +720,28 @@ export function releaseNotes(contract, contractEvents = [], now = Date.now()) {
     ...notes.map((note) => `${note} (earlier attempt)`)];
 }
 
+/**
+ * The row note for the requester's atirc token mint (socialweb r130: the
+ * agent/R2 token is minted, with a lease, only after the verified receipt;
+ * condition AtircTokenMinted, fed as contract.atircToken {status, reason,
+ * message}). "" for a contract without the agent or R2.
+ */
+export function agentTokenNote(contract) {
+  if (!contract?.agent && !(contract?.guestTools?.length > 0)) return "";
+  const token = contract.atircToken;
+  if (!token) return FINISHED.has(contract.phase ?? "") ? "" : "agent token: waiting for receipt";
+  if (token.status === "True") {
+    return {
+      Leased: "agent token: leased",
+      Unleased: "agent token: minted without a lease (the atirc server has no leases)",
+      Present: "agent token: in the bundle",
+    }[token.reason] ?? `agent token: minted (${token.reason || "no reason"})`;
+  }
+  const why = token.message || "no message";
+  if (token.reason === "GaveUp") return `agent token: mint GAVE UP: ${why}`;
+  return `agent token: mint failed, retrying: ${why}`;
+}
+
 // ", ~N min left" for the requester's remaining wait, "" without a time.
 function minutesLeft(requestedAt, now) {
   const at = Date.parse(requestedAt ?? "");

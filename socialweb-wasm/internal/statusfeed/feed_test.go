@@ -181,3 +181,27 @@ func TestGuestParts(t *testing.T) {
 		t.Error("no status: nothing set")
 	}
 }
+
+// AtircTokenMinted (socialweb r130) reaches the page as atircToken.
+func TestContractAtircToken(t *testing.T) {
+	withCond := func(status, reason, message string) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]any{
+			"metadata": map[string]any{"name": "c"},
+			"status": map[string]any{"conditions": []any{
+				map[string]any{"type": "Ready", "status": "True"},
+				map[string]any{"type": "AtircTokenMinted", "status": status, "reason": reason, "message": message},
+			}},
+		}}
+	}
+	if c := contract(&unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "c"}}}); c.AtircToken != nil {
+		t.Fatalf("no condition: atircToken = %+v, want nil (waiting for receipt)", c.AtircToken)
+	}
+	got := contract(withCond("True", "Leased", "the atirc agent token is in the bundle (Leased, attempt 1)")).AtircToken
+	if got == nil || got.Status != "True" || got.Reason != "Leased" {
+		t.Fatalf("leased: %+v", got)
+	}
+	got = contract(withCond("False", "MintFailed", "attempt 2 of 12: lease refused")).AtircToken
+	if got == nil || got.Status != "False" || got.Reason != "MintFailed" || got.Message != "attempt 2 of 12: lease refused" {
+		t.Fatalf("mint failed: %+v", got)
+	}
+}

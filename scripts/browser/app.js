@@ -3132,6 +3132,7 @@ function computeRow(fed) {
     contract.chosenDid ? `bidder ${contract.chosenDid}` : "",
     contract.association ? `Associated ${contract.association}` : "",
     contract.associationMessage ? `association: ${contract.associationMessage}` : "",
+    vmshell.agentTokenNote(contract),
     ...vmshell.releaseNotes(contract, lastFeedState?.contractEvents ?? []),
     contract.guestRequester ? `R2: ${contract.guestRequester.did} ${contract.guestRequester.state ?? "Pending"}` +
       `${contract.guestRequester.message ? ` (${contract.guestRequester.message})` : ""}` : "",

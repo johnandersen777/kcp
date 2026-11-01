@@ -81,6 +81,11 @@ type Contract struct {
 	// R2Release is status.contract.r2Release: the A8 cascade's guest answer
 	// (phase Requested|Released|Failed|TimedOut; ok is omitted when false).
 	R2Release *R2Release `json:"r2Release,omitempty"`
+	// AtircToken is the requester's AtircTokenMinted condition (socialweb
+	// r130): absent until the first mint after the verified receipt, True
+	// with reason Leased|Unleased|Present, False with MintFailed (retrying)
+	// or GaveUp and the error in the message.
+	AtircToken *Condition `json:"atircToken,omitempty"`
 
 	SecretsFetchedAt string `json:"secretsFetchedAt,omitempty"`
 	Release          bool   `json:"release,omitempty"`
@@ -113,6 +118,13 @@ type Contract struct {
 
 // R2Release is the guest requester's answer to guest.r2Release; the phase
 // decides (OK is nil unless true).
+// Condition is one status condition's status, reason and message.
+type Condition struct {
+	Status  string `json:"status"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
 type R2Release struct {
 	Phase       string `json:"phase,omitempty"`
 	OK          *bool  `json:"ok,omitempty"`
@@ -369,6 +381,13 @@ func contract(u *unstructured.Unstructured) Contract {
 		if cond["type"] == "ReleaseFailed" && cond["status"] == "True" {
 			c.ReleaseFailed = true
 			c.ReleaseFailedReason, _ = cond["reason"].(string)
+		}
+		if cond["type"] == "AtircTokenMinted" {
+			t := &Condition{}
+			t.Status, _ = cond["status"].(string)
+			t.Reason, _ = cond["reason"].(string)
+			t.Message, _ = cond["message"].(string)
+			c.AtircToken = t
 		}
 	}
 	_, c.Agent, _ = unstructured.NestedMap(u.Object, "spec", "agent")
