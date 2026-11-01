@@ -762,10 +762,40 @@ export function shellLink(contract, token) {
 // Every tab of an origin shares one kcp state, so infras of tabs that are gone
 // stay in it until their ttl. On boot the page collects those of its own
 // origin: an infra none of whose entries points at a live ComputeContract is
-// deleted; one with a live contract keeps running and gets its record binding
-// repaired as sessionInfra repairs the tab's own. An infra already ending
-// (deletionTimestamp or status.endedAt: the infra controller expires it) is
-// left to the controller.
+// deleted once it is history older than INFRA_HISTORY_MS (a new browser
+// session is a new tab id, and deleting the infra cascades to its Released
+// contracts, whose rows carry the "tokens: revoked" proof); one with a live
+// contract keeps running and gets its record binding repaired as sessionInfra
+// repairs the tab's own. An infra already ending (deletionTimestamp or
+// status.endedAt: the infra controller expires it) is left to the controller.
+
+/** How long another tab's finished infra stays as history rows (linux-kcp, rc130). */
+export const INFRA_HISTORY_MS = 24 * 3600 * 1000;
+
+/** The newest of the RFC 3339 times given, in ms (0 when none parses). */
+export function newestTime(...times) {
+  let newest = 0;
+  for (const t of times) {
+    const ms = typeof t === "string" && t ? Date.parse(t) : NaN;
+    if (Number.isFinite(ms) && ms > newest) newest = ms;
+  }
+  return newest;
+}
+
+/**
+ * When a ComputeContract last changed toward its end: the newest condition
+ * transition, release request or answer, or guest termination. A terminal
+ * contract has no separate end stamp; these are set on the way there.
+ */
+export function contractFinishedAt(obj) {
+  const status = obj?.status ?? {};
+  return newestTime(
+    ...(status.conditions ?? []).map((c) => c?.lastTransitionTime),
+    obj?.spec?.releaseRequestedAt,
+    status.release?.requestedAt,
+    status.contract?.termination?.observedAt,
+  );
+}
 
 /** The feed's view (statusfeed contract()) of a ComputeContract object, for the liveness rule. */
 export function feedContract(obj) {
@@ -786,6 +816,7 @@ export function feedContract(obj) {
     receiptOk: guest.receipt !== undefined && guest.receiptOk === true,
     terminated: guest.termination !== undefined,
     releaseOk: guest.release?.ok === true,
+    finishedAt: contractFinishedAt(obj),
   };
 }
 
@@ -815,7 +846,7 @@ export function originInfraTab(origin, name) {
  * origins' infras and the tab's own are not listed. contracts are
  * feedContract views; did is the signed-in identity (rebind target).
  */
-export function planInfraGC({ infras, contracts, origin, tabId, did }) {
+export function planInfraGC({ infras, contracts, origin, tabId, did, now = Date.now(), historyMs = INFRA_HISTORY_MS }) {
   const own = originInfraName(origin, tabId);
   const byName = new Map((contracts ?? []).map((c) => [c?.name, c]));
   const plan = [];
@@ -830,7 +861,23 @@ export function planInfraGC({ infras, contracts, origin, tabId, did }) {
       .map((entry) => infraContractName(name, entry?.name))
       .filter((cc) => contractLive(byName.get(cc)));
     if (live.length === 0) {
-      plan.push({ name, action: "delete", reason: "no live ComputeContract", live });
+      // The newest end among its contracts (and entries' release stamps),
+      // else the infra's creation: history younger than historyMs stays.
+      const entries = infra.spec?.contracts ?? [];
+      const ended = newestTime(
+        infra.status?.endedAt,
+        ...entries.map((entry) => entry?.releaseRequestedAt),
+        ...entries.map((entry) => {
+          const c = byName.get(infraContractName(name, entry?.name));
+          return c?.finishedAt ? new Date(c.finishedAt).toISOString() : "";
+        }),
+      ) || newestTime(infra.metadata?.creationTimestamp);
+      const hours = ended ? ((now - ended) / 3600_000).toFixed(1) : "unknown";
+      if (!ended || now - ended <= historyMs) {
+        plan.push({ name, action: "keep", reason: `history: finished ${hours} h ago`, live });
+      } else {
+        plan.push({ name, action: "delete", reason: `no live ComputeContract; finished ${hours} h ago`, live });
+      }
       continue;
     }
     const binding = infra.spec?.record;
