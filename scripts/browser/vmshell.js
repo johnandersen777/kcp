@@ -501,10 +501,22 @@ export function releaseAnswered(contract) {
   return !requested || (contract?.releaseAnsweredAt ?? "") === requested;
 }
 
-/** A failed release with a newer, unanswered Release: the requester restarts it, so it is pending, not Failed. */
+/**
+ * The requester's guestMayRun from the feed: an ok receipt, no termination,
+ * no release the bidder acknowledged (receiptOk, terminated, releaseOk).
+ */
+export function guestMayRun(contract) {
+  return Boolean(contract?.receiptOk) && !contract?.terminated && !contract?.releaseOk;
+}
+
+/**
+ * A Failed contract with a newer, unanswered Release that the requester
+ * restarts (r128 388ccee6, releaseRequestedAgain): its ReleaseFailed is
+ * True, or its guest may still run. Pending, not Failed.
+ */
 export function releasePending(contract) {
-  return Boolean(contract?.release) && contract?.phase === "Failed" && Boolean(contract?.releaseFailed) &&
-    !releaseAnswered(contract);
+  return Boolean(contract?.release) && contract?.phase === "Failed" &&
+    (Boolean(contract?.releaseFailed) || guestMayRun(contract)) && !releaseAnswered(contract);
 }
 
 /**
@@ -526,14 +538,15 @@ export function releaseTimedOut(contract) {
 }
 
 /**
- * The Release button: an active contract, or a plain Failed one whose guest
- * may still run (the feed's guestMayRun: ok receipt, no termination, no ok
- * release; no ReleaseFailed needed) with no request pending and no Release
- * again offered instead.
+ * The Release button: an active contract, or a Failed one the requester
+ * re-releases for a newer stamp (r128 388ccee6): phase Failed, a valid
+ * receipt (receiptOk), not terminated and not released/acked (releaseOk),
+ * with no request pending (the Release sends the newer stamp) and no
+ * Release again offered instead. ReleaseFailed is not needed.
  */
 export function releaseOffered(contract) {
   if (isActive(contract)) return true;
-  return contract?.phase === "Failed" && Boolean(contract?.guestMayRun) && releaseAnswered(contract) && !canReleaseAgain(contract);
+  return contract?.phase === "Failed" && guestMayRun(contract) && releaseAnswered(contract) && !canReleaseAgain(contract);
 }
 
 /** The row's phase: a pending re-release shows as Releasing, not the earlier Failed. */
