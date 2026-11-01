@@ -1084,6 +1084,34 @@ func (s *Store) encodedLocked(key string, obj runtime.Object) (json.RawMessage, 
 // kept keys when full, else the kept keys written since the previous call.
 // skip drops keys that are not persisted. changed reports whether the part
 // carries any item or delete.
+// snapshotWhere is a snapshot of the keys keep accepts, encoded as persisted
+// (SnapshotResources). It does not touch the dirty set.
+func (s *Store) snapshotWhere(keep func(string) bool) (*Snapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	s.encMu.Lock()
+	defer s.encMu.Unlock()
+
+	part := &Snapshot{ResourceVersion: s.rv, Items: map[string]json.RawMessage{}, Clusters: map[string]string{}, Shards: map[string]string{}}
+	for key, obj := range s.objects {
+		if !keep(key) {
+			continue
+		}
+		raw, err := s.encodedLocked(key, obj)
+		if err != nil {
+			return nil, err
+		}
+		part.Items[key] = raw
+		if m := s.objectMeta[key]; !m.cluster.Empty() {
+			part.Clusters[key] = m.cluster.String()
+		}
+		if m := s.objectMeta[key]; !m.shard.Empty() {
+			part.Shards[key] = m.shard.String()
+		}
+	}
+	return part, nil
+}
+
 func (s *Store) persistPart(full bool, skip func(string) bool) (part *Snapshot, changed bool, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

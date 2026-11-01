@@ -260,6 +260,36 @@ func CheckSnapshot(data []byte) error {
 	return nil
 }
 
+// SnapshotResources is SnapshotAll limited to the keys that contain one of
+// fragments (e.g. "/registry/socialweb.computer/ephemeralinfras/"): a small
+// envelope of chosen objects for MergeAll after a restart, when the whole
+// store is too big to persist (the iOS app). Keys RestoreAll would drop are
+// left out, as in SnapshotAll.
+func SnapshotResources(fragments []string) ([]byte, error) {
+	keep := func(key string) bool {
+		if skipSnapshotKey(key) {
+			return false
+		}
+		for _, fragment := range fragments {
+			if fragment != "" && strings.Contains(key, fragment) {
+				return true
+			}
+		}
+		return false
+	}
+	out := message{Version: allVersion, Stores: map[string]*Snapshot{}}
+	for name, store := range SharedStores() {
+		part, err := store.snapshotWhere(keep)
+		if err != nil {
+			return nil, fmt.Errorf("snapshotting store %q: %w", name, err)
+		}
+		if len(part.Items) > 0 {
+			out.Stores[name] = part
+		}
+	}
+	return json.Marshal(out)
+}
+
 // RestoreAll restores one SnapshotAll envelope. Decoders must already be
 // registered, i.e. the apiserver has installed its APIs. An envelope it
 // cannot read is an ErrUnreadableSnapshot error, never a fresh start: a
