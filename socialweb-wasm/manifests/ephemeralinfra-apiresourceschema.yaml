@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-10.ephemeralinfras.socialweb.computer
+  name: v1alpha1-11.ephemeralinfras.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -47,6 +47,8 @@ spec:
                         - Requested
                         - Released
                       default: Staged
+                    releaseRequestedAt:
+                      type: string
                     vmName:
                       type: string
                     bidderDids:
