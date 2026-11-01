@@ -477,13 +477,13 @@ Deno.test("page wiring: hidden, pagehide and spec-writing actions flush the kcp 
   const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
   assert(/addEventListener\("pagehide", \(\) => void flushKcpSoon\("pagehide"\)\)/.test(app), "pagehide flushes kcp");
   assert(/visibilityState !== "hidden"\) return;\s*void persister\.flushAll\(\);\s*void flushKcpSoon\("hidden"\);/.test(app), "hidden flushes kcp");
-  const fn = app.slice(app.indexOf("function flushKcpSoon"), app.indexOf("function flushKcpSoon") + 700);
-  assert(/if \(!kcpWorker \|\| !kcpStateOwned\(\) \|\| kcpPersistOff\) return Promise\.resolve\(\);/.test(fn), "only a running, owning, saving kcp");
+  const fn = app.slice(app.indexOf("function flushKcpSoon"), app.indexOf("function flushKcpSoon") + 1200);
+  assert(/if \(!kcpStateOwned\(\) \|\| kcpPersistOff\) return Promise\.resolve\(\);\s*if \(!kcpWorker\) \{[\s\S]{0,200}kcpFlushSkipped = true;/.test(fn), "only an owning, saving kcp; a booting one flushes later");
   assert(/flushKcpWorker\(kcpWorker, 3000\)/.test(fn) && /await kcpPersistQueue/.test(fn), "posts persist-flush and waits for the writes");
   assert(/kcpFlushAgain = true/.test(fn), "a flush asked during one runs again after it");
   assert(/if \(channel === "kcp"\) kcpPersistOff = true;/.test(app), "fail-closed kcp has nothing to flush");
-  const flush = app.slice(app.indexOf("function flushKcpWorker"), app.indexOf("function flushKcpWorker") + 400);
-  assert(/worker\.postMessage\(\{ type: "persist-flush" \}\)/.test(flush), "the flush message the worker answers");
+  const flush = app.slice(app.indexOf("function flushKcpWorker"), app.indexOf("function flushKcpWorker") + 700);
+  assert(/worker\.postMessage\(\{ type: "persist-flush", id \}\)/.test(flush), "the flush message the worker answers, by id");
   const worker = await Deno.readTextFile(new URL("./kcp_worker.js", import.meta.url));
   assert(/type === "persist-flush"[\s\S]{0,200}callGo\("kcpPersistFlush"/.test(worker), "worker calls Go's kcpPersistFlush");
   // Each spec-writing action flushes right after its write succeeded.

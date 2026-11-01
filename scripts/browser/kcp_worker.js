@@ -318,9 +318,10 @@ self.onmessage = (event) => {
   // Before the page hands kcp to another tab: persist the writes the
   // coalescer still holds (they reach the page as "persist" first).
   if (type === "persist-flush") {
+    const flushId = event.data?.id;
     callGo("kcpPersistFlush", {}, 8000)
-      .then((out) => self.postMessage({ type: "persist-flushed", flushed: Boolean(out?.flushed) }))
-      .catch((err) => self.postMessage({ type: "persist-flushed", flushed: false, error: String(err?.message ?? err) }));
+      .then((out) => self.postMessage({ type: "persist-flushed", id: flushId, flushed: Boolean(out?.flushed) }))
+      .catch((err) => self.postMessage({ type: "persist-flushed", id: flushId, flushed: false, error: String(err?.message ?? err) }));
     return;
   }
   if (type === "state-subscribe") {

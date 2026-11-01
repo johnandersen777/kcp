@@ -44,6 +44,7 @@ import {
 } from "./state_store.js";
 import { createBanners } from "./page_banner.js";
 import { createReadyGate } from "./ready_gate.js";
+import { createRequestRunner } from "./request_vm.js";
 import { BUSY_MESSAGE, createKcpLock, FORCE_WARNING, TAKEN_OVER_MESSAGE } from "./kcp_lock.js";
 import * as vmshell from "./vmshell.js";
 import * as webrtcGuest from "./webrtc_guest.js";
@@ -516,10 +517,10 @@ let kcpWorker = null;
 // the status feed says MarketIdentity Ready before that, so kcp calls wait
 // here rather than fail and switch features off (rc130 boot race).
 const kcpGate = createReadyGate();
-async function kcpWorkerReady() {
+async function kcpWorkerReady(timeoutMs) {
   if (kcpWorker) return kcpWorker;
   if (kcpGate.state === "open") throw new Error("kcp worker is not running");
-  return await kcpGate.wait();
+  return await kcpGate.wait(timeoutMs);
 }
 const pendingBridges = new Map();
 const pendingPageRequests = new Map();
@@ -639,7 +640,9 @@ function attachKcp(worker) {
     } else if (data.type === "restore-unreadable") {
       void restoreUnreadable(data.channel, data.message);
     } else if (data.type === "persist-flushed") {
-      for (const resolve of persistFlushWaiters.splice(0)) resolve(Boolean(data.flushed));
+      // Only the flush this answer belongs to (a late answer to a timed-out
+      // flush must not resolve a take over's flush before its writes land).
+      persistFlushWaiters.get(data.id)?.(Boolean(data.flushed));
     } else if (data.type === "socialweb-started") {
       recordKcpBuild();
     } else if (data.type === "log") {
@@ -769,7 +772,8 @@ async function restoreUnreadable(channel, message) {
 // that does not answer. After that this tab must never write the shared
 // state again: kcpStateOwned() gates every kcp and socialweb persist.
 let kcpWorkerBooting = null;
-const persistFlushWaiters = [];
+const persistFlushWaiters = new Map();
+let nextPersistFlushId = 1;
 const kcpLock = createKcpLock({ log: (level, message) => addLog(level, message), onYield: yieldKcp });
 
 // "yielding": a take over is flushing; those last writes must land.
@@ -830,12 +834,17 @@ async function resetState({ all = false } = {}) {
 // that message is queued (it arrives before the answer), or false.
 function flushKcpWorker(worker, timeoutMs = 8000) {
   return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(false), timeoutMs);
-    persistFlushWaiters.push((ok) => {
+    const id = nextPersistFlushId++;
+    const timer = setTimeout(() => {
+      persistFlushWaiters.delete(id);
+      resolve(false);
+    }, timeoutMs);
+    persistFlushWaiters.set(id, (ok) => {
       clearTimeout(timer);
+      persistFlushWaiters.delete(id);
       resolve(ok);
     });
-    worker.postMessage({ type: "persist-flush" });
+    worker.postMessage({ type: "persist-flush", id });
   });
 }
 
@@ -1051,6 +1060,10 @@ async function spawnKcp(useSnapshot = true) {
   logBootKind(ready, spawnStarted);
   kcpWorker = worker;
   kcpGate.open(worker);
+  if (kcpFlushSkipped) {
+    kcpFlushSkipped = false;
+    void flushKcpSoon("changes seen while kcp started");
+  }
   // Whatever the feed's identity Ready started before kcp was ready (feature
   // probes, the infra GC) waited for this; run the handler again in case one
   // gave up meanwhile.
@@ -1131,8 +1144,15 @@ let kcpFlushAgain = false;
 // Returns a promise that settles once the flush landed (or at once when
 // there is nothing to flush). An unload does not wait for it: pagehide is
 // best effort, which is why every spec-writing action flushes itself.
+let kcpFlushSkipped = false;
 function flushKcpSoon(why) {
-  if (!kcpWorker || !kcpStateOwned() || kcpPersistOff) return Promise.resolve();
+  if (!kcpStateOwned() || kcpPersistOff) return Promise.resolve();
+  if (!kcpWorker) {
+    // kcp still boots (a phase change from the restored feed): flush once
+    // the gate opens (spawnKcp), or this change would never be flushed.
+    kcpFlushSkipped = true;
+    return Promise.resolve();
+  }
   if (kcpFlushRunning) {
     kcpFlushAgain = true;
     return kcpFlushRunning;
@@ -2620,7 +2640,6 @@ function applyState(state) {
 let socialwebUIReady = false;
 function initSocialwebUI() {
   if (socialwebUIReady) return;
-  socialwebUIReady = true;
   const storedMode = localStorage.getItem(identityPrefs.mode);
   identityModeEl.value = storedMode === "localRepo" ? "oauthBrowser" : (storedMode ?? "oauthBrowser");
   if (storedMode === "localRepo") {
@@ -2633,8 +2652,11 @@ function initSocialwebUI() {
   identityHandleEl.addEventListener("input", renderIdentity);
   identitySignInEl.addEventListener("click", () => identityAction(identityView?.primary.action));
   identitySecondaryEl.addEventListener("click", () => identityAction(identityView?.secondary?.action));
-  renderIdentity();
   initComputeUI();
+  // Only now, with every listener bound, may the buttons enable.
+  socialwebUIReady = true;
+  renderIdentity();
+  refreshComputeRequest();
 }
 
 // --- compute -----------------------------------------------------------------
@@ -2794,9 +2816,10 @@ async function waitInfraRecord(name, did, timeoutMs = 60_000) {
 // object. Existing record bindings are repaired, and the record must be
 // synced before the caller adds its first contract (the first sync pulls an
 // existing record and would otherwise erase it).
-async function sessionInfra(onStep = () => {}) {
+async function sessionInfra(onStep = () => {}, expectDid = "") {
   const did = identityState?.phase === "Ready" ? identityState.did : "";
   if (!did) throw new Error("sign in before requesting a VM");
+  if (expectDid && !identityReadyFor(expectDid)) throw new Error("the signed-in identity changed or is signing out; request again");
   try {
     sessionStorage.removeItem("socialweb.sessionInfra");
   } catch {
@@ -2986,42 +3009,63 @@ async function markFinishedInfraContracts(contracts) {
   }
 }
 
-async function requestVM() {
-  addLog("info", "Request VM clicked");
-  if (!kcpWorker) {
-    // Identity Ready can arrive before kcp is (snapshot restore): queue the
-    // request visibly instead of failing or doing nothing.
-    computeBusy = true;
-    computeRequestEl.disabled = true;
-    setAppStatus(computeStatusEl, "kcp is still starting; the request runs once it is up", "warn");
-    addLog("info", "Request VM waits for kcp to be ready");
+// Request VM's own state: the identity it was clicked for must still be
+// signed in (a Sign out may run while the request waits for kcp).
+function identityReadyFor(did) {
+  return Boolean(did) && identityState?.phase === "Ready" && identityState.did === did && signIn.step !== "signingOut";
+}
+
+// How long a queued click waits for kcp (a slow phone cold boot takes minutes).
+const REQUEST_KCP_WAIT_MS = 10 * 60_000;
+
+// The click's control flow (request_vm.js): busy first, wait for kcp, the
+// same identity afterwards, and the button state recomputed on every way out.
+const runRequest = createRequestRunner({
+  getBusy: () => computeBusy,
+  setBusy: (busy) => {
+    computeBusy = busy;
+  },
+  kcpUp: () => Boolean(kcpWorker),
+  waitKcp: async () => {
     try {
-      await kcpWorkerReady();
+      await kcpWorkerReady(REQUEST_KCP_WAIT_MS);
     } catch (err) {
-      computeBusy = false;
-      addLog("error", `Request VM failed: ${err instanceof Error ? err.message : err}`);
-      setAppStatus(computeStatusEl, String(err.message ?? err), "err");
-      return;
+      throw new Error(kcpGate.state === "waiting"
+        ? `kcp did not finish starting in ${REQUEST_KCP_WAIT_MS / 60_000} min; reload the page and request again`
+        : String(err?.message ?? err));
     }
-    computeBusy = false;
-  }
-  const association = vmshell.associationSubject(computeAssociateEl.value, identityState?.did ?? "");
-  if (association.error) {
-    setAppStatus(computeStatusEl, association.error, "err");
-    return;
-  }
-  if (association.subject && computeGuestToolsEl.checked && await guestToolsServed()) {
-    setAppStatus(computeStatusEl, vmshell.R2_ASSOCIATES_ITSELF, "err");
-    return;
-  }
-  try {
-    computeBusy = true;
-    computeRequestEl.disabled = true;
+  },
+  identityReadyFor,
+  refresh: () => refreshComputeRequest(),
+  status: (text, kind) => setAppStatus(computeStatusEl, text, kind),
+  log: (level, message) => addLog(level, message),
+});
+
+function requestVM() {
+  const did = identityState?.phase === "Ready" ? identityState.did : "";
+  return runRequest({
+    did,
+    prepare: async () => {
+      const association = vmshell.associationSubject(computeAssociateEl.value, did);
+      if (association.error) return { error: association.error };
+      if (association.subject && computeGuestToolsEl.checked && await guestToolsServed()) {
+        return { error: vmshell.R2_ASSOCIATES_ITSELF };
+      }
+      return association;
+    },
+    request: (association) => requestVMFor(did, association),
+  });
+}
+
+// The request itself, for the identity did it was clicked for. True once the
+// contract is in the infra.
+async function requestVMFor(did, association) {
+  {
     const sshKeys = [];
     // The infra and its PDS record take a while (~18 s seen on dev); say so.
     const progress = (step) => setAppStatus(computeStatusEl, `requesting a VM: ${step}…`, "warn");
     progress("preparing this tab's infra");
-    const infraName = (await sessionInfra((step) => progress(step))).metadata.name;
+    const infraName = (await sessionInfra((step) => progress(step), did)).metadata.name;
     const short = vmshell.contractName();
     const name = vmshell.infraContractName(infraName, short);
     const wootty = await woottyServed();
@@ -3049,6 +3093,7 @@ async function requestVM() {
       });
     }
     const { contract, secret } = vmshell.infraContract({ infra: infraName, short, wootty, agent, sshKeys, association: association.subject, guestTools });
+    if (!identityReadyFor(did)) throw new Error("signed out while the request ran; no contract was created");
     progress("creating the contract");
     await setInfraContract(infraName, contract, secret);
     void flushKcpSoon("Request VM");
@@ -3056,12 +3101,9 @@ async function requestVM() {
     addLog("ok", `ComputeContract ${name} requested from discovered bidders with ${shells}`);
     // Show what is in flight; the user can watch it go Held in the terminal.
     runInTerminal("kubectl get computecontracts");
-  } catch (err) {
-    addLog("error", `Request VM failed: ${err instanceof Error ? err.message : err}`);
-    setAppStatus(computeStatusEl, String(err.message ?? err), "err");
-    computeBusy = false;
   }
   // computeBusy clears when the status feed shows the new contract.
+  return true;
 }
 
 // Every Release (button, Release again, d.release, the demo's leftover
@@ -3590,6 +3632,18 @@ function renderPolicyEngine(engine) {
   if (engine) addLog("info", `PolicyEngine ${engine.name} ${engine.phase ?? "Pending"} ready=${Boolean(engine.ready)} fenced=${engine.fenced ?? "unset"}: ${engine.message ?? ""}`);
 }
 
+// The Request VM button's state for a feed state: one VM at a time, only
+// signed in, not while a request runs, and only once its listener is bound.
+function computeRequestDisabled(state) {
+  const active = (state?.contracts ?? [])
+    .map((c) => vmshell.withReleaseSent(c, computeReleaseAsked.get(c?.name)))
+    .filter(vmshell.isActive);
+  return !socialwebUIReady || computeBusy || state?.marketIdentity?.phase !== "Ready" || active.length > 0;
+}
+function refreshComputeRequest() {
+  computeRequestEl.disabled = computeRequestDisabled(lastFeedState);
+}
+
 // The last contracts phase/step fingerprint (vmshell.contractTransitions).
 let lastContractTransitions = null;
 function applyComputeState(state) {
@@ -3609,7 +3663,7 @@ function applyComputeState(state) {
   if (computeBusy && active.length > 0) computeBusy = false;
   computeReleasing = seen.some(vmshell.releaseWorkPending);
   const ready = state.marketIdentity?.phase === "Ready";
-  computeRequestEl.disabled = !socialwebUIReady || computeBusy || !ready || active.length > 0;
+  computeRequestEl.disabled = computeRequestDisabled(state);
   if (ready && computeAgentRowEl.hidden) void agentServed().then((served) => { computeAgentRowEl.hidden = !served; });
   if (ready && computeGuestToolsRowEl.hidden) void guestToolsServed().then((served) => { computeGuestToolsRowEl.hidden = !served; });
   if (ready && r2StartServed === null) {
