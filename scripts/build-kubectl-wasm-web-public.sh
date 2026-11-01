@@ -72,6 +72,7 @@ assets=(
   ssh_worker.js
   ssh_cmd.js
   wasm_snapshot.js
+  fetch_retry.js
   kcp_hibernate.js
   debug_link.js
   kcp_lock.js
