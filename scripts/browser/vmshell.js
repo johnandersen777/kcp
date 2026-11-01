@@ -148,10 +148,14 @@ export function recordSyncError(infra) {
   return "";
 }
 
+// The record the controller bound: the infra's name, or (socialweb rc140) a
+// successor rkey `<name>-<8 hex of the object UID>` when that name already
+// holds an ended record, which is kept rather than deleted.
 export function infraRecordURI(infra, did, name) {
   if (!did || !name) return "";
-  const uri = `at://${did}/computer.socialweb.ephemeralInfra/${name}`;
-  return infra?.status?.record?.uri === uri ? uri : "";
+  const base = `at://${did}/computer.socialweb.ephemeralInfra/${name}`;
+  const uri = String(infra?.status?.record?.uri ?? "");
+  return uri === base || (uri.startsWith(`${base}-`) && /^[0-9a-f]{8}$/.test(uri.slice(base.length + 1))) ? uri : "";
 }
 
 /**

@@ -236,6 +236,13 @@ Deno.test("record conditions drive the sync wait", () => {
   assert(!recordSyncRetrying(withConditions([{ type: "Synced", status: "False", reason: "RecordUnavailable", message: "no repo.read" }])), "a real error is not retrying");
   assert(infraRecordURI({ status: { record: { uri: "at://did:plc:me/computer.socialweb.ephemeralInfra/web-x" } } }, "did:plc:me", "web-x") ===
     "at://did:plc:me/computer.socialweb.ephemeralInfra/web-x", "uri");
+  const at = (uri) => infraRecordURI({ status: { record: { uri } } }, "did:plc:me", "web-x");
+  assert(at("at://did:plc:me/computer.socialweb.ephemeralInfra/web-x-0a1b2c3d") ===
+    "at://did:plc:me/computer.socialweb.ephemeralInfra/web-x-0a1b2c3d", "successor rkey of an ended record");
+  assert(at("at://did:plc:me/computer.socialweb.ephemeralInfra/web-xy") === "", "another tab's name");
+  assert(at("at://did:plc:me/computer.socialweb.ephemeralInfra/web-x-0A1B2C3D") === "", "not lowercase hex");
+  assert(at("at://did:plc:other/computer.socialweb.ephemeralInfra/web-x") === "", "another repo");
+  assert(at("") === "", "not bound yet");
 });
 
 Deno.test("addContract replaces, appends and prunes released entries", () => {
