@@ -2792,6 +2792,7 @@ async function sessionInfra() {
 // apply). Other origins' infras, this tab's own and ending ones are left
 // alone. A failed pass runs again a minute later.
 let infraGCState = "";
+const INFRA_GC_REBIND_MS = 30_000;
 async function collectOtherTabInfras(did) {
   if (infraGCState) return;
   infraGCState = "running";
@@ -2816,6 +2817,24 @@ async function collectOtherTabInfras(did) {
             if (kcpStatus(err) !== 404) throw err;
           });
           addLog("info", `EphemeralInfra ${step.name} of another tab deleted: ${step.reason}`);
+        } else if (step.action === "rebind-delete") {
+          // Its record repo does not resolve: deleting now would orphan the
+          // PDS record. Rebind to this identity's repo, wait for the record,
+          // and delete only then.
+          const settled = await vmshell.rebindThenDelete({
+            rest: kcpREST,
+            api: SOCIALWEB_API,
+            name: step.name,
+            did,
+            serialize: infraQueued,
+            timeoutMs: INFRA_GC_REBIND_MS,
+            pollMs: INFRA_RECORD_POLL_MS,
+          });
+          if (settled) {
+            addLog("info", `EphemeralInfra ${step.name} of another tab deleted after rebinding its record: ${step.reason}`);
+          } else {
+            addLog("info", `EphemeralInfra ${step.name} of another tab kept: record unresolved (rebind did not resolve in ${INFRA_GC_REBIND_MS / 1000} s)`);
+          }
         } else if (step.action === "rebind") {
           const record = vmshell.infraRecordBinding(did);
           await infraQueued(() => vmshell.composeInfra({

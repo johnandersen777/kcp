@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  infraRebindSettled,
+  infraRecordResolvable,
+  rebindThenDelete,
   contractFinishedAt,
   contractLive,
   feedContract,
@@ -167,4 +170,88 @@ Deno.test("planInfraGC keeps 24 h of finished history (rc130)", () => {
   assertEquals(by[n("new001")].action, "keep", "no contract times: the infra's creation (2 h)");
   assertEquals(by[n("stp001")].action, "keep", "the entry's release stamp counts");
   assertEquals(contractFinishedAt({ status: { contract: { termination: { observedAt: hoursAgo(5) } } } }), NOW - 5 * 3600_000);
+});
+
+// --- records that do not resolve (rc130, production root cause) -------------
+
+const unresolved = { type: "RecordUnresolved", status: "True", reason: "RepoUnresolvable", message: "repo not found" };
+const uriOf = (did, infraObj) => `at://${did}/computer.socialweb.ephemeralInfra/${infraObj.metadata.name}`;
+
+Deno.test("infraRecordResolvable: condition, old repo.read error, and the current repo", () => {
+  const ok = infra(ORIGIN, "r00001", []);
+  assertEquals(infraRecordResolvable(ok, ALICE), true);
+  assertEquals(infraRecordResolvable({ ...ok, status: { conditions: [unresolved] } }, ALICE), false, "RecordUnresolved");
+  assertEquals(infraRecordResolvable({ ...ok, status: { conditions: [{ type: "Synced", status: "False", message: "repo.read handle: not found" }] } }, ALICE), false, "old error");
+  assertEquals(infraRecordResolvable(ok, BOB), false, "another repo");
+  assertEquals(infraRecordResolvable({ ...ok, spec: { contracts: [] } }, ALICE), true, "no record binding");
+});
+
+Deno.test("planInfraGC: unresolved records are rebound first (same DID) or kept (other DID)", () => {
+  const old = (tab, extra) => infra(ORIGIN, tab, [], extra);
+  const resolvable = old("res001");
+  const sameDid = old("same01", { spec: { record: { repoRef: { group: "socialweb.computer", kind: "AtprotoRepo", name: "repo-old-name" } } } });
+  sameDid.status = { conditions: [unresolved], record: { uri: uriOf(ALICE, sameDid) } };
+  const otherDid = old("othr01", { spec: { record: infraRecordBinding(BOB) } });
+  otherDid.status = { conditions: [unresolved], record: { uri: uriOf(BOB, otherDid) } };
+  const plan = planInfraGC({ infras: [resolvable, sameDid, otherDid], contracts: [], origin: ORIGIN, tabId: ME, did: ALICE, now: NOW });
+  assertEquals(plan.map((step) => [step.action, step.reason.startsWith("kept") ? step.reason : ""]), [
+    ["delete", ""],
+    ["rebind-delete", ""],
+    ["keep", "kept: record unresolved"],
+  ]);
+});
+
+function fakeInfraAPI(infraObj, settleAfterGets) {
+  const calls = [];
+  let gets = 0;
+  let current = structuredClone(infraObj);
+  const rest = async (method, path, body) => {
+    calls.push(method);
+    if (method === "PATCH") {
+      const spec = (typeof body === "string" ? JSON.parse(body) : body).spec;
+      current = { ...current, metadata: { ...current.metadata, generation: 2, resourceVersion: "2" }, spec };
+      return structuredClone(current);
+    }
+    if (method === "GET") {
+      gets++;
+      if (calls.filter((c) => c === "PATCH").length > 0 && gets > settleAfterGets) {
+        current = { ...current, status: { observedGeneration: 2, record: { uri: uriOf(ALICE, current) }, conditions: [] } };
+      }
+      return structuredClone(current);
+    }
+    if (method === "DELETE") return {};
+    throw new Error(method);
+  };
+  return { rest, calls, current: () => current };
+}
+
+Deno.test("rebindThenDelete: rebinds, waits for the record, then deletes", async () => {
+  const stuck = infra(ORIGIN, "same02", [], { spec: { record: { repoRef: { name: "repo-old-name" } } } });
+  stuck.metadata.generation = 1;
+  stuck.status = { observedGeneration: 1, conditions: [unresolved], record: { uri: uriOf(ALICE, stuck) } };
+  const api = fakeInfraAPI(stuck, 2);
+  let t = 0;
+  const deleted = await rebindThenDelete({ rest: api.rest, api: "/apis/x", name: stuck.metadata.name, did: ALICE, sleep: async () => void (t += 750), now: () => t });
+  assertEquals(deleted, true);
+  assertEquals(api.calls.at(-1), "DELETE");
+  assertEquals(api.current().spec.record.repoRef.name, infraRecordBinding(ALICE).repoRef.name, "rebound to the current repo");
+});
+
+Deno.test("rebindThenDelete: a record that still does not resolve keeps the infra", async () => {
+  const stuck = infra(ORIGIN, "same03", [], { spec: { record: { repoRef: { name: "repo-old-name" } } } });
+  stuck.status = { conditions: [unresolved], record: { uri: uriOf(ALICE, stuck) } };
+  const api = fakeInfraAPI(stuck, Infinity);
+  let t = 0;
+  const deleted = await rebindThenDelete({ rest: api.rest, api: "/apis/x", name: stuck.metadata.name, did: ALICE, timeoutMs: 30_000, sleep: async () => void (t += 750), now: () => t });
+  assertEquals(deleted, false);
+  assertEquals(api.calls.includes("DELETE"), false, "never deleted");
+});
+
+Deno.test("infraRebindSettled waits for the controller to observe the rebind", () => {
+  const base = infra(ORIGIN, "set001", []);
+  const at = (status) => ({ ...base, status });
+  assertEquals(infraRebindSettled(at({ observedGeneration: 1, record: { uri: "at://x/y/z" } }), ALICE, 2), false, "not observed yet");
+  assertEquals(infraRebindSettled(at({ observedGeneration: 2, conditions: [unresolved], record: { uri: "at://x/y/z" } }), ALICE, 2), false, "still unresolved");
+  assertEquals(infraRebindSettled(at({ observedGeneration: 2 }), ALICE, 2), false, "no record yet");
+  assertEquals(infraRebindSettled(at({ observedGeneration: 2, record: { uri: "at://x/y/z" } }), ALICE, 2), true);
 });
