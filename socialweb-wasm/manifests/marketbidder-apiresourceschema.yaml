@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-37.marketbidders.socialweb.computer
+  name: v1alpha1-40.marketbidders.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -390,6 +390,28 @@ spec:
                         minimum: 1
               policy:
                 type: string
+              association:
+                type: object
+                properties:
+                  kinds:
+                    type: array
+                    items:
+                      type: string
+                      enum:
+                        - claim
+                        - association
+                        - bskyPost
+                        - delvePost
+                    x-kubernetes-list-type: set
+                  postTemplate:
+                    type: string
+                  maxDepth:
+                    type: integer
+                    format: int32
+                    minimum: 1
+                    maximum: 1
+                  requireContract:
+                    type: boolean
               guestNetwork:
                 type: object
                 properties:
@@ -856,6 +878,21 @@ spec:
                                 recordTTLSeconds:
                                   type: integer
                                   format: int64
+                            sandbox:
+                              type: object
+                              properties:
+                                provider:
+                                  type: string
+                                  enum:
+                                    - deno
+                                    - browser
+                                browser:
+                                  type: object
+                                  properties:
+                                    timeoutSeconds:
+                                      type: integer
+                                      format: int32
+                                      minimum: 1
               operator:
                 type: string
               bidderDids:

@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-5.atprotorecordwatches.socialweb.computer
+  name: v1alpha1-6.atprotorecordwatches.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -74,6 +74,8 @@ spec:
                           type: string
                         namespace:
                           type: string
+                        optional:
+                          type: boolean
                       required:
                         - name
                         - fieldPath

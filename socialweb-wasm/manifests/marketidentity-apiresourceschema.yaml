@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-11.marketidentities.socialweb.computer
+  name: v1alpha1-12.marketidentities.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -195,6 +195,16 @@ spec:
                 type: array
                 items:
                   type: string
+              associationRef:
+                type: object
+                properties:
+                  uri:
+                    type: string
+                  cid:
+                    type: string
+                required:
+                  - uri
+                  - cid
               sessionRef:
                 type: object
                 properties:

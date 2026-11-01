@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-28.sshgateways.socialweb.computer
+  name: v1alpha1-29.sshgateways.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -905,6 +905,21 @@ spec:
                                 recordTTLSeconds:
                                   type: integer
                                   format: int64
+                            sandbox:
+                              type: object
+                              properties:
+                                provider:
+                                  type: string
+                                  enum:
+                                    - deno
+                                    - browser
+                                browser:
+                                  type: object
+                                  properties:
+                                    timeoutSeconds:
+                                      type: integer
+                                      format: int32
+                                      minimum: 1
             required:
               - profile
           status:

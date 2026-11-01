@@ -6,32 +6,32 @@ spec:
   resources:
     - group: socialweb.computer
       name: marketnetworks
-      schema: v1alpha1-29.marketnetworks.socialweb.computer
+      schema: v1alpha1-30.marketnetworks.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
       name: marketbidders
-      schema: v1alpha1-37.marketbidders.socialweb.computer
+      schema: v1alpha1-40.marketbidders.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
       name: marketrequesters
-      schema: v1alpha1-30.marketrequesters.socialweb.computer
+      schema: v1alpha1-33.marketrequesters.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
       name: gateways
-      schema: v1alpha1-34.gateways.socialweb.computer
+      schema: v1alpha1-35.gateways.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
       name: sshgateways
-      schema: v1alpha1-28.sshgateways.socialweb.computer
+      schema: v1alpha1-29.sshgateways.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
       name: bidders
-      schema: v1alpha1-22.bidders.socialweb.computer
+      schema: v1alpha1-24.bidders.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
@@ -46,7 +46,7 @@ spec:
         crd: {}
     - group: socialweb.computer
       name: requesters
-      schema: v1alpha1-23.requesters.socialweb.computer
+      schema: v1alpha1-25.requesters.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
