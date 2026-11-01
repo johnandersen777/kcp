@@ -309,8 +309,10 @@ func (f *Feed) objects(gvr schema.GroupVersionResource) []*unstructured.Unstruct
 
 func (f *Feed) build() State {
 	var state State
-	state.MarketRequester = first(f.objects(v1alpha1.MarketRequesterGVR), requesterResource)
-	state.MarketIdentity = first(f.objects(v1alpha1.MarketIdentityGVR), identityResource)
+	// The page's own objects by name: root can hold other MarketIdentities
+	// (the first by name was shown before, whatever it was).
+	state.MarketRequester = named(f.objects(v1alpha1.MarketRequesterGVR), "app", requesterResource)
+	state.MarketIdentity = named(f.objects(v1alpha1.MarketIdentityGVR), "requester", identityResource)
 	state.Requester = first(f.objects(v1alpha1.RequesterGVR), requesterResource)
 	for _, u := range f.objects(exposurev1alpha1.ExposureGVR) {
 		state.Exposures = append(state.Exposures, *requesterResource(u))
@@ -330,6 +332,16 @@ func (f *Feed) build() State {
 	}
 	sort.Strings(state.CRDs)
 	return state
+}
+
+// named is the item called name, or the first by name when none is.
+func named(items []*unstructured.Unstructured, name string, conv func(*unstructured.Unstructured) *Resource) *Resource {
+	for _, u := range items {
+		if u.GetName() == name {
+			return conv(u)
+		}
+	}
+	return first(items, conv)
 }
 
 func first(items []*unstructured.Unstructured, conv func(*unstructured.Unstructured) *Resource) *Resource {
