@@ -80,7 +80,8 @@ export function signInView({ requester = true, identity, local = {}, now = Date.
   if (step === "signingOut" && phase === "Ready" && waiting) {
     return view("signingOut", "warn", "Signing out…", "", wait("Signing out…"));
   }
-  // Ready stays Ready: a failed permission upgrade is shown under it.
+  // Ready stays Ready: an error while signed in (a failed upgrade, sign out
+  // or switch) is shown under it, with Sign out still there.
   if (local.error && !(phase === "Ready" && identity?.did)) return failed(local.error);
   if (step === "preparing" && !url && (waiting || (phase !== "Failed" && phase !== "Ready"))) {
     const target = normalizeHandle(local.applied) || "bsky.social";
@@ -110,6 +111,9 @@ export function signInView({ requester = true, identity, local = {}, now = Date.
       return view("signedIn", "warn", `Signed in as ${handle || did}`,
         failed || "New permissions are available: sign in again to grant them.",
         url ? { label: "Grant permissions", action: "open" } : { label: "Get a new sign-in link", action: "refresh" }, signOut);
+    }
+    if (local.error) {
+      return view("signedIn", "warn", `Signed in as ${handle || did}`, friendlyError(local.error), primary, signOut);
     }
     return view("signedIn", "ok", `Signed in as ${handle || did}`, detail, primary, signOut);
   }

@@ -98,6 +98,10 @@ Deno.test("signInView offers new permissions without leaving Signed in", () => {
   assertEquals(at({ account }, { ...ready, pendingAction: { kind: "signInAgain", url: URL1 } }).primary.action, "switch");
   // done: socialweb clears pendingAction
   assertEquals(at({ account }, ready).primary.action, "switch");
+  // any other error while Ready (a failed sign out) is shown, not swallowed
+  const outFailed = at({ account, error: "kcp is still starting" }, ready);
+  assertEquals([outFailed.state, outFailed.tone, outFailed.detail, outFailed.secondary.action],
+    ["signedIn", "warn", "kcp is still starting", "signOut"]);
   // a typed other handle still says so first
   assertEquals(at({ account, typed: "bob.test" }, upgrade).text, "Signed in as alice.bsky.social, not bob.test.");
 });
