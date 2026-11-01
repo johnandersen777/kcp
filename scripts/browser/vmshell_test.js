@@ -239,6 +239,10 @@ Deno.test("record conditions drive the sync wait", () => {
   const at = (uri) => infraRecordURI({ status: { record: { uri } } }, "did:plc:me", "web-x");
   assert(at("at://did:plc:me/computer.socialweb.ephemeralInfra/web-x-0a1b2c3d") ===
     "at://did:plc:me/computer.socialweb.ephemeralInfra/web-x-0a1b2c3d", "successor rkey of an ended record");
+  assert(at("at://did:plc:me/computer.socialweb.ephemeralInfra/web-x-0a1b2c3d-2") ===
+    "at://did:plc:me/computer.socialweb.ephemeralInfra/web-x-0a1b2c3d-2", "a later successor in the chain");
+  assert(at("at://did:plc:me/computer.socialweb.ephemeralInfra/web-x-0a1b2c3d-0") === "", "no -0 successor");
+  assert(at("at://did:plc:me/computer.socialweb.ephemeralInfra/web-x-0a1b2c3d-x") === "", "not a number");
   assert(at("at://did:plc:me/computer.socialweb.ephemeralInfra/web-xy") === "", "another tab's name");
   assert(at("at://did:plc:me/computer.socialweb.ephemeralInfra/web-x-0A1B2C3D") === "", "not lowercase hex");
   assert(at("at://did:plc:other/computer.socialweb.ephemeralInfra/web-x") === "", "another repo");
