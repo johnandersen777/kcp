@@ -608,6 +608,8 @@ function attachKcp(worker) {
       persistKcp(data.snapshot, data.seq);
     } else if (data.type === "socialweb-persist") {
       void persister.schedule(socialwebStateKey, data.snapshot, data.seq);
+    } else if (data.type === "socialweb-started") {
+      recordKcpBuild();
     } else if (data.type === "log") {
       addLog(data.level ?? "info", `kcp: ${data.message}`);
       const message = String(data.message);
@@ -729,6 +731,18 @@ function devServer() {
   return devServerProbe;
 }
 
+// recordKcpBuild runs when socialweb reports it started, which is only after
+// its provider manifests were applied: a load that dies or fails before that
+// keeps the old id, so the next load forces the apply again.
+function recordKcpBuild() {
+  if (kcpBuildEtag === null) return;
+  try {
+    localStorage.setItem("kcp.stateBuild", kcpBuildEtag);
+  } catch {
+    // no localStorage: the next load re-applies, which is only slower
+  }
+}
+
 async function kcpBuildChanged() {
   try {
     kcpBuildEtag = await wasmBuildId("/kcp.wasm");
@@ -791,13 +805,6 @@ async function spawnKcp(useSnapshot = true) {
     return spawnKcp(false);
   }
   logBootKind(ready, spawnStarted);
-  if (kcpBuildEtag !== null) {
-    try {
-      localStorage.setItem("kcp.stateBuild", kcpBuildEtag);
-    } catch {
-      // no localStorage: the next load re-applies, which is only slower
-    }
-  }
   kcpWorker = worker;
   worker.postMessage({ type: "state-subscribe" });
 }
