@@ -44,8 +44,9 @@ limitations under the License.
 // Any other problem deletes the snapshot and cold boots.
 //
 // Re-capture: whenever the sequence moved since the last capture, the worker
-// is idle and the state has been still for QUIET_MS, at most every EVERY_MS;
-// right away when the page asks (visibilitychange to hidden).
+// is idle and the state has been still for QUIET_MS, at most every EVERY_MS
+// (doubling up to MAX_EVERY_MS while only background writes come); right
+// away when the page asks (visibilitychange to hidden).
 
 import { busy, capture, instrument, restore, SNAPSHOT_FORMAT } from "./wasm_snapshot.js";
 
@@ -55,6 +56,10 @@ const DIR = "kcp-snapshot";
 const IDB = "kcp-snapshot";
 // ponytail: fixed interval; back off if long sessions keep the state dirty.
 const EVERY_MS = 60 * 1000;
+// Background captures (no flush or hide in between) double the gap up to
+// this: an idle tab writes every 5-10 s, and a capture a minute is ~5 GB/h
+// of writes on a phone (re-check page-rc131b f360fdd27, 2).
+const MAX_EVERY_MS = 10 * 60 * 1000;
 // Capture once the persisted state has been still this long (boot and the
 // socialweb compose write in bursts), unless the page is going away. A live
 // page persists a write every 5-10 s even when idle, so a longer quiet period
@@ -425,7 +430,11 @@ export function startHibernation({
   timers = globalThis, now = Date.now,
 }) {
   let lastSeqs = captured;
-  let lastAt = 0;
+  // Boot grace: the first background capture waits a full EVERY_MS, so it
+  // does not land during boot and the socialweb compose at peak heap
+  // (re-check page-rc131b f360fdd27, 1).
+  let lastAt = now();
+  let everyMs = EVERY_MS;
   let want = false; // a hide: capture as soon as kcp is idle
   let soon = false; // a flush: capture once still, at most every SOON_GAP_MS
   let hideAt = -Infinity;
@@ -455,7 +464,7 @@ export function startHibernation({
       if (t - changedAt < SOON_QUIET_MS || (lastAt && t - lastAt < SOON_GAP_MS)) return;
     } else {
       if (t - changedAt < QUIET_MS) return;
-      if (lastAt && t - lastAt < EVERY_MS) return;
+      if (t - lastAt < everyMs) return;
     }
     const reason = !ready() ? "kcp or socialweb not ready, or a request is in flight" : busy(go);
     if (reason) {
@@ -463,6 +472,7 @@ export function startHibernation({
       lastReason = reason;
       return;
     }
+    const background = !want && !soon;
     let done;
     running = new Promise((resolve) => (done = resolve));
     const t0 = performance.now();
@@ -480,6 +490,7 @@ export function startHibernation({
       want = false;
       soon = false;
       hideAt = -Infinity; // one capture per hide
+      everyMs = background ? Math.min(everyMs * 2, MAX_EVERY_MS) : EVERY_MS;
       log("info", `snapshot saved to ${store.kind}: ${(meta.bytes / 1048576).toFixed(0)} MiB memory, ` +
         `${(meta.stored / 1048576).toFixed(0)} MiB stored${gzip ? " (gzip)" : ""}, capture ${meta.stats.captureMs}ms, ` +
         `copy ${meta.stats.copyMs ?? 0}ms, write ${meta.stats.writeMs}ms, total ${ms(t0)}ms`);
@@ -505,6 +516,7 @@ export function startHibernation({
     request() {
       want = true;
       hideAt = now();
+      everyMs = EVERY_MS;
       void tick();
     },
     /**
@@ -514,6 +526,7 @@ export function startHibernation({
      */
     requestSoon() {
       if (lastSeqs && sameSeqs(lastSeqs, seqs())) return;
+      everyMs = EVERY_MS;
       if (now() - hideAt < HIDE_FLUSH_MS) {
         want = true;
         void tick();
