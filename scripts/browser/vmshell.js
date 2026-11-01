@@ -315,12 +315,16 @@ export function schemaHasAgent(schema) {
 /**
  * Release notes for the contract row (plan 0036 A8). The cascade runs in the
  * requester: it publishes guest.r2Release (outbound ContractEvent
- * <contract>-r2-release), waits up to 12 min with status.execution.step
- * releasingGuestRequester for the guest's r2Released, then deletes the VM.
- * The status carries neither the answer nor R2's contracts, so the row
- * shows the wait and the request's phase. atircRevokes runs before Released.
+ * <contract>-r2-release), waits up to R2_RELEASE_MINUTES with
+ * status.execution.step releasingGuestRequester for the guest's r2Released
+ * (only the time left since requestedAt after a restart), then deletes the
+ * VM. atircRevokes runs before Released.
  */
-export function releaseNotes(contract, contractEvents = []) {
+// socialweb cloudinit.GuestRequesterReleaseTimeout (201937b0): stop 2 min +
+// release unit (3 + 15 + 2 + 1 min) + 1 min.
+export const R2_RELEASE_MINUTES = 24;
+
+export function releaseNotes(contract, contractEvents = [], now = Date.now()) {
   const notes = [];
   // status.contract.r2Release (rc127, socialweb 34f74335): phase
   // Requested|Released|Failed|TimedOut; ok is omitted when false, so the
@@ -329,10 +333,10 @@ export function releaseNotes(contract, contractEvents = []) {
   if (r2) {
     const why = r2.message || "no message";
     notes.push({
-      Requested: `R2 release: asked ${r2.requestedAt ?? "?"}, waiting (up to 12 min)`,
+      Requested: `R2 release: asked ${r2.requestedAt ?? "?"}, waiting (up to ${R2_RELEASE_MINUTES} min${minutesLeft(r2.requestedAt, now)})`,
       Released: `R2 release: guest released ${r2.answeredAt ?? "?"}`,
       Failed: `R2 release: FAILED: ${why}`,
-      TimedOut: "R2 release: TIMED OUT after 12 min; bidder backstop releases R2's VMs after the association expires",
+      TimedOut: `R2 release: TIMED OUT after ${R2_RELEASE_MINUTES} min; bidder backstop releases R2's VMs after the association expires`,
     }[r2.phase] ?? `R2 release: [${r2.phase ?? "unknown"}] ${why}`);
   }
   const asked = contractEvents.find((e) => e?.contract === contract?.name && e.direction === "outbound" &&
@@ -340,13 +344,20 @@ export function releaseNotes(contract, contractEvents = []) {
   if (r2) {
     // the answer above replaces the wait/request lines
   } else if (contract?.step === "releasingGuestRequester") {
-    notes.push(`R2 release: waiting for the guest requester to release its contracts (up to 12 min)${asked ? `, request ${asked.phase ?? "Pending"}` : ""}`);
+    notes.push(`R2 release: waiting for the guest requester to release its contracts (up to ${R2_RELEASE_MINUTES} min)${asked ? `, request ${asked.phase ?? "Pending"}` : ""}`);
   } else if (asked) {
-    notes.push(`R2 release: asked (${asked.phase ?? "Pending"}); answered or 12 min bound passed`);
+    notes.push(`R2 release: asked (${asked.phase ?? "Pending"}); answered or ${R2_RELEASE_MINUTES} min bound passed`);
   }
   const revokes = { Pending: "tokens: revoking", Done: "tokens: revoked", Abandoned: "tokens: revoke ABANDONED, revoke them by hand" };
   if (contract?.atircRevokes) notes.push(revokes[contract.atircRevokes] ?? `tokens: ${contract.atircRevokes}`);
   return notes;
+}
+
+// ", ~N min left" for the requester's remaining wait, "" without a time.
+function minutesLeft(requestedAt, now) {
+  const at = Date.parse(requestedAt ?? "");
+  if (Number.isNaN(at)) return "";
+  return `, ~${Math.max(0, Math.ceil((at + R2_RELEASE_MINUTES * 60_000 - now) / 60_000))} min left`;
 }
 
 /** The Start R2 button: a Held contract that runs R2 and lets it associate itself. */
