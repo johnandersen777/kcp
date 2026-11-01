@@ -104,6 +104,11 @@ const cases = [
   // PT-1: only the reverse vouch exists (the bidder's verified operator
   // vouches self); that is no reason to trust the bidder.
   ["counterparty-operator-vouches-self-only", false, ["decision"], { trust: vouched({ [self]: [], [bidderOp]: [self] }) }],
+  // PT-3: self vouched the bidder DID itself; the bidder also has a verified
+  // operator (that self does not vouch).
+  ["vouched-directly-with-verified-operator", true, ["decision"], { trust: vouched({ [self]: [bidder], [bidderOp]: [] }) }],
+  // PT-4: the bidder's verified operator is self.
+  ["counterparty-operated-by-self", true, ["decision"], { trust: vouched({ [self]: [] }, { [self]: self, [bidder]: self }) }],
   // fail-closed: a garbage snapshot makes the action throw (exit 1).
   ["trust-host-error-deny (fail-closed: malformed snapshot)", false, ["threw"], {
     trust: { ...vouched({ [self]: [bidder] }), "vouchedBy.json": { data: "{not json", encoding: "text" } },
