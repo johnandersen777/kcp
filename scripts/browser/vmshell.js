@@ -738,6 +738,8 @@ export function agentTokenNote(contract) {
     }[token.reason] ?? `agent token: minted (${token.reason || "no reason"})`;
   }
   const why = token.message || "no message";
+  // r131 3dca8612: a leased mint whose token has no leases claim fails.
+  if (token.reason === "LeaseClaimMissing") return "agent token: server returned no lease (refused)";
   if (token.reason === "GaveUp") return `agent token: mint GAVE UP: ${why}`;
   return `agent token: mint failed, retrying: ${why}`;
 }

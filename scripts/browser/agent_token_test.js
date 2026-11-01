@@ -29,6 +29,14 @@ Deno.test("agentTokenNote: mint failures carry the condition's message", () => {
   );
 });
 
+Deno.test("agentTokenNote: a mint without a leases claim is refused (r131); Unleased still reads", () => {
+  assertEquals(
+    agentTokenNote(agent("Held", { status: "False", reason: "LeaseClaimMissing", message: "the minted token has no leases claim" })),
+    "agent token: server returned no lease (refused)",
+  );
+  assertEquals(agentTokenNote(agent("Held", { status: "True", reason: "Unleased" })), "agent token: minted without a lease (the atirc server has no leases)");
+});
+
 Deno.test("agentTokenNote: nothing for contracts without a token, or finished before one", () => {
   assertEquals(agentTokenNote({ name: "c", phase: "Held" }), "", "no agent, no R2");
   assertEquals(agentTokenNote({ name: "c", phase: "Held", guestTools: ["socialweb-computer"] }), "agent token: waiting for receipt", "R2 mints too");
