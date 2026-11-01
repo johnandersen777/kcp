@@ -31,11 +31,30 @@ import {
   schemaHasShell,
   secretsBundle,
   shellLink,
-  RELEASE_FIELD_MANAGER,
+  releaseWorkPending,
   canReleaseAgain,
   phaseLabel,
   releaseAnswered,
+  finishedEntry,
+  RELEASE_FIELD_MANAGER,
   releaseApply,
+  INFRA_FIELD_MANAGER,
+  REQUESTER_POLICY,
+  INFRA_PAGE_FIELDS,
+  composeInfra,
+  infraApply,
+  pageInfraSpec,
+  withInfraContract,
+  createInfra,
+  dropOwnersPatch,
+  staleSpecOwners,
+  releaseOffered,
+  guestMayRun,
+  latestStamp,
+  releaseTimedOut,
+  stampAfter,
+  updateInfraEntry,
+  withReleaseSent,
   releasePending,
   releaseRequestedAt,
   requestRelease,
@@ -392,32 +411,75 @@ Deno.test("A8 release notes from status.contract.r2Release (rc127 phases)", () =
   assert(releaseNotes(c({ phase: "Requested", requestedAt: "t1" })).length === 1, "the status replaces the wait line");
 });
 
-// --- release requests (socialweb rc127 H1, computecontracts 30) ---
+// --- release requests (socialweb r128 10558978, ephemeralinfras 11) ---
 
 const API = "/apis/socialweb.computer/v1alpha1";
+const T0 = "2026-10-30T12:00:00.000Z";
 
-// A fake kcpREST over one ComputeContract (and optionally its EphemeralInfra);
-// a PATCH applies the SSA body's spec onto the stored contract.
-function fakeKcp(cc, infra = null) {
+function sessionCC(extra = {}) {
+  return {
+    metadata: { name: "einfra-t-vmshell-ab", labels: { "infra.socialweb.computer/contract": "vmshell-ab" },
+      ownerReferences: [{ kind: "EphemeralInfra", name: "t" }] },
+    spec: { vmName: "einfra-t-vmshell-ab", ...extra },
+  };
+}
+
+const OTHER_ENTRY = { name: "vmshell-zz", state: "Requested", policy: REQUESTER_POLICY, vmName: "other", computeKind: "vm",
+  tunnels: [{ tag: "ssh", port: 22, transport: "webrtc" }], agent: { envFile: "/etc/atirc/atirc.env" } };
+const OWN_ENTRY = { name: "vmshell-ab", state: "Requested", policy: REQUESTER_POLICY, vmName: "einfra-t-vmshell-ab", computeKind: "vm",
+  tunnels: [{ tag: "ssh", port: 22, transport: "webrtc" }], association: { subject: "did:plc:x" }, guestTools: ["socialweb-computer"] };
+const PAGE_SPEC = {
+  description: "socialweb.computer page session",
+  ttlSeconds: 86400,
+  endWhen: "Deadline",
+  record: { repoRef: { name: "r" }, direction: "Publish" },
+};
+
+function sessionInfra(entry = {}) {
+  return {
+    metadata: { name: "t", resourceVersion: "7" },
+    spec: {
+      ...structuredClone(PAGE_SPEC),
+      contracts: [structuredClone(OTHER_ENTRY), { ...structuredClone(OWN_ENTRY), ...entry }],
+      secrets: [{ contract: "vmshell-ab", secretsRef: { mount: "m", path: "x" } }],
+      nodes: [{ contract: "vmshell-zz", node: "not the page's" }],
+    },
+    status: { phase: "Active" },
+  };
+}
+
+const INFRA_APPLY_PATH = `${API}/ephemeralinfras/t?fieldManager=socialweb.computer%2Fpage&force=true`;
+
+// A fake kcpREST over one ComputeContract and its EphemeralInfra: the page's
+// apply of its full spec (INFRA_PAGE_FIELDS) replaces those fields and keeps
+// the rest (nodes), and checks the resourceVersion; conflicts (number of 409s
+// to answer first) simulate a concurrent writer.
+function fakeKcp(cc, infra = null, conflicts = 0) {
   const calls = [];
   const rest = (method, path, body, contentType) => {
-    calls.push({ method, path, body, contentType });
-    if (method === "GET" && path === `${API}/computecontracts/${cc?.metadata?.name}`) return Promise.resolve(cc);
-    if (method === "GET" && infra && path === `${API}/ephemeralinfras/${infra.metadata.name}`) return Promise.resolve(infra);
-    if (method === "GET") return Promise.reject(Object.assign(new Error(`GET ${path}: 404`), { status: 404 }));
-    if (method === "PATCH" && cc) {
+    calls.push({ method, path, body: body === undefined ? undefined : structuredClone(body), contentType });
+    if (method === "GET" && cc && path === `${API}/computecontracts/${cc.metadata.name}`) return Promise.resolve(structuredClone(cc));
+    if (method === "GET" && infra && path === `${API}/ephemeralinfras/${infra.metadata.name}`) return Promise.resolve(structuredClone(infra));
+    if (method === "GET") return Promise.reject(Object.assign(new Error(`GET ${path}: 404 not found`), { status: 404 }));
+    if (method === "PATCH" && infra && path.startsWith(`${API}/ephemeralinfras/${infra.metadata.name}?`)) {
+      if (contentType !== "application/apply-patch+yaml") return Promise.reject(new Error(`not an apply: ${contentType}`));
+      if (conflicts > 0 || (body.metadata?.resourceVersion && body.metadata.resourceVersion !== infra.metadata.resourceVersion)) {
+        conflicts--;
+        infra.metadata.resourceVersion = String(Number(infra.metadata.resourceVersion) + 1);
+        return Promise.reject(Object.assign(new Error(`PATCH ${path}: 409 conflict`), { status: 409 }));
+      }
+      const kept = Object.fromEntries(Object.entries(infra.spec).filter(([field]) => !INFRA_PAGE_FIELDS.includes(field)));
+      infra.spec = { ...kept, ...structuredClone(body.spec) };
+      infra.metadata.resourceVersion = String(Number(infra.metadata.resourceVersion) + 1);
+      return Promise.resolve(structuredClone(infra));
+    }
+    if (method === "PATCH" && cc && path.startsWith(`${API}/computecontracts/${cc.metadata.name}?`)) {
       cc.spec = { ...cc.spec, ...body.spec };
-      return Promise.resolve(cc);
+      return Promise.resolve(structuredClone(cc));
     }
     return Promise.reject(new Error(`unexpected ${method} ${path}`));
   };
-  const infraSets = [];
-  const setInfraContract = (name, entry) => {
-    calls.push({ method: "setInfraContract", name, entry });
-    infraSets.push([name, entry]);
-    return Promise.resolve();
-  };
-  return { rest, calls, infraSets, setInfraContract };
+  return { rest, calls, writes: () => calls.filter((c) => c.method !== "GET") };
 }
 
 Deno.test("release: releaseRequestedAt is now, and strictly after a previous request", () => {
@@ -428,77 +490,380 @@ Deno.test("release: releaseRequestedAt is now, and strictly after a previous req
   assert(releaseRequestedAt("2026-10-30T12:00:00.123Z", now) === "2026-10-30T12:00:00.124Z", "same ms bumps");
   assert(releaseRequestedAt("2026-10-30T13:00:00.000Z", now) === "2026-10-30T13:00:00.001Z", "clock behind the stored one");
   assert(releaseRequestedAt("garbage", now) === "2026-10-30T12:00:00.123Z", "unparsable previous");
+  assert(latestStamp("", "2026-10-30T11:00:00Z", "2026-10-30T12:00:00.5Z", "garbage") === "2026-10-30T12:00:00.5Z", "latest");
+  assert(latestStamp(undefined, "") === "", "none");
+  assert(stampAfter("2026-10-30T12:00:00.500Z", "2026-10-30T12:00:00Z"), "parsed, not compared as strings");
+  assert(!stampAfter("", "2026-10-30T12:00:00Z") && stampAfter(T0, "") && !stampAfter(T0, T0), "edges");
 });
 
-Deno.test("release: the SSA body sets spec.release with releaseRequestedAt under the release manager", () => {
-  const a = releaseApply(API, "einfra-x-vmshell-1", "2026-10-30T12:00:00.000Z");
+Deno.test("release: Release applies the page's full infra spec, only its entry changed, never the ComputeContract", async () => {
+  const cc = sessionCC();
+  const infra = sessionInfra();
+  const k = fakeKcp(cc, infra);
+  const at = await requestRelease({ rest: k.rest, api: API, name: cc.metadata.name, now: new Date(T0) });
+  assert(at === T0, at);
+  const writes = k.writes();
+  assert(writes.length === 1, JSON.stringify(writes));
+  const [w] = writes;
+  assert(w.method === "PATCH", w.method);
+  assert(INFRA_FIELD_MANAGER === "socialweb.computer/page", INFRA_FIELD_MANAGER);
+  assert(w.path === INFRA_APPLY_PATH, w.path);
+  assert(w.contentType === "application/apply-patch+yaml", w.contentType);
+  assert(JSON.stringify(w.body) === JSON.stringify({
+    apiVersion: "socialweb.computer/v1alpha1",
+    kind: "EphemeralInfra",
+    metadata: { name: "t", resourceVersion: "7" },
+    spec: {
+      ...PAGE_SPEC,
+      contracts: [OTHER_ENTRY, { ...OWN_ENTRY, state: "Released", releaseRequestedAt: T0 }],
+      secrets: [{ contract: "vmshell-ab", secretsRef: { mount: "m", path: "x" } }],
+    },
+  }), JSON.stringify(w.body));
+  assert(!("nodes" in w.body.spec) && !("status" in w.body), "only the fields the page composes");
+  assert(!k.calls.some((c) => c.method !== "GET" && c.path.includes("/computecontracts")), "no write to computecontracts");
+  assert(JSON.stringify(infra.spec.contracts[0]) === JSON.stringify(OTHER_ENTRY), "the other entry stays whole");
+  assert(JSON.stringify(infra.spec.contracts[1]) === JSON.stringify({ ...OWN_ENTRY, state: "Released", releaseRequestedAt: T0 }),
+    "every field of the released entry survives");
+  assert(infra.spec.secrets.length === 1 && infra.spec.nodes.length === 1 && infra.spec.record.repoRef.name === "r", "secrets, nodes, record stay");
+  assert(JSON.stringify(cc.spec) === JSON.stringify(sessionCC().spec), "the contract is untouched");
+});
+
+Deno.test("composeInfra: Request VM and the record rebind apply the full spec too", async () => {
+  const infra = sessionInfra();
+  const k = fakeKcp(null, infra);
+  const entry = { name: "vmshell-new", state: "Requested", policy: REQUESTER_POLICY, vmName: "einfra-t-vmshell-new" };
+  await composeInfra({ rest: k.rest, api: API, infra: "t",
+    update: (spec) => withInfraContract(spec, entry, { contract: "vmshell-new", secretsRef: { mount: "m", path: "y" } }) });
+  const [w] = k.writes();
+  assert(w.path === INFRA_APPLY_PATH && w.contentType === "application/apply-patch+yaml", JSON.stringify(w));
+  assert(JSON.stringify(w.body.spec.contracts.map((c) => c.name)) === '["vmshell-zz","vmshell-ab","vmshell-new"]', "every entry");
+  assert(JSON.stringify(w.body.spec.contracts[0]) === JSON.stringify(OTHER_ENTRY) &&
+    JSON.stringify(w.body.spec.contracts[1]) === JSON.stringify(OWN_ENTRY), "every field of the existing entries");
+  assert(JSON.stringify(w.body.spec.secrets.map((x) => x.contract)) === '["vmshell-ab","vmshell-new"]', "secrets merged");
+  assert(w.body.spec.description === PAGE_SPEC.description && w.body.spec.ttlSeconds === 86400 && w.body.spec.endWhen === "Deadline" &&
+    w.body.spec.record.repoRef.name === "r", "the page's other spec fields");
+  const record = { repoRef: { name: "r2" }, direction: "Publish" };
+  await composeInfra({ rest: k.rest, api: API, infra: "t", update: (spec) => ({ ...spec, record }) });
+  const rebind = k.writes()[1];
+  assert(rebind.body.spec.record.repoRef.name === "r2" && rebind.body.spec.contracts.length === 3 && rebind.body.spec.secrets.length === 2,
+    "a rebind re-applies the entries and secrets");
+  const create = infraApply(API, "t", sessionInfraManifest("t", undefined, record).spec);
+  assert(create.path === INFRA_APPLY_PATH && !("resourceVersion" in create.body.metadata) &&
+    JSON.stringify(create.body.spec.contracts) === "[]", JSON.stringify(create));
+  assert(JSON.stringify(pageInfraSpec(infra.spec)) === JSON.stringify(Object.fromEntries(INFRA_PAGE_FIELDS.filter((f) => f in infra.spec).map((f) => [f, infra.spec[f]]))),
+    "pageInfraSpec keeps exactly the page fields");
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  assert(!/ephemeralinfras[^\n]*merge-patch|merge-patch[^\n]*ephemeralinfras/.test(app) && !/kcpREST\("POST", `\$\{SOCIALWEB_API\}\/ephemeralinfras`/.test(app),
+    "app.js has no merge patch or POST of an EphemeralInfra");
+  assert(/function setInfraContract[\s\S]*?infraQueued\(\(\) => vmshell\.composeInfra\(/.test(app), "Request VM composes in the queue");
+});
+
+Deno.test("release: the ownerless SSA sets exactly spec.release and releaseRequestedAt under requester-release", () => {
+  const a = releaseApply(API, "vm1", T0);
   assert(RELEASE_FIELD_MANAGER === "socialweb.computer/requester-release", RELEASE_FIELD_MANAGER);
-  assert(a.path === `${API}/computecontracts/einfra-x-vmshell-1?fieldManager=socialweb.computer%2Frequester-release&force=true`, a.path);
+  assert(a.path === `${API}/computecontracts/vm1?fieldManager=socialweb.computer%2Frequester-release&force=true`, a.path);
   assert(a.contentType === "application/apply-patch+yaml", a.contentType);
   assert(JSON.stringify(a.body) === JSON.stringify({
     apiVersion: "socialweb.computer/v1alpha1",
     kind: "ComputeContract",
-    metadata: { name: "einfra-x-vmshell-1" },
-    spec: { release: true, releaseRequestedAt: "2026-10-30T12:00:00.000Z" },
+    metadata: { name: "vm1" },
+    spec: { release: true, releaseRequestedAt: T0 },
   }), JSON.stringify(a.body));
 });
 
-Deno.test("release: a plain contract gets the timestamped apply and no infra write", async () => {
-  const k = fakeKcp({ metadata: { name: "vm1" }, spec: {} });
-  const now = new Date("2026-10-30T12:00:00.000Z");
-  const at = await requestRelease({ rest: k.rest, api: API, name: "vm1", setInfraContract: k.setInfraContract, now });
-  const patches = k.calls.filter((c) => c.method === "PATCH");
-  assert(at === now.toISOString() && patches.length === 1, JSON.stringify(k.calls));
-  assert(patches[0].body.spec.release === true && patches[0].body.spec.releaseRequestedAt === at, JSON.stringify(patches[0]));
-  assert(patches[0].path === `${API}/computecontracts/vm1?fieldManager=socialweb.computer%2Frequester-release&force=true`, patches[0].path);
-  assert(patches[0].contentType === "application/apply-patch+yaml", `SSA, not merge-patch: ${patches[0].contentType}`);
-  assert(JSON.stringify(Object.keys(patches[0].body.spec)) === JSON.stringify(["release", "releaseRequestedAt"]), "both fields, nothing else");
-  assert(k.calls.every((c) => c.method === "GET" || c.method === "PATCH"), "GET + one PATCH (apply) only");
-  assert(k.infraSets.length === 0, "no infra");
-});
-
-Deno.test("release: a session-infra contract is applied first, then its entry marked Released", async () => {
-  const cc = {
-    metadata: { name: "einfra-t-vmshell-ab", labels: { "infra.socialweb.computer/contract": "vmshell-ab" },
-      ownerReferences: [{ kind: "EphemeralInfra", name: "t" }] },
-    spec: {},
-  };
-  const infra = { metadata: { name: "t" }, spec: { contracts: [{ name: "vmshell-ab", state: "Requested", policy: "p" }] } };
+Deno.test("release: an ownerless contract gets the rc127 apply and nothing is written to the infra", async () => {
+  const cc = { metadata: { name: "vm1" }, spec: { vmName: "vm1" } };
+  const infra = sessionInfra();
+  const before = JSON.stringify(infra);
   const k = fakeKcp(cc, infra);
-  const at = await requestRelease({ rest: k.rest, api: API, name: cc.metadata.name, setInfraContract: k.setInfraContract,
-    now: new Date("2026-10-30T12:00:00.000Z") });
-  const order = k.calls.filter((c) => c.method !== "GET").map((c) => c.method);
-  assert(JSON.stringify(order) === JSON.stringify(["PATCH", "setInfraContract"]), JSON.stringify(order));
-  assert(cc.spec.releaseRequestedAt === at && cc.spec.release === true, JSON.stringify(cc.spec));
-  assert(k.infraSets[0][0] === "t" && k.infraSets[0][1].state === "Released" && k.infraSets[0][1].policy === "p", JSON.stringify(k.infraSets));
+  const first = await requestRelease({ rest: k.rest, api: API, name: "vm1", now: new Date(T0) });
+  const again = await requestRelease({ rest: k.rest, api: API, name: "vm1", now: new Date(T0) });
+  assert(first === T0 && again === "2026-10-30T12:00:00.001Z", `${first} ${again}`);
+  const writes = k.writes();
+  assert(writes.length === 2 && writes.every((w) => w.method === "PATCH" && w.contentType === "application/apply-patch+yaml" &&
+    w.path === `${API}/computecontracts/vm1?fieldManager=socialweb.computer%2Frequester-release&force=true`), JSON.stringify(writes));
+  assert(JSON.stringify(writes.map((w) => w.body.spec)) === JSON.stringify([{ release: true, releaseRequestedAt: first }, { release: true, releaseRequestedAt: again }]),
+    "exactly the two fields, a newer stamp on Release again");
+  assert(!k.calls.some((c) => c.path.includes("/ephemeralinfras")) && JSON.stringify(infra) === before, "no infra read or write");
+  assert(cc.spec.release === true && cc.spec.releaseRequestedAt === again && cc.spec.vmName === "vm1", JSON.stringify(cc.spec));
+  const empty = fakeKcp({ metadata: { name: "vm2", ownerReferences: [] }, spec: {} });
+  await requestRelease({ rest: empty.rest, api: API, name: "vm2", now: new Date(T0) });
+  assert(empty.writes().length === 1 && empty.writes()[0].path.startsWith(`${API}/computecontracts/vm2?`), "an empty ownerReferences is ownerless");
 });
 
-Deno.test("release: a second Release (button, Release again, d.release, leftover sweep) sends a fresh timestamp", async () => {
-  const cc = {
-    metadata: { name: "einfra-t-vmshell-ab", labels: { "infra.socialweb.computer/contract": "vmshell-ab" },
-      ownerReferences: [{ kind: "EphemeralInfra", name: "t" }] },
-    spec: {},
-  };
-  const infra = { metadata: { name: "t" }, spec: { contracts: [{ name: "vmshell-ab", state: "Requested", policy: "p" }] } };
+Deno.test("release: Release again sends a newer stamp on the entry, after the entry's and the contract's", async () => {
+  const cc = sessionCC({ release: true, releaseRequestedAt: T0 });
+  const infra = sessionInfra({ state: "Released", releaseRequestedAt: T0 });
   const k = fakeKcp(cc, infra);
-  const now = new Date("2026-10-30T12:00:00.000Z");
-  const first = await requestRelease({ rest: k.rest, api: API, name: cc.metadata.name, setInfraContract: k.setInfraContract, now });
-  infra.spec.contracts[0].state = "Released";
-  const second = await requestRelease({ rest: k.rest, api: API, name: cc.metadata.name, setInfraContract: k.setInfraContract, now });
-  const later = await requestRelease({ rest: k.rest, api: API, name: cc.metadata.name, setInfraContract: k.setInfraContract,
-    now: new Date("2026-10-30T12:05:00.000Z") });
-  assert(first < second && second < later, `${first} ${second} ${later}`);
-  const stamps = k.calls.filter((c) => c.method === "PATCH").map((c) => c.body.spec.releaseRequestedAt);
-  assert(JSON.stringify(stamps) === JSON.stringify([first, second, later]), JSON.stringify(stamps));
-  assert(cc.spec.releaseRequestedAt === later, "the newest request is in the spec");
-  assert(k.infraSets.length === 1, "an already Released infra entry is not rewritten");
+  const now = new Date(T0); // the clock has not moved past the stored request
+  const second = await requestRelease({ rest: k.rest, api: API, name: cc.metadata.name, now });
+  assert(second === "2026-10-30T12:00:00.001Z", second);
+  const later = await requestRelease({ rest: k.rest, api: API, name: cc.metadata.name, now: new Date("2026-10-30T12:05:00.000Z") });
+  assert(later === "2026-10-30T12:05:00.000Z", later);
+  const stamps = k.writes().map((w) => w.body.spec.contracts[1].releaseRequestedAt);
+  assert(JSON.stringify(stamps) === JSON.stringify([second, later]), JSON.stringify(stamps));
+  assert(k.writes().every((w) => w.path === INFRA_APPLY_PATH && w.body.spec.contracts[1].state === "Released" &&
+    JSON.stringify(w.body.spec.contracts[0]) === JSON.stringify(OTHER_ENTRY)), "full spec, the other entry whole");
+  assert(infra.spec.contracts[1].releaseRequestedAt === later, "the newest request is in the entry");
+  assert(JSON.stringify(infra.spec.contracts[1]) === JSON.stringify({ ...OWN_ENTRY, state: "Released", releaseRequestedAt: later }),
+    "nothing else of the entry is lost");
+
+  // the contract carries a newer stamp than the entry (an earlier rc127 page): still strictly after it
+  const ahead = sessionCC({ release: true, releaseRequestedAt: "2026-10-30T13:00:00.000Z" });
+  const k2 = fakeKcp(ahead, sessionInfra({ state: "Released", releaseRequestedAt: T0 }));
+  const third = await requestRelease({ rest: k2.rest, api: API, name: ahead.metadata.name, now: new Date(T0) });
+  assert(third === "2026-10-30T13:00:00.001Z", third);
+  assert(!k2.calls.some((c) => c.method !== "GET" && c.path.includes("/computecontracts")), "no write to computecontracts");
 });
 
-Deno.test("release: a missing contract is never created by the apply", async () => {
-  const k = fakeKcp(null);
-  let failed = false;
-  await requestRelease({ rest: k.rest, api: API, name: "gone", setInfraContract: k.setInfraContract }).catch(() => failed = true);
-  assert(failed && !k.calls.some((c) => c.method === "PATCH"), JSON.stringify(k.calls));
+Deno.test("release: a concurrent infra write is a 409 and a fresh read, never a lost entry", async () => {
+  const cc = sessionCC();
+  const infra = sessionInfra();
+  const k = fakeKcp(cc, infra, 1);
+  const at = await requestRelease({ rest: k.rest, api: API, name: cc.metadata.name, now: new Date(T0) });
+  const writes = k.writes();
+  assert(writes.length === 2 && writes[1].body.metadata.resourceVersion === "8", JSON.stringify(writes.map((w) => w.body.metadata)));
+  assert(infra.spec.contracts[1].releaseRequestedAt === at, "written on the retry");
+  const stuck = fakeKcp(sessionCC(), sessionInfra(), 5);
+  let failed = "";
+  await requestRelease({ rest: stuck.rest, api: API, name: cc.metadata.name, now: new Date(T0) }).catch((err) => failed = err.message);
+  assert(/409/.test(failed) && stuck.writes().length === 3, `gives up after 3 attempts: ${failed}`);
+});
+
+Deno.test("release: the serialize hook runs the read-modify-write in the page's infra queue", async () => {
+  const k = fakeKcp(sessionCC(), sessionInfra());
+  const order = [];
+  const serialize = async (run) => {
+    order.push("queued");
+    const out = await run();
+    order.push("done");
+    return out;
+  };
+  await requestRelease({ rest: k.rest, api: API, name: "einfra-t-vmshell-ab", serialize, now: new Date(T0) });
+  const infraCalls = k.calls.filter((c) => c.path.includes("/ephemeralinfras/"));
+  assert(JSON.stringify(order) === '["queued","done"]' && infraCalls.length === 2, JSON.stringify(order));
+});
+
+Deno.test("release: a missing contract or entry is an error and no write", async () => {
+  const gone = fakeKcp(null, sessionInfra());
+  let failed = "";
+  await requestRelease({ rest: gone.rest, api: API, name: "gone" }).catch((err) => failed = err.message);
+  assert(/gone: 404/.test(failed) && gone.writes().length === 0, failed);
+  const nul = { rest: (method) => method === "GET" ? Promise.resolve(null) : Promise.reject(new Error("write")) };
+  failed = "";
+  await requestRelease({ rest: nul.rest, api: API, name: "vm1" }).catch((err) => failed = err.message);
+  assert(failed === "ComputeContract vm1 not found", failed);
+
+  const other = fakeKcp({ metadata: { name: "vm1", ownerReferences: [{ kind: "MarketIntent", name: "mi" }] }, spec: {} }, sessionInfra());
+  failed = "";
+  await requestRelease({ rest: other.rest, api: API, name: "vm1" }).catch((err) => failed = err.message);
+  assert(/owned by MarketIntent\/mi, not an EphemeralInfra/.test(failed) && other.writes().length === 0, failed);
+
+  const noEntry = sessionInfra();
+  noEntry.spec.contracts.pop();
+  const k = fakeKcp(sessionCC(), noEntry);
+  failed = "";
+  await requestRelease({ rest: k.rest, api: API, name: "einfra-t-vmshell-ab" }).catch((err) => failed = err.message);
+  assert(/EphemeralInfra t has no entry for einfra-t-vmshell-ab/.test(failed) && k.writes().length === 0, failed);
+});
+
+Deno.test("markFinished: finishedEntry stamps a fresh releaseRequestedAt and skips an entry a Release already wrote", async () => {
+  assert(finishedEntry({ name: "a", state: "Released", releaseRequestedAt: T0 }) === null, "already Released: no write");
+  assert(finishedEntry({ name: "a", state: "Staged" }) === null, "Staged");
+  const now = new Date(T0);
+  const fresh = finishedEntry({ name: "a", state: "Requested", policy: "p" }, "", now);
+  assert(fresh.state === "Released" && fresh.releaseRequestedAt === T0 && fresh.policy === "p", JSON.stringify(fresh));
+  const later = finishedEntry({ name: "a", state: "Requested", releaseRequestedAt: T0 }, "2026-10-30T12:30:00.000Z", now);
+  assert(later.releaseRequestedAt === "2026-10-30T12:30:00.001Z", `newer than the entry's and the contract's: ${later.releaseRequestedAt}`);
+
+  // markFinished read the infra before a Release was queued; the queued
+  // update reads it again, so the Release's stamp survives.
+  const infra = sessionInfra();
+  const k = fakeKcp(sessionCC(), infra);
+  const stale = structuredClone(infra.spec.contracts[1]);
+  await requestRelease({ rest: k.rest, api: API, name: "einfra-t-vmshell-ab", now: new Date(T0) });
+  const wrote = await updateInfraEntry({ rest: k.rest, api: API, infra: "t", match: (c) => c.name === stale.name,
+    update: (current) => finishedEntry(current, "", new Date("2026-10-30T13:00:00.000Z")) });
+  assert(wrote === null && k.writes().length === 1, "no second write");
+  assert(infra.spec.contracts[1].releaseRequestedAt === T0 && infra.spec.contracts[1].state === "Released", JSON.stringify(infra.spec.contracts[1]));
+
+  // a Requested entry (a Failed contract, guest maybe live) is marked Released with a fresh stamp,
+  // every other field and the other entries intact
+  const k2 = fakeKcp(sessionCC(), sessionInfra({ releaseRequestedAt: T0 }));
+  const done = await updateInfraEntry({ rest: k2.rest, api: API, infra: "t", match: (c) => c.name === "vmshell-ab",
+    update: (current) => finishedEntry(current, "", now) });
+  const [w] = k2.writes();
+  assert(done.state === "Released" && w.contentType === "application/apply-patch+yaml" && w.path === INFRA_APPLY_PATH, JSON.stringify(w));
+  assert(w.body.spec.contracts[1].releaseRequestedAt === "2026-10-30T12:00:00.001Z", "strictly after the stored stamp");
+  assert(JSON.stringify(w.body.spec.contracts[1]) === JSON.stringify({ ...OWN_ENTRY, releaseRequestedAt: "2026-10-30T12:00:00.001Z", state: "Released" }),
+    JSON.stringify(w.body.spec.contracts[1]));
+  assert(JSON.stringify(w.body.spec.contracts[0]) === JSON.stringify(OTHER_ENTRY), "the other entry stays whole");
+
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  const mark = app.match(/async function markFinishedInfraContracts[\s\S]*?\n}\n/)?.[0] ?? "";
+  assert(/infraQueued\(\(\) => vmshell\.updateInfraEntry\(/.test(mark) &&
+    /update: \(current\) => vmshell\.finishedEntry\(current, pending\.find\(\(c\) => c\.name === child\)\?\.releaseRequestedAt\)/.test(mark),
+    "markFinishedInfraContracts stamps the fresh entry inside the queue, after the contract's stamp");
+  assert(!/setInfraContract\(/.test(mark), "and never writes the entry it read before queueing");
+});
+
+Deno.test("release: Release is offered on a Failed contract exactly when the requester re-releases it", async () => {
+  const live = { name: "c", phase: "Failed", receiptOk: true, message: "the guest stopped answering" };
+  assert(guestMayRun(live) && releaseOffered(live), "Failed, receipt ok, not terminated, not acked: offered without ReleaseFailed");
+  // each condition that turns the offer off
+  assert(!releaseOffered({ ...live, receiptOk: false }) && !releaseOffered({ name: "c", phase: "Failed" }), "no valid receipt");
+  assert(!releaseOffered({ ...live, terminated: true }), "terminated");
+  assert(!releaseOffered({ ...live, releaseOk: true }), "released / acked by the bidder");
+  for (const phase of ["Released", "Releasing", "Pending"]) assert(!releaseOffered({ ...live, phase, release: true }), phase);
+  assert(!releaseOffered(withReleaseSent(live, T0)), "this tab's newer request is not seen yet");
+  assert(!releaseOffered({ ...live, release: true, releaseRequestedAt: T0 }), "a request is pending (unanswered)");
+  const failedRelease = { ...live, release: true, releaseFailed: true, releaseRequestedAt: T0, releaseAnsweredAt: T0 };
+  assert(canReleaseAgain(failedRelease) && !releaseOffered(failedRelease), "a failed release offers Release again instead");
+  // still offered once the earlier request is answered and the guest may still run
+  assert(releaseOffered({ ...live, release: true, releaseRequestedAt: T0, releaseAnsweredAt: T0 }), "answered, guest still live");
+  assert(releaseOffered({ name: "c", phase: "Held" }) && !releaseOffered({ name: "c", phase: "Held", release: true }), "active as before");
+
+  // the newer stamp it sends shows as pending (the requester restarts it) until answered
+  const sent = withReleaseSent(live, T0);
+  assert(releasePending(sent) && phaseLabel(sent).text === ` Releasing · release requested ${T0}`, phaseLabel(sent).text);
+  assert(!releasePending({ ...sent, receiptOk: false }), "no receipt and no ReleaseFailed: the requester does not restart it");
+  assert(!releasePending({ ...sent, releaseAnsweredAt: T0 }), "answered");
+
+  // an ownerless one releases with the rc127 apply
+  const k = fakeKcp({ metadata: { name: "c" }, spec: {} });
+  await requestRelease({ rest: k.rest, api: API, name: "c", now: new Date(T0) });
+  assert(k.writes().length === 1 && k.writes()[0].body.spec.release === true, JSON.stringify(k.writes()));
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  assert(/if \(vmshell\.releaseOffered\(contract\) && !computeReleaseAsked\.has\(name\)\)/.test(app), "the row's Release button uses releaseOffered");
+});
+Deno.test("composeInfra: a migrated infra is taken over and Go-http-client's co-ownership dropped before a prune", async () => {
+  const goOwns = { manager: "Go-http-client", operation: "Update", fieldsV1: { "f:spec": { "f:contracts": {},
+    "f:secrets": { "k:{\"contract\":\"vmshell-ab\"}": {}, "k:{\"contract\":\"vmshell-zz\"}": {} } } } };
+  const ctrl = { manager: "socialweb.computer/ephemeralinfra", operation: "Update", fieldsV1: { "f:status": {} } };
+  const pageApply = { manager: "socialweb.computer/page", operation: "Apply", fieldsV1: { "f:spec": { "f:contracts": {} } } };
+  assert(JSON.stringify(staleSpecOwners({ metadata: { managedFields: [goOwns, ctrl, pageApply] } })) === JSON.stringify([goOwns]), "Go-http-client only");
+  const created = { manager: "socialweb.computer/page", operation: "Update", fieldsV1: { "f:spec": { "f:record": {} } } };
+  assert(staleSpecOwners({ metadata: { managedFields: [created, ctrl] } }).length === 1, "the create POST's Update entry too");
+  assert(staleSpecOwners({ metadata: { managedFields: [ctrl, pageApply] } }).length === 0, "nothing stale");
+  const patch = dropOwnersPatch({ metadata: { resourceVersion: "9", managedFields: [pageApply, goOwns, ctrl] } }, [goOwns]);
+  assert(JSON.stringify(patch) === JSON.stringify([{ op: "test", path: "/metadata/resourceVersion", value: "9" },
+    { op: "replace", path: "/metadata/managedFields", value: [pageApply, ctrl] }]), JSON.stringify(patch));
+
+  const infra = sessionInfra();
+  infra.spec.secrets.push({ contract: "vmshell-zz", secretsRef: { mount: "m", path: "z" } });
+  infra.metadata.managedFields = [goOwns, ctrl];
+  const calls = [];
+  const rest = (method, path, body, contentType) => {
+    calls.push({ method, path, contentType, body: structuredClone(body) });
+    if (method === "GET") return Promise.resolve(structuredClone(infra));
+    const bump = () => infra.metadata.resourceVersion = String(Number(infra.metadata.resourceVersion) + 1);
+    if (contentType === "application/json-patch+json") {
+      if (body[0].value !== infra.metadata.resourceVersion) return Promise.reject(Object.assign(new Error("422"), { status: 422 }));
+      infra.metadata.managedFields = body[1].value;
+      bump();
+      return Promise.resolve(structuredClone(infra));
+    }
+    if (body.metadata.resourceVersion !== infra.metadata.resourceVersion) return Promise.reject(Object.assign(new Error("409"), { status: 409 }));
+    const kept = Object.fromEntries(Object.entries(infra.spec).filter(([field]) => !INFRA_PAGE_FIELDS.includes(field)));
+    infra.spec = { ...kept, ...structuredClone(body.spec) };
+    infra.metadata.managedFields = [pageApply, ...infra.metadata.managedFields.filter((m) => m !== pageApply && m.manager !== "socialweb.computer/page")];
+    bump();
+    return Promise.resolve(structuredClone(infra));
+  };
+  // a prune: drop vmshell-zz's entry and secret
+  await composeInfra({ rest, api: API, infra: "t", update: (spec) => ({ ...spec,
+    contracts: spec.contracts.filter((c) => c.name !== "vmshell-zz"), secrets: spec.secrets.filter((x) => x.contract !== "vmshell-zz") }) });
+  const writes = calls.filter((c) => c.method !== "GET");
+  assert(JSON.stringify(writes.map((w) => w.contentType)) ===
+    '["application/apply-patch+yaml","application/json-patch+json","application/apply-patch+yaml"]', JSON.stringify(writes.map((w) => w.contentType)));
+  assert(writes[0].body.spec.secrets.length === 2 && writes[0].body.spec.contracts.length === 2, "the takeover applies the spec as read");
+  assert(writes[1].path === `${API}/ephemeralinfras/t?fieldManager=socialweb.computer%2Fpage`, writes[1].path);
+  assert(writes[1].body[1].value.every((m) => m.manager !== "Go-http-client"), "Go-http-client dropped");
+  assert(writes[2].body.metadata.resourceVersion === infra.metadata.resourceVersion.replace(/\d+/, (n) => String(Number(n) - 1)), "the prune read again");
+  assert(writes[2].body.spec.secrets.length === 1 && writes[2].body.spec.contracts.length === 1, "the prune applied");
+  assert(staleSpecOwners(infra).length === 0, "nothing stale left");
+
+  // nothing stale: one apply, no takeover
+  calls.length = 0;
+  await composeInfra({ rest, api: API, infra: "t", update: (spec) => spec });
+  assert(calls.filter((c) => c.method !== "GET").length === 1, "one apply");
+});
+
+Deno.test("createInfra: POST if absent; a 409 reads and re-applies the full spec with its resourceVersion", async () => {
+  const spec = sessionInfraManifest("t", undefined, { repoRef: { name: "r" }, direction: "Publish" }).spec;
+  const calls = [];
+  const absent = (method, path, body, contentType) => {
+    calls.push({ method, path, body, contentType });
+    return Promise.resolve({ metadata: { name: "t" }, spec: body.spec });
+  };
+  await createInfra({ rest: absent, api: API, name: "t", spec });
+  assert(calls.length === 1 && calls[0].method === "POST" &&
+    calls[0].path === `${API}/ephemeralinfras?fieldManager=socialweb.computer%2Fpage` && calls[0].body.metadata.name === "t" &&
+    JSON.stringify(calls[0].body.spec) === JSON.stringify(spec), JSON.stringify(calls));
+
+  // it exists (another tab of this kcp, a restored snapshot): its entries survive
+  const infra = sessionInfra();
+  const k = fakeKcp(null, infra);
+  const exists = (method, path, body, contentType) => method === "POST"
+    ? (k.calls.push({ method, path, body, contentType }), Promise.reject(Object.assign(new Error("POST: 409 AlreadyExists"), { status: 409 })))
+    : k.rest(method, path, body, contentType);
+  await createInfra({ rest: exists, api: API, name: "t", spec });
+  const writes = k.writes();
+  assert(writes.length === 2 && writes[0].method === "POST" && writes[1].path === INFRA_APPLY_PATH, JSON.stringify(writes.map((w) => w.method + " " + w.path)));
+  assert(writes[1].body.metadata.resourceVersion === "7", "applied with the resourceVersion read");
+  assert(writes[1].body.spec.contracts.length === 2 && infra.spec.contracts.length === 2 && infra.spec.secrets.length === 1,
+    "never contracts: [] over existing entries");
+  assert(k.writes().every((w) => w.method !== "PATCH" || w.body.metadata.resourceVersion), "no apply without a resourceVersion");
+
+  let failed = "";
+  await createInfra({ rest: () => Promise.reject(Object.assign(new Error("POST: 403"), { status: 403 })), api: API, name: "t", spec })
+    .catch((err) => failed = err.message);
+  assert(failed === "POST: 403", failed);
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  assert(/infraQueued\(\(\) => vmshell\.createInfra\(/.test(app) && !/vmshell\.infraApply\(/.test(app), "sessionInfra creates with createInfra only");
+});
+
+Deno.test("release: until the contract carries this tab's stamp the row says release requested", () => {
+  const t1 = "2026-10-30T11:00:00.000Z", t2 = "2026-10-30T12:00:00.000Z";
+  const held = { name: "c", phase: "Held" };
+  const sent = withReleaseSent(held, t2);
+  assert(sent.release && sent.releaseRequestedAt === t2 && !isActive(sent) && releaseWorkPending(sent), JSON.stringify(sent));
+  assert(phaseLabel(sent).text === " Held · releasing", phaseLabel(sent).text);
+  assert(withReleaseSent(held, "") === held && withReleaseSent(held) === held, "nothing sent");
+  const copied = { ...held, release: true, releaseRequestedAt: t2 };
+  assert(withReleaseSent(copied, t2) === copied, "the controller copied it: the feed is current");
+  const released = { name: "c", phase: "Released", release: true, releaseRequestedAt: t1 };
+  assert(withReleaseSent(released, t2) === released, "Released stays Released");
+
+  // Release again on a release that timed out: the old timeout is not shown meanwhile
+  const timedOut = { name: "c", phase: "Failed", release: true, releaseFailed: true, releaseFailedReason: "ReleaseBound",
+    releaseRequestedAt: t1, releaseAnsweredAt: t1, message: "release bound passed" };
+  const again = withReleaseSent(timedOut, t2);
+  const label = phaseLabel(again);
+  assert(label.phase === "Releasing" && label.text === ` Releasing · release requested ${t2}`, JSON.stringify(label));
+  assert(!releaseTimedOut(again) && !canReleaseAgain(again, t2) && releaseWorkPending(again), "no timeout, no button, pending");
+  assert(releaseNotes(again)[0] === `release: requested ${t2}, pending (the earlier release failed: release bound passed)`, releaseNotes(again)[0]);
+  // the controller copied it, the requester has not answered yet
+  const copiedAgain = { ...timedOut, releaseRequestedAt: t2 };
+  assert(phaseLabel(withReleaseSent(copiedAgain, t2)).text === ` Releasing · release requested ${t2}`, "still requested");
+  // answered: the new outcome shows
+  const answeredAgain = { ...timedOut, releaseRequestedAt: t2, releaseAnsweredAt: t2 };
+  assert(phaseLabel(withReleaseSent(answeredAgain, t2)).text === " Failed · release timed out", "the new answer timed out too");
+});
+
+Deno.test("release: a ReleaseBound failure that answers the latest request says timed out and offers Release again", () => {
+  const t1 = "2026-10-30T11:00:00.000Z", t2 = "2026-10-30T12:00:00.000Z";
+  const timedOut = { name: "c", phase: "Failed", release: true, releaseFailed: true, releaseFailedReason: "ReleaseBound",
+    releaseRequestedAt: t1, releaseAnsweredAt: t1 };
+  assert(releaseTimedOut(timedOut), "timed out");
+  const label = phaseLabel(timedOut);
+  assert(label.phase === "Failed" && label.text === " Failed · release timed out", JSON.stringify(label));
+  assert(canReleaseAgain(timedOut) && canReleaseAgain(timedOut, t1), "Release again offered");
+  assert(!canReleaseAgain(timedOut, t2), "not while this tab's newer request is unseen");
+  assert(!releaseTimedOut({ ...timedOut, releaseRequestedAt: t2 }), "a newer request is not answered by the timeout");
+  assert(!releaseTimedOut({ ...timedOut, releaseFailedReason: "DestroyFailed" }), "other reasons");
+  assert(phaseLabel({ ...timedOut, releaseFailedReason: "DestroyFailed" }).text === " Failed", "a destroy failure keeps the plain label");
+  assert(!releaseTimedOut({ ...timedOut, phase: "Released" }), "released");
 });
 
 Deno.test("release: status.release answers only the request whose requestedAt matches", () => {
@@ -545,10 +910,28 @@ Deno.test("release: Release again only on a failed release that answers the late
 Deno.test("release: every page release path goes through requestRelease", async () => {
   const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
   const demo = await Deno.readTextFile(new URL("../browser-demo.ts", import.meta.url));
-  assert(!/release:\s*true/.test(app), "app.js writes spec.release only through vmshell.requestRelease");
+  assert(!/release:\s*true/.test(app), "app.js never writes spec.release");
+  assert(!/computecontracts\/\$\{[^}]*\}\?fieldManager|apply-patch/.test(app), "app.js applies nothing to a ComputeContract");
   assert(/async function releaseContract\(name\) \{[\s\S]*?vmshell\.requestRelease\(/.test(app), "releaseContract uses requestRelease");
   assert(/release: \(name\) => releaseContract\(name\)/.test(app), "d.release is releaseContract");
   const callers = [...app.matchAll(/releaseContract\(name\)/g)].length;
   assert(callers === 4, `releaseContract callers (definition, Release, Release again, d.release): ${callers}`);
   assert(!/release:\s*true|merge-patch/.test(demo) && /d\.release\(/.test(demo), "the demo's leftover sweep uses d.release");
+});
+
+Deno.test("beforeunload: warns while release work runs in this tab", async () => {
+  assert(releaseWorkPending({ phase: "Held", release: true }), "release in progress");
+  assert(releaseWorkPending({ phase: "Released", atircRevokes: "Pending" }), "token revokes pending after Released");
+  assert(releaseWorkPending({ phase: "Failed", release: true, atircRevokes: "Pending" }), "token revokes pending after Failed");
+  assert(releaseWorkPending({ phase: "Releasing", step: "releasingGuestRequester" }), "R2 cascade waiting");
+  assert(releaseWorkPending({ name: "c", phase: "Failed", release: true, releaseFailed: true,
+    releaseRequestedAt: "2026-10-30T12:00:00.000Z", releaseAnsweredAt: "2026-10-30T11:00:00.000Z" }), "re-release pending");
+  assert(!releaseWorkPending({ phase: "Held" }), "a held VM");
+  assert(!releaseWorkPending({ phase: "Released", release: true, atircRevokes: "Done" }), "released, revokes done");
+  assert(!releaseWorkPending({ phase: "Failed", release: true, atircRevokes: "Abandoned" }), "abandoned: nothing left to run");
+  assert(!releaseWorkPending(null), "missing");
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  assert(/computeReleasing = seen\.some\(vmshell\.releaseWorkPending\)/.test(app), "beforeunload state uses releaseWorkPending");
+  assert(/const seen = contracts\.map\(\(c\) => vmshell\.withReleaseSent\(c, computeReleaseAsked\.get\(c\?\.name\)\)\)/.test(app),
+    "over the contracts as this tab sees them (a Release sent, not yet copied)");
 });

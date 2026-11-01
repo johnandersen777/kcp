@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-26.requesters.socialweb.computer
+  name: v1alpha1-27.requesters.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -621,6 +621,34 @@ spec:
                   - None
                   - Sealed
               atircParentRef:
+                type: object
+                properties:
+                  vault:
+                    type: object
+                    properties:
+                      group:
+                        type: string
+                      kind:
+                        type: string
+                        maxLength: 63
+                      name:
+                        type: string
+                        maxLength: 253
+                      workspace:
+                        type: string
+                    required:
+                      - kind
+                      - name
+                  mount:
+                    type: string
+                  path:
+                    type: string
+                  key:
+                    type: string
+                required:
+                  - mount
+                  - path
+              atircMintedRef:
                 type: object
                 properties:
                   vault:

@@ -70,12 +70,20 @@ type Contract struct {
 	// status.atircRevokes (Pending|Done|Abandoned), run before Released.
 	Step         string `json:"step,omitempty"`
 	AtircRevokes string `json:"atircRevokes,omitempty"`
+	// The parts of the requester's guestMayRun (runner.go), which r128
+	// 388ccee6 uses to re-release a Failed contract for a newer stamp:
+	// ReceiptOk is status.contract.receipt set with receiptOk true,
+	// Terminated is status.contract.termination set, ReleaseOk is
+	// status.contract.release.ok (the bidder acknowledged the release).
+	ReceiptOk  bool `json:"receiptOk,omitempty"`
+	Terminated bool `json:"terminated,omitempty"`
+	ReleaseOk  bool `json:"releaseOk,omitempty"`
 	// R2Release is status.contract.r2Release: the A8 cascade's guest answer
 	// (phase Requested|Released|Failed|TimedOut; ok is omitted when false).
 	R2Release *R2Release `json:"r2Release,omitempty"`
 
-	SecretsFetchedAt string    `json:"secretsFetchedAt,omitempty"`
-	Release          bool      `json:"release,omitempty"`
+	SecretsFetchedAt string `json:"secretsFetchedAt,omitempty"`
+	Release          bool   `json:"release,omitempty"`
 	// ReleaseRequestedAt is spec.releaseRequestedAt (computecontracts 30):
 	// the page sets it with spec.release on every Release.
 	ReleaseRequestedAt string `json:"releaseRequestedAt,omitempty"`
@@ -85,7 +93,10 @@ type Contract struct {
 	// ReleaseFailed is the ReleaseFailed condition being True: a newer
 	// releaseRequestedAt restarts that release.
 	ReleaseFailed bool `json:"releaseFailed,omitempty"`
-	Networks         []Network `json:"networks,omitempty"`
+	// ReleaseFailedReason is that condition's reason (ReleaseBound: the
+	// requester gave up at its release bound; DestroyFailed).
+	ReleaseFailedReason string    `json:"releaseFailedReason,omitempty"`
+	Networks            []Network `json:"networks,omitempty"`
 	// HostKeys are status.contract.hostKeys as authorized_keys lines, the
 	// pins for the page's WebRTC SSH client.
 	HostKeys []string `json:"hostKeys,omitempty"`
@@ -357,6 +368,7 @@ func contract(u *unstructured.Unstructured) Contract {
 		cond, _ := raw.(map[string]any)
 		if cond["type"] == "ReleaseFailed" && cond["status"] == "True" {
 			c.ReleaseFailed = true
+			c.ReleaseFailedReason, _ = cond["reason"].(string)
 		}
 	}
 	_, c.Agent, _ = unstructured.NestedMap(u.Object, "spec", "agent")
@@ -364,6 +376,7 @@ func contract(u *unstructured.Unstructured) Contract {
 	c.FromGuest, _, _ = unstructured.NestedBool(u.Object, "spec", "association", "fromGuest")
 	c.Step, _, _ = unstructured.NestedString(u.Object, "status", "execution", "step")
 	c.AtircRevokes, _, _ = unstructured.NestedString(u.Object, "status", "atircRevokes")
+	c.ReceiptOk, c.Terminated, c.ReleaseOk = guestParts(u)
 	if rel, ok, _ := unstructured.NestedMap(u.Object, "status", "contract", "r2Release"); ok {
 		r := &R2Release{}
 		r.Phase, _ = rel["phase"].(string)
@@ -451,4 +464,16 @@ func policyEngine(u *unstructured.Unstructured) *Resource {
 		r.Message = notReady
 	}
 	return r
+}
+
+// guestParts reads the requester's guestMayRun inputs from the unstructured
+// status.contract: an ok receipt (receipt set, receiptOk true), a
+// termination, and a release answer with ok true.
+func guestParts(u *unstructured.Unstructured) (receiptOK, terminated, releaseOK bool) {
+	if _, ok, _ := unstructured.NestedMap(u.Object, "status", "contract", "receipt"); ok {
+		receiptOK, _, _ = unstructured.NestedBool(u.Object, "status", "contract", "receiptOk")
+	}
+	_, terminated, _ = unstructured.NestedFieldNoCopy(u.Object, "status", "contract", "termination")
+	releaseOK, _, _ = unstructured.NestedBool(u.Object, "status", "contract", "release", "ok")
+	return receiptOK, terminated, releaseOK
 }
