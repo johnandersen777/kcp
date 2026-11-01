@@ -407,8 +407,12 @@ Deno.test("A8 release notes: cascade wait, request phase and token revokes", () 
   const waiting = releaseNotes({ name: "c", phase: "Releasing", step: "releasingGuestRequester", atircRevokes: "Pending" }, [ev]);
   assert(waiting[0] === "R2 release: waiting for the guest requester to release its contracts (up to 24 min), request Published", waiting[0]);
   assert(waiting[1] === "tokens: revoking", waiting[1]);
-  const after = releaseNotes({ name: "c", phase: "Released", step: "released", atircRevokes: "Done" }, [ev]);
+  const minted = { type: "AtircTokenMinted", status: "True", reason: "Leased" };
+  const after = releaseNotes({ name: "c", phase: "Released", step: "released", atircRevokes: "Done", atircToken: minted }, [ev]);
   assert(after[0].startsWith("R2 release: asked (Published)") && after[1] === "tokens: revoked", after.join("|"));
+  // A contract that failed before any mint (no bids) does not claim a revoked token.
+  const never = releaseNotes({ name: "c", phase: "Failed", step: "failed", atircRevokes: "Done" });
+  assert(never.length === 1 && never[0] === "tokens: none minted", never.join("|"));
   assert(/ABANDONED/.test(releaseNotes({ name: "c", atircRevokes: "Abandoned" })[0]), "abandoned flagged");
   assert(releaseNotes({ name: "c", phase: "Held" }, [{ ...ev, contract: "other" }]).length === 0, "nothing for a plain contract");
 });
@@ -910,7 +914,7 @@ Deno.test("release: status.release answers only the request whose requestedAt ma
   const notes = releaseNotes({ ...pending, atircRevokes: "Abandoned" });
   assert(notes[0] === `release: requested ${t2}, pending (the earlier release failed: vm.delete was not acknowledged)`, notes[0]);
   assert(notes[1] === "tokens: revoke ABANDONED, revoke them by hand (earlier attempt)", notes[1]);
-  const current = releaseNotes({ ...failed, releaseRequestedAt: t1, releaseAnsweredAt: t1, atircRevokes: "Done" });
+  const current = releaseNotes({ ...failed, releaseRequestedAt: t1, releaseAnsweredAt: t1, atircRevokes: "Done", atircToken: { type: "AtircTokenMinted", status: "True" } });
   assert(current.length === 1 && current[0] === "tokens: revoked", current.join("|"));
 });
 

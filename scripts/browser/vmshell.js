@@ -730,7 +730,10 @@ export function releaseNotes(contract, contractEvents = [], now = Date.now()) {
     notes.push(`R2 release: asked (${asked.phase ?? "Pending"}); answered or ${R2_RELEASE_MINUTES} min bound passed`);
   }
   const revokes = { Pending: "tokens: revoking", Done: "tokens: revoked", Abandoned: "tokens: revoke ABANDONED, revoke them by hand" };
-  if (contract?.atircRevokes) notes.push(revokes[contract.atircRevokes] ?? `tokens: ${contract.atircRevokes}`);
+  // A contract that failed before any mint (no bids, no VM) still finishes
+  // its revoke step; "revoked" would claim a token that never existed.
+  if (contract?.atircRevokes === "Done" && !contract?.atircToken) notes.push("tokens: none minted");
+  else if (contract?.atircRevokes) notes.push(revokes[contract.atircRevokes] ?? `tokens: ${contract.atircRevokes}`);
   if (!releasePending(contract)) return notes;
   // The outcomes above answer an earlier Release; the requester restarts it.
   return [`release: requested ${contract.releaseRequestedAt}, pending (the earlier release failed${contract.message ? `: ${contract.message}` : ""})`,
