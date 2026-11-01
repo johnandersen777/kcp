@@ -12,6 +12,7 @@ import {
   infraContract,
   infraRecordBinding,
   infraRecordStale,
+  schemaHasGuestTools,
   infraRecordURI,
   infraRepoRef,
   originInfraName,
@@ -305,4 +306,24 @@ Deno.test("always-run/empty-policy-default-tangled-vouch: no manifest option dro
   for (const opts of [{}, { wootty: true }, { agent: true }, { association: "did:plc:x" }, { policy: "open" }, { ownerDid: "did:plc:me" }]) {
     assert(contractManifest({ name: "vmshell-p", ...opts }).spec.policy === "requester-tangled-vouch", JSON.stringify(opts));
   }
+});
+
+Deno.test("guest tools: on adds guestTools [socialweb-computer] to the template, policy kept", () => {
+  const m = contractManifest({ name: "vmshell-r2", guestTools: true });
+  assert(JSON.stringify(m.spec.guestTools) === '["socialweb-computer"]', "guestTools");
+  assert(m.spec.policy === "requester-tangled-vouch", "policy kept");
+  const out = infraContract({ infra: "s1", short: "r2", guestTools: true, agent: true });
+  assert(JSON.stringify(out.contract.guestTools) === '["socialweb-computer"]' && out.contract.policy === "requester-tangled-vouch", "template");
+  assert(addContract([], out.contract).contracts[0].guestTools.length === 1, "addContract accepts it");
+});
+
+Deno.test("guest tools: off sends no field", () => {
+  assert(contractManifest({ name: "vmshell-x" }).spec.guestTools === undefined, "default off");
+  assert(contractManifest({ name: "vmshell-x", guestTools: false }).spec.guestTools === undefined, "off");
+  assert(infraContract({ infra: "s1", short: "x" }).contract.guestTools === undefined, "template off");
+});
+
+Deno.test("schemaHasGuestTools reads spec.properties.guestTools", () => {
+  const schema = (props) => ({ spec: { versions: [{ schema: { properties: { spec: { properties: props } } } }] } });
+  assert(schemaHasGuestTools(schema({ guestTools: {} })) && !schemaHasGuestTools(schema({})) && !schemaHasGuestTools(null), "served");
 });

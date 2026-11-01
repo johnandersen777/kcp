@@ -22,6 +22,7 @@ export const SECRETS_MOUNT = "requester";
 // defaults contract.policy (socialweb requester.DefaultPolicyWorkflow); the
 // PolicyEngine runs it in the fenced browser sandbox (plan 0037).
 export const REQUESTER_POLICY = "requester-tangled-vouch";
+export const GUEST_TOOL = "socialweb-computer";
 
 /** The per-tab EphemeralInfra record lives long enough to outlast a page session. */
 export const ORIGIN_INFRA_TTL_SECONDS = 30 * 24 * 3600;
@@ -252,9 +253,9 @@ export function infraContractName(infra, short) {
  * the agent) for the VM short; cc is the ComputeContract name it becomes.
  * The template is the one contractManifest builds.
  */
-export function infraContract({ infra, short, wootty = false, agent = false, sshKeys = [], association = "" }) {
+export function infraContract({ infra, short, wootty = false, agent = false, sshKeys = [], association = "", guestTools = false }) {
   const cc = infraContractName(infra, short);
-  const { spec } = contractManifest({ name: cc, wootty, agent, sshKeys, association });
+  const { spec } = contractManifest({ name: cc, wootty, agent, sshKeys, association, guestTools });
   const { secretsRef, ...template } = spec;
   return {
     cc,
@@ -271,12 +272,15 @@ export function infraContract({ infra, short, wootty = false, agent = false, ssh
  * market.association for it; its ref file reaches the guest through the
  * secrets bundle, so it needs the secretsRef too.
  */
-export function contractManifest({ name, ownerDid, wootty = false, agent = false, sshKeys = [], association = "" }) {
+export function contractManifest({ name, ownerDid, wootty = false, agent = false, sshKeys = [], association = "", guestTools = false }) {
   // No bidderDids: the requester's discovery picks the bidders.
   const spec = { vmName: name, policy: REQUESTER_POLICY };
   spec.tunnels = [{ tag: SSH_TAG, port: 22, transport: "webrtc" }];
   if (wootty || agent || association) spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
   if (association) spec.association = { subject: association };
+  // R2: socialweb-computer in the guest (linux/amd64 bidders only; others
+  // fail their bid with GuestToolsUnserved).
+  if (guestTools) spec.guestTools = [GUEST_TOOL];
   if (agent) spec.agent = { envFile: ATIRC_ENV };
   if (wootty) {
     spec.tunnels.unshift({ tag: WOOTTY_TAG, port: WOOTTY_PORT, transport: "opentunnel", shell: { envFile: WOOTTY_ENV } });
@@ -300,6 +304,11 @@ export function schemaHasShell(schema) {
 /** True when an APIResourceSchema's ComputeContract has spec.agent (plan 0035). */
 export function schemaHasAgent(schema) {
   return (schema?.spec?.versions ?? []).some((v) => v.schema?.properties?.spec?.properties?.agent !== undefined);
+}
+
+/** True when an APIResourceSchema's ComputeContract has spec.guestTools (R2). */
+export function schemaHasGuestTools(schema) {
+  return (schema?.spec?.versions ?? []).some((v) => v.schema?.properties?.spec?.properties?.guestTools !== undefined);
 }
 
 /**

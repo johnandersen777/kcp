@@ -71,6 +71,19 @@ type Contract struct {
 	// Association is status.association.uri, the contract-scoped
 	// market.association the requester wrote (plan 0036 P1).
 	Association string `json:"association,omitempty"`
+	// AssociationMessage is status.associationMessage: why an association
+	// was not written (plan 0036 A5).
+	AssociationMessage string `json:"associationMessage,omitempty"`
+	// GuestRequester is status.contract.guestRequester: the DID the guest's
+	// socialweb-computer (R2) reported and whether the requester verified it.
+	GuestRequester *GuestRequester `json:"guestRequester,omitempty"`
+}
+
+// GuestRequester is the R2 guest's reported requester DID.
+type GuestRequester struct {
+	DID     string `json:"did"`
+	State   string `json:"state,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // Network is one tagged guest address from status.contract.networks (plan
@@ -296,6 +309,15 @@ func contract(u *unstructured.Unstructured) Contract {
 	}
 	c.SecretsFetchedAt, _, _ = unstructured.NestedString(u.Object, "status", "secretsFetchedAt")
 	c.Association, _, _ = unstructured.NestedString(u.Object, "status", "association", "uri")
+	c.AssociationMessage, _, _ = unstructured.NestedString(u.Object, "status", "associationMessage")
+	if gr, ok, _ := unstructured.NestedMap(u.Object, "status", "contract", "guestRequester"); ok {
+		did, _ := gr["did"].(string)
+		state, _ := gr["state"].(string)
+		message, _ := gr["message"].(string)
+		if did != "" {
+			c.GuestRequester = &GuestRequester{DID: did, State: state, Message: message}
+		}
+	}
 	c.Release, _, _ = unstructured.NestedBool(u.Object, "spec", "release")
 	_, c.Agent, _ = unstructured.NestedMap(u.Object, "spec", "agent")
 	networks, _, _ := unstructured.NestedSlice(u.Object, "status", "contract", "networks")
