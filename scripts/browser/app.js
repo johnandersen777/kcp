@@ -781,8 +781,12 @@ async function yieldKcp(why) {
       const flushed = await flushKcpWorker(worker);
       addLog(flushed ? "info" : "warn", flushed ? "kcp writes flushed for the other tab" : "kcp flush unanswered; saving what arrived");
     }
-    await kcpPersistQueue;
-    await persister.flushAll();
+    // Forced meanwhile (kcpLock state "stolen"): the new owner's state must
+    // not be written over.
+    if (kcpStateOwned()) {
+      await kcpPersistQueue;
+      await persister.flushAll();
+    }
   }
   persister.stop();
   worker?.terminate();

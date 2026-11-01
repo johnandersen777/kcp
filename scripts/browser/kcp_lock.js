@@ -100,8 +100,14 @@ export function createKcpLock({
           reject(err);
           return;
         }
-        // Stolen by a forced take over in another tab.
-        if (err?.name === "AbortError" && state === "held") void yieldLock("stolen");
+        // Stolen by a forced take over in another tab. A take over already
+        // flushing (stuck, which is why it was forced) must stop writing now.
+        if (err?.name !== "AbortError") return;
+        if (state === "held") void yieldLock("stolen");
+        else if (state === "yielding") {
+          state = "stolen";
+          log("warn", "kcp lock was taken by force while handing over; not saving any more");
+        }
       });
     });
   }
@@ -123,7 +129,7 @@ export function createKcpLock({
      * "no-answer" when nothing acknowledged within ackMs, or "timeout" when
      * the holder acknowledged but did not release within releaseMs.
      */
-    async takeover({ ackMs = 5000, releaseMs = 60_000 } = {}) {
+    async takeover({ ackMs = 5000, releaseMs = 15_000 } = {}) {
       if (!locks) return "unsupported";
       const ch = ensureChannel();
       const controller = new AbortController();
