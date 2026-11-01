@@ -2380,6 +2380,20 @@ computeAgentEl.checked = localStorage.getItem("socialweb.compute.agent") !== "0"
 computeAgentEl.addEventListener("change", () => {
   localStorage.setItem("socialweb.compute.agent", computeAgentEl.checked ? "1" : "0");
 });
+// Associate DID (plan 0036 P1): optional, remembered per viewer.
+const computeAssociateEl = document.getElementById("compute-associate");
+try {
+  computeAssociateEl.value = localStorage.getItem("socialweb.compute.associate") ?? "";
+} catch {
+  // no localStorage: the field starts empty
+}
+computeAssociateEl.addEventListener("change", () => {
+  try {
+    localStorage.setItem("socialweb.compute.associate", computeAssociateEl.value.trim());
+  } catch {
+    // not remembered
+  }
+});
 const toastEl = document.getElementById("toast");
 const computePrefs = {
   token: (name) => `socialweb.vmshell.token.${name}`,
@@ -2598,6 +2612,11 @@ async function markFinishedInfraContracts(contracts) {
 }
 
 async function requestVM() {
+  const association = vmshell.associationSubject(computeAssociateEl.value, identityState?.did ?? "");
+  if (association.error) {
+    setAppStatus(computeStatusEl, association.error, "err");
+    return;
+  }
   try {
     computeBusy = true;
     computeRequestEl.disabled = true;
@@ -2608,13 +2627,14 @@ async function requestVM() {
     const wootty = await woottyServed();
     const agent = computeAgentEl.checked && await agentServed();
     const shells = (wootty ? "ssh over WebRTC and wootty" : "ssh over WebRTC (no wootty in this socialweb)") +
-      (agent ? ", and the atirc agent" : "");
+      (agent ? ", and the atirc agent" : "") + (association.subject ? `, associated with ${association.subject}` : "");
     addLog("info", `requesting ComputeContract ${name} from discovered bidders with ${shells}`);
     const key = await webrtcGuest.newSSHKey();
     await webrtcGuest.saveSSHKey(name, key);
     sshKeys.unshift(key.authorized);
     localStorage.setItem(computePrefs.transport(name), "webrtc");
-    if (wootty || agent) {
+    // The association ref file reaches the guest through the same bundle.
+    if (wootty || agent || association.subject) {
       const woottyToken = wootty ? vmshell.randomToken() : "";
       if (woottyToken) localStorage.setItem(computePrefs.token(name), woottyToken);
       // The requester reads the bundle once and fails a contract whose
@@ -2626,7 +2646,7 @@ async function requestVM() {
         bundle: vmshell.secretsBundle({ woottyToken, agent }),
       });
     }
-    const { contract, secret } = vmshell.infraContract({ infra: infraName, short, wootty, agent, sshKeys });
+    const { contract, secret } = vmshell.infraContract({ infra: infraName, short, wootty, agent, sshKeys, association: association.subject });
     await setInfraContract(infraName, contract, secret);
     setAppStatus(computeStatusEl, `${name} requested; waiting for bids`, "ok");
     addLog("ok", `ComputeContract ${name} requested from discovered bidders with ${shells}`);
@@ -2700,6 +2720,7 @@ function computeRow(contract) {
   detail.className = "detail";
   detail.textContent = [
     contract.chosenDid ? `bidder ${contract.chosenDid}` : "",
+    contract.association ? `Associated ${contract.association}` : "",
     contract.secretsFetchedAt ? `secrets fetched ${contract.secretsFetchedAt}` : "",
     contract.message ?? "",
   ].filter(Boolean).join(" · ");

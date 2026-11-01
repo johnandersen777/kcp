@@ -198,6 +198,18 @@ export function sessionInfraManifest(name, ttlSeconds = ORIGIN_INFRA_TTL_SECONDS
   };
 }
 
+/**
+ * The Associate DID input: "" (no association) or a did:plc:/did:web: DID
+ * other than the signed-in identity's own (the requester refuses those too).
+ */
+export function associationSubject(text, selfDid = "") {
+  const subject = String(text ?? "").trim();
+  if (!subject) return { subject: "" };
+  if (!/^did:(plc|web):[A-Za-z0-9._:%-]+$/.test(subject)) return { error: "Associate DID: enter a did:plc: or did:web: DID" };
+  if (subject === selfDid) return { error: "Associate DID: that is your own DID" };
+  return { subject };
+}
+
 /** The ComputeContract the infra controller creates for contract short in infra. */
 export function infraContractName(infra, short) {
   return `einfra-${infra}-${short}`;
@@ -208,9 +220,9 @@ export function infraContractName(infra, short) {
  * the agent) for the VM short; cc is the ComputeContract name it becomes.
  * The template is the one contractManifest builds.
  */
-export function infraContract({ infra, short, wootty = false, agent = false, sshKeys = [] }) {
+export function infraContract({ infra, short, wootty = false, agent = false, sshKeys = [], association = "" }) {
   const cc = infraContractName(infra, short);
-  const { spec } = contractManifest({ name: cc, wootty, agent, sshKeys });
+  const { spec } = contractManifest({ name: cc, wootty, agent, sshKeys, association });
   const { secretsRef, ...template } = spec;
   return {
     cc,
@@ -222,13 +234,17 @@ export function infraContract({ infra, short, wootty = false, agent = false, ssh
 /**
  * A ComputeContract for the page: the webrtc ssh tunnel (sshKeys must hold
  * the page's key), with wootty the opentunnel wootty tunnel, with agent the
- * atirc agent, and with either the secretsRef of their bundle.
+ * atirc agent, and with either the secretsRef of their bundle. association
+ * (a DID, plan 0036 P1) has the requester write a contract-scoped
+ * market.association for it; its ref file reaches the guest through the
+ * secrets bundle, so it needs the secretsRef too.
  */
-export function contractManifest({ name, ownerDid, wootty = false, agent = false, sshKeys = [] }) {
+export function contractManifest({ name, ownerDid, wootty = false, agent = false, sshKeys = [], association = "" }) {
   // No bidderDids: the requester's discovery picks the bidders.
   const spec = { vmName: name, policy: REQUESTER_POLICY };
   spec.tunnels = [{ tag: SSH_TAG, port: 22, transport: "webrtc" }];
-  if (wootty || agent) spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
+  if (wootty || agent || association) spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
+  if (association) spec.association = { subject: association };
   if (agent) spec.agent = { envFile: ATIRC_ENV };
   if (wootty) {
     spec.tunnels.unshift({ tag: WOOTTY_TAG, port: WOOTTY_PORT, transport: "opentunnel", shell: { envFile: WOOTTY_ENV } });

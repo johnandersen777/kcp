@@ -381,6 +381,9 @@
           <input id="compute-agent" type="checkbox" checked>
           <a href="https://irc.fedfork.com" target="_blank" rel="noopener">set up your agent</a>
         </label>
+        <label><span>Associate DID</span>
+          <input id="compute-associate" type="text" placeholder="optional: did:plc:… to associate with the VM" autocomplete="off" spellcheck="false">
+        </label>
         <button id="compute-request" type="button" disabled>Request VM</button>
         <button id="compute-testpeer" type="button" hidden>Connect test peer</button>
         <div id="compute-status" class="app-status">sign in to request a VM</div>

@@ -4,6 +4,7 @@
 import {
   ORIGIN_INFRA_TTL_SECONDS,
   addContract,
+  associationSubject,
   contractManifest,
   contractName,
   finishedInfraContracts,
@@ -223,4 +224,31 @@ Deno.test("finishedInfraContracts marks only terminal requested entries", () => 
   ];
   const done = finishedInfraContracts(infra, contracts);
   assert(done.length === 1 && done[0].name === "vmshell-a", JSON.stringify(done));
+});
+
+Deno.test("association: a subject goes on the template with a secretsRef, even without the agent", () => {
+  const did = "did:plc:ewvi7nxzyoun6zhxrhs64oiz";
+  const m = contractManifest({ name: "vmshell-assoc1", association: did });
+  assert(JSON.stringify(m.spec.association) === JSON.stringify({ subject: did }), "association, refFile left to socialweb");
+  assert(m.spec.secretsRef?.path === "contracts/vmshell-assoc1/secrets" && m.spec.agent === undefined, "secretsRef without the agent");
+  const out = infraContract({ infra: "s1", short: "z", association: did });
+  assert(out.contract.association?.subject === did && out.contract.secretsRef === undefined, "template carries it");
+  assert(out.secret?.secretsRef.path === "contracts/einfra-s1-z/secrets", "secrets entry for the ref file");
+});
+
+Deno.test("association: none means no field and no secretsRef", () => {
+  const m = contractManifest({ name: "vmshell-plain1" });
+  assert(m.spec.association === undefined && m.spec.secretsRef === undefined, "no association, no secretsRef");
+  assert(infraContract({ infra: "s1", short: "p" }).contract.association === undefined, "template without it");
+});
+
+Deno.test("associationSubject: empty, valid, invalid and own DID", () => {
+  const self = "did:plc:lpfuqerea3deuoyrn7ojser4";
+  assert(associationSubject("  ", self).subject === "" && !associationSubject("", self).error, "empty is no association");
+  assert(associationSubject(" did:plc:ewvi7nxzyoun6zhxrhs64oiz ", self).subject === "did:plc:ewvi7nxzyoun6zhxrhs64oiz", "plc, trimmed");
+  assert(associationSubject("did:web:example.com", self).subject === "did:web:example.com", "web");
+  for (const bad of ["alice.bsky.social", "did:key:z6Mk", "did:plc:", "did:plc:a b", "at://did:plc:x/c/k"]) {
+    assert(associationSubject(bad, self).error, `rejects ${bad}`);
+  }
+  assert(/own DID/.test(associationSubject(self, self).error), "own DID rejected");
 });

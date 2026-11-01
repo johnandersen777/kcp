@@ -68,6 +68,9 @@ type Contract struct {
 	// HostKeys are status.contract.hostKeys as authorized_keys lines, the
 	// pins for the page's WebRTC SSH client.
 	HostKeys []string `json:"hostKeys,omitempty"`
+	// Association is status.association.uri, the contract-scoped
+	// market.association the requester wrote (plan 0036 P1).
+	Association string `json:"association,omitempty"`
 }
 
 // Network is one tagged guest address from status.contract.networks (plan
@@ -292,6 +295,7 @@ func contract(u *unstructured.Unstructured) Contract {
 		c.Bids = len(bids)
 	}
 	c.SecretsFetchedAt, _, _ = unstructured.NestedString(u.Object, "status", "secretsFetchedAt")
+	c.Association, _, _ = unstructured.NestedString(u.Object, "status", "association", "uri")
 	c.Release, _, _ = unstructured.NestedBool(u.Object, "spec", "release")
 	_, c.Agent, _ = unstructured.NestedMap(u.Object, "spec", "agent")
 	networks, _, _ := unstructured.NestedSlice(u.Object, "status", "contract", "networks")
