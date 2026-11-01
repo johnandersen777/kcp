@@ -314,6 +314,9 @@ func (s *Store) create(ctx context.Context, key string, obj runtime.Object, ttl 
 	s.mu.Unlock()
 
 	s.persist(snap)
+	if log := UpdateLog; log != nil {
+		log(ctx, key, true)
+	}
 	return stored, m, nil
 }
 
@@ -494,8 +497,8 @@ func (s *Store) guaranteedUpdate(
 	if exists && objectsEqual(orig, output) {
 		s.mu.Unlock()
 		countUpdate(key, false)
-		if log := NoopLog; log != nil {
-			log(ctx, key)
+		if log := UpdateLog; log != nil {
+			log(ctx, key, false)
 		}
 		return existing, m, nil
 	}
@@ -524,6 +527,9 @@ func (s *Store) guaranteedUpdate(
 	s.mu.Unlock()
 
 	s.persist(snap)
+	if log := UpdateLog; log != nil {
+		log(ctx, key, true)
+	}
 	return stored, m, nil
 }
 
@@ -578,6 +584,9 @@ func (s *Store) delete(ctx context.Context, key string, preconditions *kstorage.
 	s.mu.Unlock()
 
 	s.persist(snap)
+	if log := UpdateLog; log != nil {
+		log(ctx, key, true)
+	}
 	return obj, m, nil
 }
 
@@ -1173,10 +1182,11 @@ func countUpdate(key string, written bool) {
 	}
 }
 
-// NoopLog, when set (debug only, before the apiserver starts), is called
-// after every no-op update with its request context and key: which object a
-// controller keeps re-applying, and by which verb and user.
-var NoopLog func(ctx context.Context, key string)
+// UpdateLog, when set (debug only, before the apiserver starts), is called
+// after every update with its request context, key and whether it wrote:
+// which object a controller keeps re-applying, by which verb and user, and
+// which writes keep an idle page's persisted state moving.
+var UpdateLog func(ctx context.Context, key string, written bool)
 
 // TakeUpdateCounts returns and resets the counts: resource -> {written, noop}.
 func TakeUpdateCounts() map[string][2]int64 {
