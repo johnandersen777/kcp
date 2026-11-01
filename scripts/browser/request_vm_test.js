@@ -26,6 +26,7 @@ function page({ kcpUp = true, signedIn = "did:plc:alice" } = {}) {
     kcp: kcpUp,
     identity: signedIn,
     signingOut: false,
+    gen: 0, // identityGeneration
     disabled: false,
     statuses: [],
     logs: [],
@@ -42,7 +43,7 @@ function page({ kcpUp = true, signedIn = "did:plc:alice" } = {}) {
     },
     kcpUp: () => p.kcp,
     waitKcp: () => p.gate.wait(1000),
-    identityReadyFor: (did) => Boolean(did) && p.identity === did && !p.signingOut,
+    identityReadyFor: (did, gen) => Boolean(did) && p.identity === did && !p.signingOut && gen === p.gen,
     refresh: p.refresh,
     status: (text, kind) => p.statuses.push(`${kind}: ${text}`),
     log: (level, message) => p.logs.push(message),
@@ -50,6 +51,7 @@ function page({ kcpUp = true, signedIn = "did:plc:alice" } = {}) {
   p.click = (opts = {}) =>
     p.run({
       did: p.identity,
+      gen: p.gen,
       prepare: async () => opts.prepare ?? { subject: "" },
       request: async () => {
         if (opts.fail) throw new Error(opts.fail);
@@ -90,7 +92,7 @@ Deno.test("fix 2: a Sign out while the click waits for kcp creates nothing", asy
   assertEquals(p.requests, [], "no infra or contract");
   assertEquals(p.statuses.at(-1), "err: signed out while the request waited; sign in and request again");
   const other = page({ kcpUp: false });
-  const pending2 = other.run({ did: "did:plc:alice", prepare: async () => ({}), request: async () => true });
+  const pending2 = other.run({ did: "did:plc:alice", gen: other.gen, prepare: async () => ({}), request: async () => true });
   other.identity = "did:plc:bob"; // switched account meanwhile
   other.gate.open("worker");
   assertEquals(await pending2, "failed", "another DID");
@@ -100,8 +102,8 @@ Deno.test("fix 5: a fast double click starts one request", async () => {
   const p = page();
   let release;
   const slowPrepare = new Promise((r) => (release = r)); // guestToolsServed() awaiting
-  const first = p.run({ did: p.identity, prepare: () => slowPrepare, request: async () => (p.requests.push(1), true) });
-  const second = await p.run({ did: p.identity, prepare: async () => ({}), request: async () => (p.requests.push(2), true) });
+  const first = p.run({ did: p.identity, gen: p.gen, prepare: () => slowPrepare, request: async () => (p.requests.push(1), true) });
+  const second = await p.run({ did: p.identity, gen: p.gen, prepare: async () => ({}), request: async () => (p.requests.push(2), true) });
   assertEquals(second, "busy");
   release({ subject: "" });
   assertEquals(await first, "requested");
@@ -149,9 +151,9 @@ Deno.test("page wiring: fixes 1-5 and the flush ids", async () => {
   assert(prepare.indexOf("guestToolsServed()") > 0, "guestToolsServed is awaited inside prepare, after busy is set");
   // 2: the identity at click, after the gate, in sessionInfra and before the contract.
   assert(/signIn\.step !== "signingOut"/.test(app.slice(app.indexOf("function identityReadyFor"), app.indexOf("function identityReadyFor") + 300)), "signing out counts");
-  assert(/sessionInfra\(\(step\) => progress\(step\), did\)/.test(app), "sessionInfra gets the DID");
-  assert(/if \(expectDid && !identityReadyFor\(expectDid\)\) throw/.test(app), "sessionInfra checks it");
-  assert(/if \(!identityReadyFor\(did\)\) throw new Error\("signed out while the request ran; no contract was created"\);\s*progress\("creating the contract"\);/.test(app), "checked again before the contract");
+  assert(/sessionInfra\(\(step\) => progress\(step\), did, gen\)/.test(app), "sessionInfra gets the DID");
+  assert(/if \(expectDid && !identityReadyFor\(expectDid, expectGen\)\) throw/.test(app), "sessionInfra checks it");
+  assert(/if \(!identityReadyFor\(did, gen\)\) \{[\s\S]{0,400}throw new Error\("signed out while the request ran; no contract was created"\);\s*\}\s*progress\("creating the contract"\);/.test(app), "checked again before the contract");
   // 3: the ready flag after every listener.
   const init = app.slice(app.indexOf("function initSocialwebUI"), app.indexOf("// --- compute ---"));
   assert(init.indexOf("initComputeUI();") < init.indexOf("socialwebUIReady = true;"), "flag after initComputeUI");
@@ -163,4 +165,45 @@ Deno.test("page wiring: fixes 1-5 and the flush ids", async () => {
   const worker = await Deno.readTextFile(new URL("./kcp_worker.js", import.meta.url));
   assert(/type: "persist-flushed", id: flushId/.test(worker), "worker echoes the id");
   assert(/kcp did not finish starting in \$\{REQUEST_KCP_WAIT_MS \/ 60_000\} min; reload the page and request again/.test(app), "a softer message after 10 min");
+});
+
+// Re-review A: signIn.step "signingOut" shows only for GRACE_MS (15 s); the
+// identity generation, bumped on the tap, does not reset.
+Deno.test("fix A: a Sign out tapped while kcp boots for more than 15 s aborts the queued request", async () => {
+  const p = page({ kcpUp: false });
+  const pending = p.click();
+  await tick();
+  p.gen++; // signOutIdentity, synchronously on the tap
+  p.signingOut = true;
+  p.signingOut = false; // > 15 s later renderIdentity resets the step; still Ready (kcp not up)
+  p.gate.open("worker");
+  assertEquals(await pending, "failed");
+  assertEquals(p.requests, [], "nothing for the identity being signed out");
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  for (const fn of ["async function startSignIn", "async function signOutIdentity", "async function switchAccount"]) {
+    const body = app.slice(app.indexOf(fn), app.indexOf(fn) + 80);
+    assert(/\{\s*identityGeneration\+\+;/.test(body), `${fn} bumps the generation first`);
+  }
+  assert(/signIn\.step !== "signingOut" && gen === identityGeneration/.test(app), "identityReadyFor needs the generation unchanged");
+  assert(/const gen = identityGeneration;\s*return runRequest\(\{\s*did,\s*gen,/.test(app), "captured with the DID at click");
+  assert(/sessionInfra\(\(step\) => progress\(step\), did, gen\)/.test(app) && /identityReadyFor\(expectDid, expectGen\)/.test(app), "checked in sessionInfra");
+  assert(/socialwebCall\("socialwebSignOut", \{ workspace: "root", name: "requester" \}, 30_000, REQUEST_KCP_WAIT_MS\)/.test(app), "the sign out waits as long as the queued click");
+});
+
+Deno.test("fix B: after a take over the button stays disabled", async () => {
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  const rule = app.slice(app.indexOf("function computeRequestDisabled"), app.indexOf("function computeRequestDisabled") + 500);
+  assert(/kcpGate\.state === "failed"/.test(rule), "a failed kcp gate disables Request VM");
+});
+
+Deno.test("fix C: the last identity check runs before the key, tokens and vault are written", async () => {
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  const body = app.slice(app.indexOf("async function requestVMFor"), app.indexOf("async function requestVMFor") + 5000);
+  const check = body.indexOf('throw new Error("signed out while the request ran; nothing was created")');
+  assert(check > 0, "a check before the writes");
+  for (const write of ["webrtcGuest.newSSHKey()", "webrtcGuest.saveSSHKey(", "localStorage.setItem(computePrefs.transport", "socialwebVaultPut"]) {
+    assert(body.indexOf(write) > check, `${write} after the check`);
+  }
+  const last = body.slice(body.indexOf("if (!identityReadyFor(did, gen)) {"));
+  assert(/deleteSSHKey\(name\)[\s\S]{0,200}removeItem\(computePrefs\.transport\(name\)\)[\s\S]{0,100}removeItem\(computePrefs\.token\(name\)\)/.test(last), "a sign out in the last moments cleans up");
 });
