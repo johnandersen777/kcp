@@ -1024,6 +1024,7 @@ async function spawnKcp(useSnapshot = true) {
     initialState,
     hibernate,
     debugGo: localStorage.getItem("kcp.debugGo") !== "0",
+    noopLog: localStorage.getItem("kcp.noopLog") === "1",
     lowMemory,
     gogcReady: Number(localStorage.getItem("kcp.gogcReady")) || undefined,
     // Profiles only when served by the dev server (it answers HEAD

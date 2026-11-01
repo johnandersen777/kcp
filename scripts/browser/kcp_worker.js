@@ -244,6 +244,8 @@ if (init.lowMemory) {
 }
 // With the Go console forwarded (debug), log Go's memory stats every minute.
 if (init.debugGo) go.env = { ...go.env, KCP_MEMSTATS: "60" };
+// localStorage kcp.noopLog=1 (dev): one Go log line per no-op update.
+if (init.noopLog) go.env = { ...go.env, KCP_NOOP_LOG: "1" };
 // OAuth token refreshes (socialweb oauthclient TokenRefresher seam,
 // cmd/kcp-wasm/refresher_js.go): Go asks __kcpRefreshTokens(requestJSON) and
 // awaits the response JSON; the page relays to its refresh worker
