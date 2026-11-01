@@ -82,11 +82,6 @@ type Config struct {
 	// only, no ingress; the default) or Both (the ingress XRPC endpoints too).
 	CommsMode v1alpha1.MarketCommsMode
 
-	// RetentionMode opts the requester's record retention sweep in (DryRun
-	// or Delete, page localStorage socialweb.retention). Empty keeps it off:
-	// the sweep lists the whole repo, too much load for a phone tab.
-	RetentionMode v1alpha1.RetentionMode
-
 	// ForceApply re-applies every provider manifest set even when the snapshot
 	// already holds ready bindings. Dev loops leave it off; schema changes and
 	// first boots turn it on.
@@ -539,7 +534,6 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 			},
 			SecretsFallback: v1alpha1.SecretsFallbackSealed,
 			Components:      browserPolicySandbox(),
-			Retention:       pageRetention(cfg.RetentionMode),
 		},
 	}
 	obj.APIVersion = v1alpha1.GroupVersion.String()
@@ -552,15 +546,11 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 	if cur, err := kube.Get[v1alpha1.MarketRequester](ctx, kc.Resource(v1alpha1.MarketRequesterGVR), "app"); err == nil {
 		if cur.Spec.Comms != nil && cur.Spec.Comms.Mode == obj.Spec.Comms.Mode &&
 			cur.Spec.RequesterIngress != nil && cur.Spec.RequesterIngress.ProviderName() == v1alpha1.IngressProviderWebRTC &&
-			cur.Spec.SecretsFallback == obj.Spec.SecretsFallback && hasBrowserPolicySandbox(cur.Spec.Components) &&
-			sameRetention(cur.Spec.Retention, obj.Spec.Retention) {
+			cur.Spec.SecretsFallback == obj.Spec.SecretsFallback && hasBrowserPolicySandbox(cur.Spec.Components) {
 			return nil
 		}
-		// retention is the page's too: a tab restored from before the sweep
-		// existed has none, which the requester reads as DryRun 30/7 days.
-		// A merge patch replaces it whole (it carries every field it sets).
 		patch, err := json.Marshal(map[string]any{"spec": map[string]any{"comms": obj.Spec.Comms, "requesterIngress": obj.Spec.RequesterIngress,
-			"secretsFallback": obj.Spec.SecretsFallback, "components": obj.Spec.Components, "retention": retentionPatch(obj.Spec.Retention)}})
+			"secretsFallback": obj.Spec.SecretsFallback, "components": obj.Spec.Components}})
 		if err != nil {
 			return err
 		}
@@ -570,41 +560,6 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 	_, err = kube.Apply[*v1alpha1.MarketRequester](ctx, kc.Resource(v1alpha1.MarketRequesterGVR), obj,
 		kube.ApplyOptions{FieldManager: "socialweb-wasm", Force: true})
 	return err
-}
-
-// pageRetention is the app's spec.retention: off (days and infraDays 0)
-// unless the page opted in with a mode, then the requester's defaults for
-// that mode.
-func pageRetention(mode v1alpha1.RetentionMode) *v1alpha1.RequesterRetention {
-	switch mode {
-	case v1alpha1.RetentionModeDryRun, v1alpha1.RetentionModeDelete:
-		return &v1alpha1.RequesterRetention{Mode: mode}
-	}
-	off := int32(0)
-	return &v1alpha1.RequesterRetention{Days: &off, InfraDays: &off}
-}
-
-func sameRetention(a, b *v1alpha1.RequesterRetention) bool {
-	left, _ := json.Marshal(a)
-	right, _ := json.Marshal(b)
-	return string(left) == string(right)
-}
-
-// retentionPatch is r as a merge patch value: fields r leaves unset are sent
-// as null, so switching off -> DryRun drops the zero days instead of keeping
-// them.
-func retentionPatch(r *v1alpha1.RequesterRetention) map[string]any {
-	field := func(v *int32) any {
-		if v == nil {
-			return nil
-		}
-		return *v
-	}
-	mode := any(nil)
-	if r.Mode != "" {
-		mode = r.Mode
-	}
-	return map[string]any{"mode": mode, "days": field(r.Days), "infraDays": field(r.InfraDays), "delaySeconds": field(r.DelaySeconds), "keep": nil}
 }
 
 // policyEngineKey names the PolicyEngine the requester app composes.
