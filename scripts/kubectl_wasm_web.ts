@@ -187,6 +187,7 @@ const assets = new Map<string, string>([
   ["/vmshell.js", "vmshell.js"],
   ["/webrtc_guest.js", "webrtc_guest.js"],
   ["/webrtc_ingress.js", "webrtc_ingress.js"],
+  ["/policy_sandbox.js", "policy_sandbox.js"],
   ["/ssh_worker.js", "ssh_worker.js"],
   ["/ssh_cmd.js", "ssh_cmd.js"],
   ["/wasm_snapshot.js", "wasm_snapshot.js"],
@@ -304,6 +305,12 @@ Deno.serve({ hostname, port }, async (request) => {
   const url = new URL(request.url);
   const canonical = canonicalRedirect(request, url);
   if (canonical) return canonical;
+
+  // The fenced policy sandbox (opaque-origin frame, plan 0037) sends Origin:
+  // null: its code must not write the debug log or reach the control stream.
+  if (url.pathname.startsWith("/debug/") && request.headers.get("origin") === "null") {
+    return new Response("forbidden", { status: 403, headers });
+  }
 
   if (url.pathname === "/debug/control" && (request.method === "GET" || request.method === "HEAD")) {
     if (!debugControlPath) return new Response("debug control disabled", { status: 404, headers });

@@ -36,6 +36,7 @@ import * as webrtcGuest from "./webrtc_guest.js";
 import * as sshCmd from "./ssh_cmd.js";
 import { discardSnapshot } from "./kcp_hibernate.js";
 import { ControlStream, DebugLogSender } from "./debug_link.js";
+import { connectFrame, startFrame } from "./policy_sandbox.js";
 
 const config = await (await fetch("/config")).json();
 const apiServer = String(config.apiServer);
@@ -719,6 +720,19 @@ function oauthRefreshWorker() {
   return refreshWorker;
 }
 
+// One fenced policy sandbox frame per tab (policy_sandbox.js, plan 0037),
+// outliving kcp worker restarts; each kcp worker gets its own port. Without
+// it the PolicyEngine stays not Ready (no bridge) and policy denies.
+let policyFrame = null;
+function policySandboxFrame() {
+  policyFrame ??= startFrame().catch((err) => {
+    addLog("warn", `policy sandbox frame: ${err?.message ?? err}`);
+    policyFrame = null;
+    return null;
+  });
+  return policyFrame;
+}
+
 let devServerProbe = null;
 function devServer() {
   devServerProbe ??= fetch("/debug/control?session=probe", { method: "HEAD" }).then((r) => r.status === 204, () => false);
@@ -737,12 +751,14 @@ async function kcpBuildChanged() {
 
 async function spawnKcp(useSnapshot = true) {
   const spawnStarted = performance.now();
-  const [initialState, socialwebSnapshot, hibernate, buildChanged] = await Promise.all([
+  const [initialState, socialwebSnapshot, hibernate, buildChanged, sandboxFrame] = await Promise.all([
     loadKcpState(),
     loadInitialState(socialwebStateKey),
     hibernateInit(useSnapshot),
     kcpBuildChanged(),
+    policySandboxFrame(),
   ]);
+  const policySandboxPort = sandboxFrame ? connectFrame(sandboxFrame) : undefined;
   if (buildChanged && initialState) addLog("info", "kcp.wasm changed since the saved state; re-applying the socialweb manifests");
   const worker = new Worker("/kcp_worker.js", { type: "module" });
   attachKcp(worker);
@@ -776,7 +792,8 @@ async function spawnKcp(useSnapshot = true) {
       statusFeed: localStorage.getItem("socialweb.statusFeed") !== "0",
       restore: socialwebSnapshot,
     },
-  });
+    policySandboxPort,
+  }, policySandboxPort ? [policySandboxPort] : []);
   const ready = await readyPromise;
   if (ready?.restart) {
     worker.terminate();
@@ -2352,6 +2369,8 @@ const computeRequestEl = document.getElementById("compute-request");
 const computeStatusEl = document.getElementById("compute-status");
 const computeListEl = document.getElementById("compute-list");
 const vmshellIngressEl = document.getElementById("compute-ingress");
+const computePolicyEl = document.getElementById("compute-policy");
+let lastPolicySummary = "";
 const computeTestPeerEl = document.getElementById("compute-testpeer");
 // The atirc agent opt-in (plan 0035), on unless unchecked; shown once the
 // served ComputeContract schema has spec.agent.
@@ -3068,8 +3087,21 @@ async function runSsh(args, ctx) {
   });
 }
 
+// The PolicyEngine's fenced sandbox (plan 0037): Fenced and Ready come from
+// the resource (the probe's facts are the Fenced message).
+function renderPolicyEngine(engine) {
+  const fenced = engine?.fenced === "True";
+  const text = !engine ? "" : `policy sandbox: ${fenced ? "fenced" : "not fenced"}${engine.ready ? ", ready" : ""}` +
+    `${engine.message ? ` (${engine.message})` : ""}`;
+  if (text === lastPolicySummary) return;
+  lastPolicySummary = text;
+  setAppStatus(computePolicyEl, text, !engine ? "" : fenced && engine.ready ? "ok" : "warn");
+  if (engine) addLog("info", `PolicyEngine ${engine.name} ${engine.phase ?? "Pending"} ready=${Boolean(engine.ready)} fenced=${engine.fenced ?? "unset"}: ${engine.message ?? ""}`);
+}
+
 function applyComputeState(state) {
   lastFeedState = state;
+  renderPolicyEngine(state.policyEngine);
   for (const watcher of [...feedWatchers]) watcher(state);
   const contracts = state.contracts ?? [];
   void markFinishedInfraContracts(contracts);
