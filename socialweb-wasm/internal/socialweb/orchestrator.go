@@ -91,7 +91,10 @@ type Config struct {
 	Restore json.RawMessage
 
 	// OnSnapshot receives a fresh vault snapshot after every write or delete.
+	// It is never called when Restore is set but cannot be read.
 	OnSnapshot func([]byte)
+	// OnRestoreError receives why a non-empty Restore could not be read.
+	OnRestoreError func(error)
 
 	// IngressProxyHost is the xrpc-subscription relay ingress-mode Exposures
 	// register with (e.g. xrpc.fedproxy.com). Empty serves them on Origin.
@@ -210,16 +213,20 @@ func Start(parent context.Context, cfg Config) (*Orchestrator, error) {
 	}
 	// Restore before any controller reads the vault: MarketIdentity restores
 	// its OAuth session from it on the first reconcile.
-	if len(cfg.Restore) > 0 {
-		snapshot, err := ParseSnapshot(cfg.Restore)
-		if err != nil {
-			log.Warn("ignoring the restored socialweb snapshot", "err", err.Error())
-		} else {
-			vaultCtl.Restore(snapshot.Vault)
-			fmt.Fprintln(os.Stderr, "socialweb: restored browser vault")
+	// A saved snapshot that cannot be read fails closed: the vault starts
+	// empty and is never persisted, so nothing is saved over the stored one.
+	snapshot, persist, err := planRestore(cfg.Restore)
+	if err != nil {
+		log.Error("saved socialweb state could not be read; not saving over it", "err", err.Error())
+		fmt.Fprintln(os.Stderr, "socialweb: saved state could not be read; not saving over it:", err)
+		if cfg.OnRestoreError != nil {
+			cfg.OnRestoreError(err)
 		}
+	} else if snapshot != nil {
+		vaultCtl.Restore(snapshot.Vault)
+		fmt.Fprintln(os.Stderr, "socialweb: restored browser vault")
 	}
-	if cfg.OnSnapshot != nil {
+	if cfg.OnSnapshot != nil && persist {
 		vaultCtl.Provider().SetOnChange(func() {
 			raw, err := json.Marshal(Snapshot{Version: SnapshotVersion, Vault: vaultCtl.Snapshot()})
 			if err != nil {
