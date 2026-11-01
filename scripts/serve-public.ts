@@ -34,7 +34,8 @@ limitations under the License.
 // Must match atprotooauth.ScopeString(atprotooauth.RequesterOAuthScope) in
 // linux-kcp. The PDS rejects a token whose scope exceeds the client metadata.
 // guest.agentStart starts the per-VM atirc agent and chat.atirc.mint mints
-// its token (plan 0035).
+// its token (plan 0035). serve-public_test.ts checks it against a built
+// requester-scope.txt.
 export const REQUESTER_SCOPE = [
   "atproto",
   "repo:com.publicdomainrelay.temp.compute.vm?action=create&action=update",
@@ -47,10 +48,13 @@ export const REQUESTER_SCOPE = [
   "repo:com.publicdomainrelay.temp.compute.events.guest.signalWebRTC?action=create&action=update",
   "repo:com.publicdomainrelay.temp.compute.events.guest.secrets?action=create&action=update",
   "repo:com.publicdomainrelay.temp.compute.events.guest.agentStart?action=create&action=update",
+  "repo:com.publicdomainrelay.temp.compute.events.guest.secretsUpdated?action=create&action=update",
   "repo:computer.socialweb.temp.policy.ghalite?action=create&action=update",
   "repo:computer.socialweb.temp.policy.typescript?action=create&action=update",
   "repo:com.fedproxy.rbac?action=create&action=update&action=delete",
   "repo:com.publicdomainrelay.temp.badgeBlueKeys?action=create&action=update&action=delete",
+  "repo:com.publicdomainrelay.temp.market.association?action=create&action=update&action=delete",
+  "repo:com.publicdomainrelay.temp.market.associationRequest?action=create&action=update&action=delete",
   "repo:computer.socialweb.infra?action=create&action=update&action=delete",
   "repo:computer.socialweb.ephemeralInfra?action=create&action=update&action=delete",
   "rpc:com.publicdomainrelay.temp.market.submitRfp?aud=*",
