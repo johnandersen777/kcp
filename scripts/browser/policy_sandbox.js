@@ -33,8 +33,11 @@ function bootstrap(env, cap, program) {
   const out = { stdout: "", stderr: "" };
   let done = false;
   const decoder = new TextDecoder();
+  // Stack frames name their module URL, and the program's is a data: URL of
+  // its whole (spliced, possibly secret-bearing) source: never print one.
+  const scrub = (text) => String(text).replace(/data:text\/javascript,[^\s)'"]*/g, "policy-program.js");
   const write = (stream, text) => {
-    if (out[stream].length < cap) out[stream] = (out[stream] + text).slice(0, cap);
+    if (out[stream].length < cap) out[stream] = (out[stream] + scrub(text)).slice(0, cap);
   };
   const exit = (code = 0) => {
     if (done) return;
@@ -98,7 +101,8 @@ function bootstrap(env, cap, program) {
   // event, as deno does for its main module.
   // data:, not blob:: WebKit denies a module load of a blob: URL made in this
   // opaque-origin Worker as cross-origin (iOS WKWebView probe, plan 0038 I6).
-  const evaluated = import("data:text/javascript," + encodeURIComponent(program));
+  // sourceURL names the module in stack traces instead of its data: URL.
+  const evaluated = import("data:text/javascript," + encodeURIComponent(program + "\n//# sourceURL=policy-program.js\n"));
   evaluated.then(() => exit(0), (reason) => {
     const event = Object.assign(new Event("unhandledrejection", { cancelable: true }), { reason, promise: evaluated });
     dispatchEvent(event);
@@ -165,14 +169,23 @@ export default { resolveTxt, lookup, Resolver };`,
 // import() of one loads), so static forms turn into top-level awaits:
 // import d, { a, b as c } from "node:x" -> const { default: d, a, b: c } =
 // await import("data:..."); import * as ns from -> const ns = await import;
-// import "node:x" -> await import. Only node: specifiers are touched.
+// import "node:x" -> await import; export { a as b } from "node:x" -> const
+// { a: b } = await import; export { b }. export * from "node:x" cannot be
+// rewritten without a static import and fails with a clear error. Static
+// forms only match at the start of a line (bundlers emit them there; spliced
+// JSON data never starts one) and brace lists are bounded, so the scan stays
+// linear on hostile input (review page-rc134 F2, F4).
 function rewriteNodeImports(source) {
   const shim = (name) => JSON.stringify(nodeShim(name));
-  const fields = (named) => named.split(",").map((part) => part.trim()).filter(Boolean)
-    .map((part) => part.replace(/^([\w$]+)\s+as\s+([\w$]+)$/, "$1: $2")).join(", ");
+  const pairs = (named) => named.split(",").map((part) => part.trim()).filter(Boolean)
+    .map((part) => {
+      const m = part.match(/^([\w$]+)(?:\s+as\s+([\w$]+))?$/);
+      return m ? { from: m[1], to: m[2] ?? m[1] } : null;
+    });
+  const fields = (list) => list.map((p) => (p.from === p.to ? p.from : `${p.from}: ${p.to}`)).join(", ");
   return source
-    .replace(/\bimport\s+([\w$]+\s*,\s*)?(\*\s*as\s+[\w$]+|\{[^}]*\}|[\w$]+)\s*from\s*(["'])node:([\w/]+)\3\s*;?/g,
-      (_m, first, clause, _q, name) => {
+    .replace(/^import\s+([\w$]+\s*,\s*)?(\*\s*as\s+[\w$]+|\{[^}]{0,4096}\}|[\w$]+)\s*from\s*(["'])node:([\w/]+)\3\s*;?/gm,
+      (m, first, clause, _q, name) => {
         const def = first ? first.replace(/\s*,\s*$/, "") : "";
         const mod = `await import(${shim(name)})`;
         if (clause.startsWith("*")) {
@@ -180,12 +193,20 @@ function rewriteNodeImports(source) {
           return `const ${ns} = ${mod};` + (def ? ` const ${def} = ${ns}.default;` : "");
         }
         if (clause.startsWith("{")) {
-          const named = fields(clause.slice(1, -1));
-          return `const { ${[def && `default: ${def}`, named].filter(Boolean).join(", ")} } = ${mod};`;
+          const list = pairs(clause.slice(1, -1));
+          if (list.includes(null)) return m;
+          return `const { ${[def && `default: ${def}`, fields(list)].filter(Boolean).join(", ")} } = ${mod};`;
         }
         return `const { default: ${clause} } = ${mod};`;
       })
-    .replace(/\bimport\s*(["'])node:([\w/]+)\1\s*;?/g, (_m, _q, name) => `await import(${shim(name)});`)
+    .replace(/^export\s*\{([^}]{0,4096})\}\s*from\s*(["'])node:([\w/]+)\2\s*;?/gm, (m, named, _q, name) => {
+      const list = pairs(named);
+      if (list.includes(null)) return m;
+      return `const { ${fields(list)} } = await import(${shim(name)}); export { ${list.map((p) => p.to).join(", ")} };`;
+    })
+    .replace(/^export\s*\*\s*(?:as\s+[\w$]+\s*)?from\s*(["'])node:([\w/]+)\1\s*;?/gm, (_m, _q, name) =>
+      `throw new Error(${JSON.stringify(`export * from "node:${name}" is not supported in the browser policy sandbox`)});`)
+    .replace(/^import\s*(["'])node:([\w/]+)\1\s*;?/gm, (_m, _q, name) => `await import(${shim(name)});`)
     .replace(/(\bimport\s*\(\s*)(["'])node:([\w/]+)\2/g, (_m, head, _q, name) => head + shim(name));
 }
 
@@ -258,9 +279,9 @@ function relay(cap) {
   parent.postMessage({ type: "policy-sandbox-ready" }, "*");
 }
 
-// Defense in depth (the page has no CSP): scripts only inline (the relay),
-// data: (the per-run Worker, node shims) and blob: (the program, imported by
-// the Worker from a blob it creates); fetch only https.
+// Defense in depth (the page has no CSP): scripts only inline (the relay)
+// and data: (the per-run Worker, the program it imports, node shims); blob:
+// is no longer used by the sandbox itself; fetch only https.
 export const FRAME_CSP = "default-src 'none'; script-src 'unsafe-inline' blob: data:; worker-src data:; connect-src https:";
 
 export function frameSrcdoc(cap = OUTPUT_LIMIT) {

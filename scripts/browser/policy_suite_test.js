@@ -169,7 +169,7 @@ Deno.test("always-run/page/bundled actions keep no static node: or data: import 
   for (const name of ["policy-requester-tangled-vouch", "policy-requester-mutuals", "policy-bidder-mutuals"]) {
     const src = await Deno.readTextFile(new URL(`bundled-actions/tangy/${name}/dist/index.js`, mirror));
     const out = rewriteNodeImports(src);
-    const statics = [...out.matchAll(/\bimport\s*[\w${*][^;\n(]{0,200}?\bfrom\s*["'](node|data):/g), ...out.matchAll(/\bimport\s*["'](node|data):/g)];
+    const statics = [...out.matchAll(/\b(import|export)\s*[\w${*][^;\n(]{0,200}?\bfrom\s*["'](node|data):/g), ...out.matchAll(/\bimport\s*["'](node|data):/g)];
     if (statics.length) throw new Error(`${name}: static import left: ${statics[0][0].slice(0, 80)}`);
     if (/["']node:/.test(out)) throw new Error(`${name}: a node: specifier was not rewritten`);
   }

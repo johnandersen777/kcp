@@ -3,6 +3,30 @@
 
 import { connect, frameSrcdoc, policyEngineStatus, probe, rewriteNodeImports, runInWorker } from "./policy_sandbox.js";
 
+Deno.test("a throwing program prints no data: URL and none of its source", async () => {
+  // review page-rc134 F1: the program is a data: URL of its whole source
+  const r = await run(`const secret = "ghp_SECRET123"; JSON.parse("{bad");`);
+  eq(r.exitCode, 1, "throws");
+  eq(r.stderr.includes("data:"), false, `no data: URL in stderr: ${r.stderr.slice(0, 200)}`);
+  eq(r.stderr.includes("SECRET123") || r.stderr.includes("ghp_"), false, "no source text in stderr");
+  eq(r.stderr.includes("SyntaxError"), true, "the error itself is kept");
+});
+
+Deno.test("the node: rewrite stays linear and leaves spliced data alone", async () => {
+  // review page-rc134 F2/F4: hostile spliced JSON must not stall the frame or match
+  const hostile = "const data = " + JSON.stringify("import { ".repeat(40_000) + " x from 'node:crypto' import 'node:fs'") + ";";
+  const t0 = performance.now();
+  const out = rewriteNodeImports(hostile);
+  const ms = performance.now() - t0;
+  eq(ms < 200, true, `rewrite took ${ms.toFixed(0)} ms`);
+  eq(out, hostile, "string data is not rewritten");
+  // export forms (F3)
+  const ex = rewriteNodeImports(`export { Buffer as B } from "node:buffer";\nexport * from "node:crypto";`);
+  eq(ex.includes(`const { Buffer: B } = await import("data:text/javascript,`), true, "export named");
+  eq(ex.includes("export { B };"), true, "re-export binding");
+  eq(ex.includes(`is not supported in the browser policy sandbox`), true, "export * fails clearly");
+});
+
 function assert(cond, message) {
   if (!cond) throw new Error(message);
 }
