@@ -35,7 +35,9 @@ function bootstrap(env, cap, program) {
   const decoder = new TextDecoder();
   // Stack frames name their module URL, and the program's is a data: URL of
   // its whole (spliced, possibly secret-bearing) source: never print one.
-  const scrub = (text) => String(text).replace(/data:text\/javascript,[^\s)'"]*/g, "policy-program.js");
+  // \S+: encodeURIComponent leaves ( ) ' ! * ~ as they are, so stopping at
+  // any of them would print the rest of the source (re-check page-rc134).
+  const scrub = (text) => String(text).replace(/data:text\/javascript,\S+/g, "policy-program.js");
   const write = (stream, text) => {
     if (out[stream].length < cap) out[stream] = (out[stream] + scrub(text)).slice(0, cap);
   };

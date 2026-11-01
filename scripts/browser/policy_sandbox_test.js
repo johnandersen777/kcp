@@ -12,6 +12,12 @@ Deno.test("a throwing program prints no data: URL and none of its source", async
   eq(r.stderr.includes("SyntaxError"), true, "the error itself is kept");
 });
 
+Deno.test("the scrub removes a whole data: URL, ( ) and ' included", async () => {
+  // what an engine that ignores sourceURL would print
+  const r = await run(`console.error("at data:text/javascript," + encodeURIComponent("f(x); g('ghp_SECRET123')") + ":1:2 next");`);
+  eq(r.stderr, "at policy-program.js next\n", "scrubbed to the next space");
+});
+
 Deno.test("the node: rewrite stays linear and leaves spliced data alone", async () => {
   // review page-rc134 F2/F4: hostile spliced JSON must not stall the frame or match
   const hostile = "const data = " + JSON.stringify("import { ".repeat(40_000) + " x from 'node:crypto' import 'node:fs'") + ";";
