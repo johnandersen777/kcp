@@ -2834,7 +2834,8 @@ function agentAction(contract) {
 // The Start R2 button (plan 0036 A7): on a Held contract running R2 that
 // associates itself, an outbound guest.r2Start ContractEvent asks the guest's
 // socialweb-computer to start R2 (with the agent when the Agent box is
-// checked). Shown only once the served ContractEvent schema has the NSID.
+// checked). Shown only once the served ContractEvent schema has the NSID and
+// spec.r2Start (socialweb rc127).
 function r2Action(contract) {
   const name = contract.name;
   if (!r2StartServed || !vmshell.r2StartShown(contract) || computeReleaseAsked.has(name)) return [];
