@@ -18,6 +18,10 @@ export const WOOTTY_ENV = "/etc/wootty/wootty.env";
 export const ATIRC_ENV = "/etc/atirc/atirc.env";
 export const SSH_TAG = "ssh";
 export const SECRETS_MOUNT = "requester";
+// The requester policy on every page contract, as the CLI's `run request`
+// defaults contract.policy (socialweb requester.DefaultPolicyWorkflow); the
+// PolicyEngine runs it in the fenced browser sandbox (plan 0037).
+export const REQUESTER_POLICY = "requester-tangled-vouch";
 
 /** The per-tab EphemeralInfra record lives long enough to outlast a page session. */
 export const ORIGIN_INFRA_TTL_SECONDS = 30 * 24 * 3600;
@@ -222,7 +226,7 @@ export function infraContract({ infra, short, wootty = false, agent = false, ssh
  */
 export function contractManifest({ name, ownerDid, wootty = false, agent = false, sshKeys = [] }) {
   // No bidderDids: the requester's discovery picks the bidders.
-  const spec = { vmName: name };
+  const spec = { vmName: name, policy: REQUESTER_POLICY };
   spec.tunnels = [{ tag: SSH_TAG, port: 22, transport: "webrtc" }];
   if (wootty || agent) spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
   if (agent) spec.agent = { envFile: ATIRC_ENV };

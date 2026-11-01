@@ -50,6 +50,7 @@ Deno.test("manifest without wootty carries only the webrtc ssh tunnel", () => {
   assert(m.spec.secretsRef === undefined && m.spec.agent === undefined, "no secretsRef, no agent");
   assert(m.spec.sshAuthorizedKeys[0] === "ssh-ed25519 AAAA page" && m.spec.ttlSecondsAfterFinished === undefined, "keys, no ttl");
   assert(m.spec.ownerDid === "did:plc:me" && m.spec.userData === undefined, "owner, no userData");
+  assert(m.spec.policy === "requester-tangled-vouch", "requester policy");
 });
 
 Deno.test("manifest with wootty carries both tunnels and the secretsRef", () => {
@@ -138,6 +139,7 @@ Deno.test("infraContract: a Requested entry, its secrets entry and the child nam
   assert(out.cc === "einfra-s1-vmshell-abc", "cc name");
   assert(out.contract.name === "vmshell-abc" && out.contract.state === "Requested", "entry");
   assert(out.contract.vmName === "einfra-s1-vmshell-abc" && out.contract.sshAuthorizedKeys[0] === "ssh-ed25519 K", "template");
+  assert(out.contract.policy === "requester-tangled-vouch", "policy in the template");
   assert(out.contract.tunnels.length === 2 && out.contract.secretsRef === undefined, "tunnels, no secretsRef in the template");
   assert(out.secret.contract === "vmshell-abc" && out.secret.secretsRef.path.includes("einfra-s1-vmshell-abc"), "secrets");
   const none = infraContract({ infra: "s1", short: "x" });

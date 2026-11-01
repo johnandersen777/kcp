@@ -131,3 +131,55 @@ Deno.test("probe passes on the facts of a fenced sandbox", async () => {
   });
   eq(out.fenced, true, `fenced (${out.message})`);
 });
+
+// The bundled requester-tangled-vouch action under socialweb's action shim,
+// with trust seeded as the run reconciler does (cache trust/<counterparty> =
+// trust.Snapshot.CacheFiles()). The DIDs do not exist, so the verdicts can
+// only come from the seeded snapshot. Needs the build's socialweb mirror
+// (scripts/browser-dev/build-page.sh); skipped without it.
+const mirror = new URL("../../.work/socialweb-mirror/internal/policyengine/", import.meta.url);
+const haveMirror = await Deno.stat(new URL("workflow/action.go", mirror)).then(() => true, () => false);
+
+async function tangledVouch(vouched, mode) {
+  const go = await Deno.readTextFile(new URL("workflow/action.go", mirror));
+  const shim = go.match(/const actionShim = `([\s\S]*?)`/)[1];
+  const footer = go.match(/const actionFooter = `([\s\S]*?)`/)[1];
+  const action = await Deno.readTextFile(new URL("bundled-actions/tangy/policy-requester-tangled-vouch/dist/index.js", mirror));
+  const self = "did:plc:fenceself00000000000000", operator = "did:plc:fenceoperator000000000000", bidder = "did:plc:fencebidder0000000000000";
+  const file = (value) => ({ data: JSON.stringify(value), encoding: "text" });
+  const cache = {
+    [`trust/${bidder}`]: {
+      "operatorOf.json": file({ [self]: self, [bidder]: operator }),
+      "vouchedBy.json": file({ [self]: vouched ? [operator] : [] }),
+      "trustedOperators.json": file([]),
+    },
+  };
+  const env = {
+    GITHUB_OUTPUT: "/gh/output", GITHUB_ENV: "/gh/env", GITHUB_CACHE: "/gh/cache", GITHUB_EVENT_PATH: "/gh/event",
+    "INPUT_SELF-DID": self, "INPUT_COUNTERPARTY-DID": bidder, "INPUT_SUBJECT-DID": bidder, "INPUT_ROOT-REQUESTER-DID": self,
+    "INPUT_MODE": mode,
+  };
+  const source = shim.replace("__PE_ENV_JSON__", JSON.stringify(env))
+    .replace("__PE_CACHE_JSON__", JSON.stringify(JSON.stringify(cache)))
+    .replace("__PE_EVENT_JSON__", JSON.stringify(JSON.stringify({ inputs: {} })))
+    .replaceAll("__PE_RESULT_MARKER__", JSON.stringify("__PE_RESULT__")) + "\n" + action + "\n" + footer;
+  const r = await runInWorker({ source, env, timeoutMs: 30_000 });
+  const line = r.stdout.split("\n").find((l) => l.startsWith("__PE_RESULT__"));
+  assert(line, `no result line: ${r.stderr.slice(-500)}`);
+  const result = JSON.parse(line.slice("__PE_RESULT__".length));
+  return { code: result.code, output: result.vfs["/gh/output"] ?? "", stderr: r.stderr };
+}
+
+// scope: the requester's bid filter (accept.go); full: its winner check (runner.go).
+for (const mode of ["scope", "full"]) {
+  Deno.test({ name: `tangled-vouch ${mode}: a seeded vouch allows`, ignore: !haveMirror, fn: async () => {
+    const r = await tangledVouch(true, mode);
+    eq(r.code, 0, "code");
+    assert(r.output.includes("allow=true"), r.output + r.stderr.slice(-300));
+  } });
+  Deno.test({ name: `tangled-vouch ${mode}: a seeded snapshot without the vouch denies`, ignore: !haveMirror, fn: async () => {
+    const r = await tangledVouch(false, mode);
+    eq(r.code, 0, "code");
+    assert(r.output.includes("allow=false"), r.output + r.stderr.slice(-300));
+  } });
+}
