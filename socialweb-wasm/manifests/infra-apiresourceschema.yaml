@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-12.infras.socialweb.computer
+  name: v1alpha1-13.infras.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -345,6 +345,7 @@ spec:
                   - Degraded
                   - Ending
                   - Deleting
+                  - Ended
               message:
                 type: string
               contracts:
