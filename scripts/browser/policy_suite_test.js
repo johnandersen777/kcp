@@ -11,8 +11,8 @@
 // The DIDs do not exist, so verdicts come only from the seeded snapshot.
 // verdict() is the Go side's reading: allow only on exit 0 with a result line
 // and a strict allow=true output; anything else (throw, timeout, kill) denies.
-// Needs the build's socialweb mirror (scripts/browser-dev/build-page.sh);
-// skipped without it.
+// Needs the build's socialweb mirror; without it every case FAILS (no skip:
+// a skip knob on a security gate is a bypass).
 
 import { runInWorker } from "./policy_sandbox.js";
 
@@ -39,6 +39,9 @@ function cacheFiles({ operatorOf, vouchedBy, trustedOperators }) {
 let runs = 0;
 
 async function tangledVouch(mode, { trust, prelude = "", timeoutMs = 30_000, kill = false }) {
+  if (!haveMirror) {
+    throw new Error(`no socialweb mirror at ${mirror.pathname}: copy .work from a built worktree (cp -a <worktree>/.work .) or run scripts/browser-dev/build-page.sh`);
+  }
   const go = await Deno.readTextFile(new URL("workflow/action.go", mirror));
   const shim = go.match(/const actionShim = `([\s\S]*?)`/)[1];
   const footer = go.match(/const actionFooter = `([\s\S]*?)`/)[1];
@@ -115,7 +118,7 @@ const cases = [
 
 for (const mode of ["scope", "full"]) {
   for (const [name, want, evidence, opts] of cases) {
-    Deno.test({ name: `always-run/page/requester-tangled-vouch/${mode}/${name}`, ignore: !haveMirror, fn: async () => {
+    Deno.test({ name: `always-run/page/requester-tangled-vouch/${mode}/${name}`, fn: async () => {
       const before = runs;
       const r = await tangledVouch(mode, opts);
       assert(runs === before + 1, "the runner did not receive the policy program");
