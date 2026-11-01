@@ -19,6 +19,7 @@
 export const NSID_PUBLIC_KEY = "com.publicdomainrelay.temp.compute.events.guest.publicKey";
 export const NSID_SIGNAL = "com.publicdomainrelay.temp.compute.events.guest.signalWebRTC";
 export const NSID_AGENT_START = "com.publicdomainrelay.temp.compute.events.guest.agentStart";
+export const NSID_R2_START = "com.publicdomainrelay.temp.compute.events.guest.r2Start";
 export const ICE_SERVERS = [{ urls: "stun:stun.cloudflare.com:3478" }];
 export const SSH_TAG = "ssh";
 const AGE_URL = "https://esm.sh/age-encryption@0.3.1";
@@ -121,6 +122,23 @@ export function contractEventManifest({ name, contract, nsid, kind, tag = SSH_TA
 /** Asks the guest agent to start the contract's atirc agent unit (plan 0035); no kind, tag or payload. */
 export function agentStartEvent(contract, suffix) {
   return contractEventManifest({ name: `${contract}-agent-${suffix}`, contract, nsid: NSID_AGENT_START, tag: "" });
+}
+
+/**
+ * Asks the guest's socialweb-computer to start R2 (plan 0036 A7 draft): the
+ * record is {name, agent, hold, createdAt}. ponytail: spec.r2Start is the
+ * draft carrier until A7's ContractEvent field lands; rebase onto its shape.
+ */
+export function r2StartEvent(contract, suffix, { agent = false, now = new Date() } = {}) {
+  const manifest = contractEventManifest({ name: `${contract}-r2-${suffix}`, contract, nsid: NSID_R2_START, tag: "" });
+  manifest.spec.r2Start = { name: "r2", agent: Boolean(agent), hold: true, createdAt: now.toISOString() };
+  return manifest;
+}
+
+/** True when the served ContractEvent schema's nsid enum has guest.r2Start. */
+export function schemaHasR2Start(schema) {
+  return (schema?.spec?.versions ?? []).some((v) =>
+    (v.schema?.properties?.spec?.properties?.nsid?.enum ?? []).includes(NSID_R2_START));
 }
 
 /**

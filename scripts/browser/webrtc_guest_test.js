@@ -15,6 +15,9 @@ import {
   NSID_PUBLIC_KEY,
   NSID_SIGNAL,
   seal,
+  NSID_R2_START,
+  r2StartEvent,
+  schemaHasR2Start,
 } from "./webrtc_guest.js";
 
 function assert(cond, message) {
@@ -133,4 +136,23 @@ Deno.test("dialGuest: no answer or no open channel is a connectivity error", asy
   } finally {
     globalThis.RTCPeerConnection = saved;
   }
+});
+
+Deno.test("r2StartEvent: an outbound guest.r2Start with {name r2, agent, hold, createdAt}", () => {
+  const now = new Date("2026-10-30T12:00:00Z");
+  const m = r2StartEvent("einfra-s1-vm", "ab12", { agent: true, now });
+  if (m.kind !== "ContractEvent" || m.metadata.name !== "einfra-s1-vm-r2-ab12") throw new Error(JSON.stringify(m.metadata));
+  if (m.spec.contractRef.name !== "einfra-s1-vm" || m.spec.direction !== "outbound" || m.spec.nsid !== NSID_R2_START || m.spec.tag !== undefined) {
+    throw new Error(JSON.stringify(m.spec));
+  }
+  if (JSON.stringify(m.spec.r2Start) !== JSON.stringify({ name: "r2", agent: true, hold: true, createdAt: "2026-10-30T12:00:00.000Z" })) {
+    throw new Error(JSON.stringify(m.spec.r2Start));
+  }
+  if (r2StartEvent("c", "x").spec.r2Start.agent !== false) throw new Error("agent defaults off");
+});
+
+Deno.test("schemaHasR2Start reads the ContractEvent nsid enum", () => {
+  const schema = (nsids) => ({ spec: { versions: [{ schema: { properties: { spec: { properties: { nsid: { enum: nsids } } } } } }] } });
+  if (!schemaHasR2Start(schema(["x", NSID_R2_START]))) throw new Error("served");
+  if (schemaHasR2Start(schema(["com.publicdomainrelay.temp.compute.events.guest.agentStart"])) || schemaHasR2Start(null)) throw new Error("not served");
 });

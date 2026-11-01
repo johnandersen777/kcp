@@ -12,6 +12,7 @@ import {
   infraContract,
   infraRecordBinding,
   infraRecordStale,
+  r2StartShown,
   schemaHasGuestTools,
   infraRecordURI,
   infraRepoRef,
@@ -343,4 +344,13 @@ Deno.test("guest tools: off sends no field", () => {
 Deno.test("schemaHasGuestTools reads spec.properties.guestTools", () => {
   const schema = (props) => ({ spec: { versions: [{ schema: { properties: { spec: { properties: props } } } }] } });
   assert(schemaHasGuestTools(schema({ guestTools: {} })) && !schemaHasGuestTools(schema({})) && !schemaHasGuestTools(null), "served");
+});
+
+Deno.test("Start R2: shown only on a Held contract with R2 guest tools and fromGuest", () => {
+  const held = { name: "c", phase: "Held", guestTools: ["socialweb-computer"], fromGuest: true };
+  assert(r2StartShown(held), "Held R2 contract");
+  assert(!r2StartShown({ ...held, phase: "Pending" }), "not Held");
+  assert(!r2StartShown({ ...held, guestTools: [] }) && !r2StartShown({ ...held, guestTools: undefined }), "no guest tools");
+  assert(!r2StartShown({ ...held, fromGuest: false }), "no fromGuest");
+  assert(!r2StartShown({ ...held, release: true }) && !r2StartShown(null), "releasing or missing");
 });
