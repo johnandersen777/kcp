@@ -33,3 +33,23 @@ func TestWebRTCProjection(t *testing.T) {
 		t.Fatalf("outbound ciphertext should stay out of the feed: %+v", out)
 	}
 }
+
+func TestAgentProjection(t *testing.T) {
+	if c := contract(&unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "c"}}}); c.Agent {
+		t.Fatalf("no spec.agent: %+v", c)
+	}
+	c := contract(&unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "c"},
+		"spec":     map[string]any{"agent": map[string]any{}},
+	}})
+	if !c.Agent {
+		t.Fatalf("spec.agent {}: %+v", c)
+	}
+	e := contractEvent(&unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "e"},
+		"status":   map[string]any{"phase": "Failed", "message": "no spec.agent"},
+	}})
+	if e.Phase != "Failed" || e.Message != "no spec.agent" {
+		t.Fatalf("event status: %+v", e)
+	}
+}

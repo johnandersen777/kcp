@@ -21,6 +21,7 @@ import {
   isReleasing,
   orderContracts,
   randomToken,
+  schemaHasAgent,
   schemaHasShell,
   secretsBundle,
   shellLink,
@@ -46,7 +47,7 @@ Deno.test("manifest without wootty carries only the webrtc ssh tunnel", () => {
   });
   assert(m.spec.bidderDids === undefined, "no bidders listed: the requester discovers them");
   assert(JSON.stringify(m.spec.tunnels) === '[{"tag":"ssh","port":22,"transport":"webrtc"}]', "tunnels");
-  assert(m.spec.secretsRef === undefined, "no secretsRef");
+  assert(m.spec.secretsRef === undefined && m.spec.agent === undefined, "no secretsRef, no agent");
   assert(m.spec.sshAuthorizedKeys[0] === "ssh-ed25519 AAAA page" && m.spec.ttlSecondsAfterFinished === undefined, "keys, no ttl");
   assert(m.spec.ownerDid === "did:plc:me" && m.spec.userData === undefined, "owner, no userData");
 });
@@ -57,6 +58,21 @@ Deno.test("manifest with wootty carries both tunnels and the secretsRef", () => 
   assert(JSON.stringify(tags.ssh) === '{"tag":"ssh","port":22,"transport":"webrtc"}', "ssh");
   assert(JSON.stringify(tags.wootty) === '{"tag":"wootty","port":7681,"transport":"opentunnel","shell":{"envFile":"/etc/wootty/wootty.env"}}', "wootty");
   assert(m.spec.secretsRef.mount === "requester" && m.spec.secretsRef.path === "contracts/vmshell-both01/secrets", "secretsRef");
+  assert(m.spec.agent === undefined, "no agent");
+});
+
+Deno.test("manifest with the agent carries spec.agent and the secretsRef", () => {
+  const m = contractManifest({ name: "vmshell-agent1", agent: true });
+  assert(JSON.stringify(m.spec.agent) === '{"envFile":"/etc/atirc/atirc.env"}', "agent");
+  assert(m.spec.secretsRef.path === "contracts/vmshell-agent1/secrets", "secretsRef");
+  assert(m.spec.tunnels.length === 1, "no wootty tunnel");
+});
+
+Deno.test("schemaHasAgent reads spec.properties.agent", () => {
+  const schema = (props) => ({ spec: { versions: [{ schema: { properties: { spec: { properties: props } } } }] } });
+  assert(schemaHasAgent(schema({ tunnels: {}, agent: {} })), "served");
+  assert(!schemaHasAgent(schema({ tunnels: {} })), "not served");
+  assert(!schemaHasAgent(null), "missing");
 });
 
 Deno.test("schemaHasShell reads tunnels.items.properties.shell", () => {
@@ -67,9 +83,17 @@ Deno.test("schemaHasShell reads tunnels.items.properties.shell", () => {
 });
 
 Deno.test("bundle delivers the wootty env file", () => {
-  const entries = JSON.parse(secretsBundle("tok"));
+  const entries = JSON.parse(secretsBundle({ woottyToken: "tok" }));
   assert(entries.length === 1 && entries[0].path === "/etc/wootty/wootty.env", "path");
-  assert(entries[0].value === "WOOTTY_AUTH_TOKEN=tok\n", "value");
+  assert(entries[0].value === "WOOTTY_AUTH_TOKEN=tok\n" && entries[0].mode === undefined, "value");
+});
+
+Deno.test("bundle with the agent holds an empty ATIRC_TOKEN for the requester to fill", () => {
+  const agent = JSON.parse(secretsBundle({ agent: true }));
+  assert(JSON.stringify(agent) === '[{"path":"/etc/atirc/atirc.env","value":"ATIRC_TOKEN=\\n","mode":"0600"}]', JSON.stringify(agent));
+  const both = JSON.parse(secretsBundle({ woottyToken: "tok", agent: true }));
+  assert(both.map((e) => e.path).join() === "/etc/wootty/wootty.env,/etc/atirc/atirc.env", "both");
+  assert(JSON.parse(secretsBundle({})).length === 0, "neither");
 });
 
 Deno.test("shell link uses the wootty network and the token fragment", () => {
@@ -116,7 +140,11 @@ Deno.test("infraContract: a Requested entry, its secrets entry and the child nam
   assert(out.contract.vmName === "einfra-s1-vmshell-abc" && out.contract.sshAuthorizedKeys[0] === "ssh-ed25519 K", "template");
   assert(out.contract.tunnels.length === 2 && out.contract.secretsRef === undefined, "tunnels, no secretsRef in the template");
   assert(out.secret.contract === "vmshell-abc" && out.secret.secretsRef.path.includes("einfra-s1-vmshell-abc"), "secrets");
-  assert(infraContract({ infra: "s1", short: "x" }).secret === null, "no wootty, no secrets entry");
+  const none = infraContract({ infra: "s1", short: "x" });
+  assert(none.secret === null && none.contract.agent === undefined, "no wootty or agent, no secrets entry");
+  const agent = infraContract({ infra: "s1", short: "y", agent: true });
+  assert(agent.contract.agent?.envFile === "/etc/atirc/atirc.env" && agent.contract.secretsRef === undefined, "agent template");
+  assert(agent.secret.secretsRef.path === "contracts/einfra-s1-y/secrets" && agent.contract.tunnels.length === 1, "agent secrets");
   const infra = sessionInfraManifest("s1");
   assert(infra.kind === "EphemeralInfra" && infra.spec.endWhen === "Deadline" && infra.spec.contracts.length === 0, "infra");
 });
