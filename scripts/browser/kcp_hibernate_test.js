@@ -311,6 +311,46 @@ Deno.test("a hide during an in-flight capture still captures at once afterwards"
   assertEquals(c.saved.map((x) => x.kcp), [10, 11], "the hide still captured at once");
 });
 
+Deno.test("one hide plus a flush every 3 s during 5 s captures: two captures, then throttled", async () => {
+  const c = clockedLoop();
+  await c.run(60); // past the boot grace, nothing new
+  const save = c.store.save;
+  let waits = [];
+  c.store.save = async (go, extra, gzip, beforeCommit) => {
+    const e = extra(); // memory and seqs are taken when the capture starts
+    const until = c.t + 5000; // a phone capture takes ~5 s
+    await new Promise((r) => waits.push({ until, r }));
+    return save(go, () => e, gzip, beforeCommit);
+  };
+  const step = async (each) => {
+    c.t += 1000;
+    each?.();
+    const due = waits.filter((w) => c.t >= w.until);
+    waits = waits.filter((w) => c.t < w.until);
+    due.forEach((w) => w.r());
+    await new Promise((r) => setTimeout(r, 0));
+    // a tick that starts a capture resolves only when its save does
+    await Promise.race([c.tick(), new Promise((r) => setTimeout(r, 0))]);
+  };
+  c.seqs.kcp = 10;
+  c.loop.request(); // hidden; capture 1 starts at once
+  let i = 0;
+  const flushEvery3s = () => {
+    if (++i % 3 === 0) {
+      c.seqs.kcp++;
+      c.loop.requestSoon();
+    }
+  };
+  for (let s = 0; s < 14; s++) await step(flushEvery3s);
+  const first = c.saved.length;
+  for (let s = 0; s < 30; s++) await step(flushEvery3s);
+  const later = c.saved.length;
+  const pending = waits.length;
+  waits.forEach((w) => w.r()); // let an in-flight capture finish before the test ends
+  await new Promise((r) => setTimeout(r, 0));
+  assertEquals([first, later, pending], [2, 2, 0], `captures ${JSON.stringify(c.saved.map((x) => [(x.at - 1_000_000) / 1000, x.kcp]))}`);
+});
+
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
