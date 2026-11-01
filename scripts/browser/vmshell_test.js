@@ -13,6 +13,7 @@ import {
   infraRecordBinding,
   infraRecordStale,
   r2StartShown,
+  releaseNotes,
   schemaHasGuestTools,
   infraRecordURI,
   infraRepoRef,
@@ -353,4 +354,15 @@ Deno.test("Start R2: shown only on a Held contract with R2 guest tools and fromG
   assert(!r2StartShown({ ...held, guestTools: [] }) && !r2StartShown({ ...held, guestTools: undefined }), "no guest tools");
   assert(!r2StartShown({ ...held, fromGuest: false }), "no fromGuest");
   assert(!r2StartShown({ ...held, release: true }) && !r2StartShown(null), "releasing or missing");
+});
+
+Deno.test("A8 release notes: cascade wait, request phase and token revokes", () => {
+  const ev = { name: "c-r2-release", contract: "c", direction: "outbound", nsid: "com.publicdomainrelay.temp.compute.events.guest.r2Release", phase: "Published" };
+  const waiting = releaseNotes({ name: "c", phase: "Releasing", step: "releasingGuestRequester", atircRevokes: "Pending" }, [ev]);
+  assert(waiting[0] === "R2 release: waiting for the guest requester to release its contracts (up to 12 min), request Published", waiting[0]);
+  assert(waiting[1] === "tokens: revoking", waiting[1]);
+  const after = releaseNotes({ name: "c", phase: "Released", step: "released", atircRevokes: "Done" }, [ev]);
+  assert(after[0].startsWith("R2 release: asked (Published)") && after[1] === "tokens: revoked", after.join("|"));
+  assert(/ABANDONED/.test(releaseNotes({ name: "c", atircRevokes: "Abandoned" })[0]), "abandoned flagged");
+  assert(releaseNotes({ name: "c", phase: "Held" }, [{ ...ev, contract: "other" }]).length === 0, "nothing for a plain contract");
 });

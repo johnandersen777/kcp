@@ -312,6 +312,28 @@ export function schemaHasAgent(schema) {
   return (schema?.spec?.versions ?? []).some((v) => v.schema?.properties?.spec?.properties?.agent !== undefined);
 }
 
+/**
+ * Release notes for the contract row (plan 0036 A8). The cascade runs in the
+ * requester: it publishes guest.r2Release (outbound ContractEvent
+ * <contract>-r2-release), waits up to 12 min with status.execution.step
+ * releasingGuestRequester for the guest's r2Released, then deletes the VM.
+ * The status carries neither the answer nor R2's contracts, so the row
+ * shows the wait and the request's phase. atircRevokes runs before Released.
+ */
+export function releaseNotes(contract, contractEvents = []) {
+  const notes = [];
+  const asked = contractEvents.find((e) => e?.contract === contract?.name && e.direction === "outbound" &&
+    e.nsid === "com.publicdomainrelay.temp.compute.events.guest.r2Release");
+  if (contract?.step === "releasingGuestRequester") {
+    notes.push(`R2 release: waiting for the guest requester to release its contracts (up to 12 min)${asked ? `, request ${asked.phase ?? "Pending"}` : ""}`);
+  } else if (asked) {
+    notes.push(`R2 release: asked (${asked.phase ?? "Pending"}); answered or 12 min bound passed`);
+  }
+  const revokes = { Pending: "tokens: revoking", Done: "tokens: revoked", Abandoned: "tokens: revoke ABANDONED, revoke them by hand" };
+  if (contract?.atircRevokes) notes.push(revokes[contract.atircRevokes] ?? `tokens: ${contract.atircRevokes}`);
+  return notes;
+}
+
 /** The Start R2 button: a Held contract that runs R2 and lets it associate itself. */
 export function r2StartShown(contract) {
   return contract?.phase === "Held" && (contract.guestTools ?? []).includes(GUEST_TOOL) && contract.fromGuest === true &&
