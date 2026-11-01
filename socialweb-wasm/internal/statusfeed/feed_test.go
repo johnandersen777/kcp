@@ -112,18 +112,19 @@ func TestReleaseRequestProjection(t *testing.T) {
 			"release": map[string]any{"attempts": int64(3), "requestedAt": "2026-10-30T11:00:00.000Z"},
 			"conditions": []any{
 				map[string]any{"type": "Ready", "status": "False"},
-				map[string]any{"type": "ReleaseFailed", "status": "True"},
+				map[string]any{"type": "ReleaseFailed", "status": "True", "reason": "ReleaseBound"},
 			},
 		},
 	}})
-	if !c.Release || c.ReleaseRequestedAt != "2026-10-30T12:00:01.000Z" || c.ReleaseAnsweredAt != "2026-10-30T11:00:00.000Z" || !c.ReleaseFailed {
+	if !c.Release || c.ReleaseRequestedAt != "2026-10-30T12:00:01.000Z" || c.ReleaseAnsweredAt != "2026-10-30T11:00:00.000Z" || !c.ReleaseFailed ||
+		c.ReleaseFailedReason != "ReleaseBound" {
 		t.Fatalf("release request: %+v", c)
 	}
 	plain := contract(&unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{"name": "c"},
 		"status":   map[string]any{"conditions": []any{map[string]any{"type": "ReleaseFailed", "status": "False"}}},
 	}})
-	if plain.ReleaseRequestedAt != "" || plain.ReleaseAnsweredAt != "" || plain.ReleaseFailed {
+	if plain.ReleaseRequestedAt != "" || plain.ReleaseAnsweredAt != "" || plain.ReleaseFailed || plain.ReleaseFailedReason != "" {
 		t.Fatalf("no release: %+v", plain)
 	}
 }

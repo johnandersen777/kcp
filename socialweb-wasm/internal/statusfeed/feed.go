@@ -74,8 +74,8 @@ type Contract struct {
 	// (phase Requested|Released|Failed|TimedOut; ok is omitted when false).
 	R2Release *R2Release `json:"r2Release,omitempty"`
 
-	SecretsFetchedAt string    `json:"secretsFetchedAt,omitempty"`
-	Release          bool      `json:"release,omitempty"`
+	SecretsFetchedAt string `json:"secretsFetchedAt,omitempty"`
+	Release          bool   `json:"release,omitempty"`
 	// ReleaseRequestedAt is spec.releaseRequestedAt (computecontracts 30):
 	// the page sets it with spec.release on every Release.
 	ReleaseRequestedAt string `json:"releaseRequestedAt,omitempty"`
@@ -85,7 +85,10 @@ type Contract struct {
 	// ReleaseFailed is the ReleaseFailed condition being True: a newer
 	// releaseRequestedAt restarts that release.
 	ReleaseFailed bool `json:"releaseFailed,omitempty"`
-	Networks         []Network `json:"networks,omitempty"`
+	// ReleaseFailedReason is that condition's reason (ReleaseBound: the
+	// requester gave up at its release bound; DestroyFailed).
+	ReleaseFailedReason string    `json:"releaseFailedReason,omitempty"`
+	Networks            []Network `json:"networks,omitempty"`
 	// HostKeys are status.contract.hostKeys as authorized_keys lines, the
 	// pins for the page's WebRTC SSH client.
 	HostKeys []string `json:"hostKeys,omitempty"`
@@ -357,6 +360,7 @@ func contract(u *unstructured.Unstructured) Contract {
 		cond, _ := raw.(map[string]any)
 		if cond["type"] == "ReleaseFailed" && cond["status"] == "True" {
 			c.ReleaseFailed = true
+			c.ReleaseFailedReason, _ = cond["reason"].(string)
 		}
 	}
 	_, c.Agent, _ = unstructured.NestedMap(u.Object, "spec", "agent")
