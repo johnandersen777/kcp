@@ -36,6 +36,7 @@ import * as webrtcGuest from "./webrtc_guest.js";
 import * as sshCmd from "./ssh_cmd.js";
 import { discardSnapshot } from "./kcp_hibernate.js";
 import { ControlStream, DebugLogSender } from "./debug_link.js";
+import { connectFrame, startFrame } from "./policy_sandbox.js";
 
 const config = await (await fetch("/config")).json();
 const apiServer = String(config.apiServer);
@@ -719,6 +720,19 @@ function oauthRefreshWorker() {
   return refreshWorker;
 }
 
+// One fenced policy sandbox frame per tab (policy_sandbox.js, plan 0037),
+// outliving kcp worker restarts; each kcp worker gets its own port. Without
+// it the PolicyEngine stays not Ready (no bridge) and policy denies.
+let policyFrame = null;
+function policySandboxFrame() {
+  policyFrame ??= startFrame().catch((err) => {
+    addLog("warn", `policy sandbox frame: ${err?.message ?? err}`);
+    policyFrame = null;
+    return null;
+  });
+  return policyFrame;
+}
+
 let devServerProbe = null;
 function devServer() {
   devServerProbe ??= fetch("/debug/control?session=probe", { method: "HEAD" }).then((r) => r.status === 204, () => false);
@@ -737,12 +751,14 @@ async function kcpBuildChanged() {
 
 async function spawnKcp(useSnapshot = true) {
   const spawnStarted = performance.now();
-  const [initialState, socialwebSnapshot, hibernate, buildChanged] = await Promise.all([
+  const [initialState, socialwebSnapshot, hibernate, buildChanged, sandboxFrame] = await Promise.all([
     loadKcpState(),
     loadInitialState(socialwebStateKey),
     hibernateInit(useSnapshot),
     kcpBuildChanged(),
+    policySandboxFrame(),
   ]);
+  const policySandboxPort = sandboxFrame ? connectFrame(sandboxFrame) : undefined;
   if (buildChanged && initialState) addLog("info", "kcp.wasm changed since the saved state; re-applying the socialweb manifests");
   const worker = new Worker("/kcp_worker.js", { type: "module" });
   attachKcp(worker);
@@ -776,7 +792,8 @@ async function spawnKcp(useSnapshot = true) {
       statusFeed: localStorage.getItem("socialweb.statusFeed") !== "0",
       restore: socialwebSnapshot,
     },
-  });
+    policySandboxPort,
+  }, policySandboxPort ? [policySandboxPort] : []);
   const ready = await readyPromise;
   if (ready?.restart) {
     worker.terminate();
@@ -2352,7 +2369,31 @@ const computeRequestEl = document.getElementById("compute-request");
 const computeStatusEl = document.getElementById("compute-status");
 const computeListEl = document.getElementById("compute-list");
 const vmshellIngressEl = document.getElementById("compute-ingress");
+const computePolicyEl = document.getElementById("compute-policy");
+let lastPolicySummary = "";
 const computeTestPeerEl = document.getElementById("compute-testpeer");
+// The atirc agent opt-in (plan 0035), on unless unchecked; shown once the
+// served ComputeContract schema has spec.agent.
+const computeAgentRowEl = document.getElementById("compute-agent-row");
+const computeAgentEl = document.getElementById("compute-agent");
+computeAgentEl.checked = localStorage.getItem("socialweb.compute.agent") !== "0";
+computeAgentEl.addEventListener("change", () => {
+  localStorage.setItem("socialweb.compute.agent", computeAgentEl.checked ? "1" : "0");
+});
+// Associate DID (plan 0036 P1): optional, remembered per viewer.
+const computeAssociateEl = document.getElementById("compute-associate");
+try {
+  computeAssociateEl.value = localStorage.getItem("socialweb.compute.associate") ?? "";
+} catch {
+  // no localStorage: the field starts empty
+}
+computeAssociateEl.addEventListener("change", () => {
+  try {
+    localStorage.setItem("socialweb.compute.associate", computeAssociateEl.value.trim());
+  } catch {
+    // not remembered
+  }
+});
 const toastEl = document.getElementById("toast");
 const computePrefs = {
   token: (name) => `socialweb.vmshell.token.${name}`,
@@ -2468,7 +2509,8 @@ async function sessionInfra() {
   }
   const name = vmshell.originInfraName(location.origin, infraTabId());
   const path = `${SOCIALWEB_API}/ephemeralinfras/${name}`;
-  const repoRef = vmshell.infraRepoRef(did);
+  const record = vmshell.infraRecordBinding(did);
+  const repoRef = record.repoRef;
   let infra = null;
   try {
     infra = await kcpREST("GET", path);
@@ -2488,13 +2530,13 @@ async function sessionInfra() {
         if (kcpStatus(err) !== 404) throw err;
       });
       infra = await waitInfraGone(path);
-    } else if (!binding?.repoRef || (binding.sync && binding.sync !== "Both")) {
-      await patchInfra(path, { spec: { record: { repoRef, sync: "Both" } } });
+    } else if (vmshell.infraRecordStale(binding)) {
+      await patchInfra(path, { spec: { record } });
       infra = await kcpREST("GET", path);
     }
   }
   if (!infra) {
-    const manifest = vmshell.sessionInfraManifest(name, undefined, { repoRef, sync: "Both" });
+    const manifest = vmshell.sessionInfraManifest(name, undefined, record);
     try {
       infra = await kcpREST("POST", `${SOCIALWEB_API}/ephemeralinfras`, manifest);
     } catch (err) {
@@ -2571,6 +2613,11 @@ async function markFinishedInfraContracts(contracts) {
 }
 
 async function requestVM() {
+  const association = vmshell.associationSubject(computeAssociateEl.value, identityState?.did ?? "");
+  if (association.error) {
+    setAppStatus(computeStatusEl, association.error, "err");
+    return;
+  }
   try {
     computeBusy = true;
     computeRequestEl.disabled = true;
@@ -2579,25 +2626,28 @@ async function requestVM() {
     const short = vmshell.contractName();
     const name = vmshell.infraContractName(infraName, short);
     const wootty = await woottyServed();
-    const shells = wootty ? "ssh over WebRTC and wootty" : "ssh over WebRTC (no wootty in this socialweb)";
+    const agent = computeAgentEl.checked && await agentServed();
+    const shells = (wootty ? "ssh over WebRTC and wootty" : "ssh over WebRTC (no wootty in this socialweb)") +
+      (agent ? ", and the atirc agent" : "") + (association.subject ? `, associated with ${association.subject}` : "");
     addLog("info", `requesting ComputeContract ${name} from discovered bidders with ${shells}`);
     const key = await webrtcGuest.newSSHKey();
     await webrtcGuest.saveSSHKey(name, key);
     sshKeys.unshift(key.authorized);
     localStorage.setItem(computePrefs.transport(name), "webrtc");
-    if (wootty) {
-      const token = vmshell.randomToken();
-      localStorage.setItem(computePrefs.token(name), token);
+    // The association ref file reaches the guest through the same bundle.
+    if (wootty || agent || association.subject) {
+      const woottyToken = wootty ? vmshell.randomToken() : "";
+      if (woottyToken) localStorage.setItem(computePrefs.token(name), woottyToken);
       // The requester reads the bundle once and fails a contract whose
       // secretsRef is missing, so it must exist before the contract does.
       await socialwebCall("socialwebVaultPut", {
         workspace: "root",
         mount: vmshell.SECRETS_MOUNT,
         path: vmshell.secretsPath(name),
-        bundle: vmshell.secretsBundle(token),
+        bundle: vmshell.secretsBundle({ woottyToken, agent }),
       });
     }
-    const { contract, secret } = vmshell.infraContract({ infra: infraName, short, wootty, sshKeys });
+    const { contract, secret } = vmshell.infraContract({ infra: infraName, short, wootty, agent, sshKeys, association: association.subject });
     await setInfraContract(infraName, contract, secret);
     setAppStatus(computeStatusEl, `${name} requested; waiting for bids`, "ok");
     addLog("ok", `ComputeContract ${name} requested from discovered bidders with ${shells}`);
@@ -2671,6 +2721,7 @@ function computeRow(contract) {
   detail.className = "detail";
   detail.textContent = [
     contract.chosenDid ? `bidder ${contract.chosenDid}` : "",
+    contract.association ? `Associated ${contract.association}` : "",
     contract.secretsFetchedAt ? `secrets fetched ${contract.secretsFetchedAt}` : "",
     contract.message ?? "",
   ].filter(Boolean).join(" · ");
@@ -2701,6 +2752,7 @@ function shellAction(contract) {
   if (!s.webrtc && !s.link) {
     el.className = "detail";
     if (contract.phase === "Held") el.textContent = "Held; the shells are starting…";
+    el.append(...agentAction(contract));
     return el;
   }
   // SSH over WebRTC runs in the page terminal and falls back to the web shell
@@ -2727,8 +2779,40 @@ function shellAction(contract) {
   const note = document.createElement("span");
   note.className = "detail";
   note.textContent = s.link ? "" : s.wootty ? " web shell starting (usually 1-3 min after Held)" : "";
-  el.append(note);
+  el.append(note, ...agentAction(contract));
   return el;
+}
+
+// The Agent button of a Held spec.agent contract: an outbound agentStart
+// ContractEvent the requester publishes and the guest agent turns into
+// `systemctl start atirc-agent.service`. Disabled while the last one is not
+// Published yet; its phase and message (a requester refusal) show next to it.
+function agentAction(contract) {
+  const name = contract.name;
+  if (contract.phase !== "Held" || !contract.agent || computeReleaseAsked.has(name)) return [];
+  const last = (lastFeedState?.contractEvents ?? [])
+    .filter((e) => e.contract === name && e.direction === "outbound" && e.nsid === webrtcGuest.NSID_AGENT_START)
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || a.name.localeCompare(b.name))
+    .at(-1);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Agent";
+  button.title = "start the atirc agent on the VM (set it up at irc.fedfork.com)";
+  button.disabled = Boolean(last) && (last.phase ?? "Pending") === "Pending";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await createContractEvent(webrtcGuest.agentStartEvent(name, Math.random().toString(36).slice(2, 8)));
+      addLog("info", `asked ${name} to start the atirc agent`);
+    } catch (err) {
+      button.disabled = false;
+      setAppStatus(computeStatusEl, `${name}: starting the agent failed: ${err.message ?? err}`, "err");
+    }
+  });
+  const note = document.createElement("span");
+  note.className = "detail";
+  note.textContent = last ? ` agent ${last.phase ?? "Pending"}${last.message ? `: ${last.message}` : ""}` : "";
+  return [button, note];
 }
 
 let toastTimer = null;
@@ -2812,21 +2896,28 @@ function toastReadyShells(contracts) {
 
 // The served ComputeContract schema decides whether wootty can be asked for
 // (socialweb rc109 dropped spec.tunnels[].shell; the lead's rc110 restores
-// it next to webrtc). Read once through kcpREST, retried after an error.
-let woottyServedPromise = null;
-function woottyServed() {
+// it next to webrtc) and whether the agent can (plan 0035 spec.agent). Read
+// once through kcpREST, retried after an error.
+let contractSchemaPromise = null;
+function contractSchema() {
   const provider = "/clusters/root:socialweb-provider";
-  woottyServedPromise ??= (async () => {
+  contractSchemaPromise ??= (async () => {
     const exported = await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha2/apiexports/computecontracts`);
     const schema = (exported?.spec?.resources ?? []).find((r) => r.name === "computecontracts")?.schema;
-    if (!schema) return false;
-    return vmshell.schemaHasShell(await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha1/apiresourceschemas/${schema}`));
+    if (!schema) return null;
+    return await kcpREST("GET", `${provider}/apis/apis.kcp.io/v1alpha1/apiresourceschemas/${schema}`);
   })().catch((err) => {
-    woottyServedPromise = null;
-    addLog("warn", `could not read the ComputeContract schema; requesting without wootty: ${err.message ?? err}`);
-    return false;
+    contractSchemaPromise = null;
+    addLog("warn", `could not read the ComputeContract schema; requesting without wootty or the agent: ${err.message ?? err}`);
+    return null;
   });
-  return woottyServedPromise;
+  return contractSchemaPromise;
+}
+async function woottyServed() {
+  return vmshell.schemaHasShell(await contractSchema());
+}
+async function agentServed() {
+  return vmshell.schemaHasAgent(await contractSchema());
 }
 
 /** Resolves with fn's first truthy result over the current and later feed snapshots. */
@@ -3018,8 +3109,21 @@ async function runSsh(args, ctx) {
   });
 }
 
+// The PolicyEngine's fenced sandbox (plan 0037): Fenced and Ready come from
+// the resource (the probe's facts are the Fenced message).
+function renderPolicyEngine(engine) {
+  const fenced = engine?.fenced === "True";
+  const text = !engine ? "" : `policy sandbox: ${fenced ? "fenced" : "not fenced"}${engine.ready ? ", ready" : ""}` +
+    `${engine.message ? ` (${engine.message})` : ""}`;
+  if (text === lastPolicySummary) return;
+  lastPolicySummary = text;
+  setAppStatus(computePolicyEl, text, !engine ? "" : fenced && engine.ready ? "ok" : "warn");
+  if (engine) addLog("info", `PolicyEngine ${engine.name} ${engine.phase ?? "Pending"} ready=${Boolean(engine.ready)} fenced=${engine.fenced ?? "unset"}: ${engine.message ?? ""}`);
+}
+
 function applyComputeState(state) {
   lastFeedState = state;
+  renderPolicyEngine(state.policyEngine);
   for (const watcher of [...feedWatchers]) watcher(state);
   const contracts = state.contracts ?? [];
   void markFinishedInfraContracts(contracts);
@@ -3028,6 +3132,7 @@ function applyComputeState(state) {
   computeReleasing = contracts.some(vmshell.isReleasing);
   const ready = state.marketIdentity?.phase === "Ready";
   computeRequestEl.disabled = computeBusy || !ready || active.length > 0;
+  if (ready && computeAgentRowEl.hidden) void agentServed().then((served) => { computeAgentRowEl.hidden = !served; });
   if (!computeBusy && !computeStatusEl.classList.contains("err")) {
     setAppStatus(computeStatusEl,
       !ready ? "sign in to request a VM"
@@ -3036,7 +3141,7 @@ function applyComputeState(state) {
       !ready ? "warn" : "ok");
   }
   const render = JSON.stringify(contracts) + [...computeReleaseAsked].join() +
-    JSON.stringify((state.contractEvents ?? []).map((e) => [e.name, e.phase]));
+    JSON.stringify((state.contractEvents ?? []).map((e) => [e.name, e.phase, e.message]));
   if (render === computeLastRender) return;
   for (const c of contracts) {
     addLog("info", `ComputeContract ${c.name} ${c.phase ?? "Pending"}${c.release ? " (release asked)" : ""}${c.message ? `: ${c.message}` : ""}`);
