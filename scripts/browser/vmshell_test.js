@@ -199,16 +199,17 @@ Deno.test("record conditions drive the sync wait", () => {
 Deno.test("addContract replaces, appends and prunes released entries", () => {
   const released = { name: "old", state: "Released" };
   const active = { name: "live", state: "Requested" };
-  const out = addContract([released, active], { name: "new", state: "Requested" }, 2);
+  const policy = "requester-tangled-vouch";
+  const out = addContract([released, active], { name: "new", state: "Requested", policy }, 2);
   assert(out.contracts.map((c) => c.name).join() === "live,new", out.contracts.map((c) => c.name).join());
   assert(out.dropped.join() === "old", out.dropped.join());
   const replaced = addContract([active], { ...active, state: "Released" }, 1);
   assert(replaced.contracts[0].state === "Released" && replaced.dropped.length === 0, "replace");
   let full = false;
   try {
-    addContract([active], { name: "new", state: "Requested" }, 1);
-  } catch {
-    full = true;
+    addContract([active], { name: "new", state: "Requested", policy }, 1);
+  } catch (err) {
+    full = /record is full/.test(err.message);
   }
   assert(full, "full active record refuses");
 });
@@ -265,4 +266,39 @@ Deno.test("infra record binding watches through the jetstream EventSources", () 
   const { eventSourceRefs: _, ...old } = b;
   assert(infraRecordStale(old), "a saved binding without eventSourceRefs is repaired");
   assert(infraRecordStale({ ...b, sync: "Publish" }) && infraRecordStale(null), "publish-only or missing");
+});
+
+Deno.test("policy always: addContract refuses an active entry without requester-tangled-vouch", () => {
+  const { contract } = infraContract({ infra: "s1", short: "ok" });
+  assert(addContract([], contract).contracts[0].policy === "requester-tangled-vouch", "page entry carries it");
+  for (const policy of [undefined, "", "open", "requester-only-me"]) {
+    let threw = false;
+    try {
+      addContract([], { ...contract, policy });
+    } catch (err) {
+      threw = /refusing contract/.test(err.message);
+    }
+    assert(threw, `refused policy ${policy}`);
+  }
+  const released = { name: "old", state: "Released" };
+  assert(addContract([], released).contracts[0].policy === undefined, "a release needs no policy");
+});
+
+Deno.test("policy always: other active entries in the record are written back with the policy", () => {
+  const { contract } = infraContract({ infra: "s1", short: "new" });
+  const record = [
+    { name: "legacy", state: "Requested" },
+    { name: "open", state: "Staged", policy: "open" },
+    { name: "done", state: "Released" },
+  ];
+  const out = addContract(record, contract).contracts;
+  const by = Object.fromEntries(out.map((c) => [c.name, c.policy]));
+  assert(by.legacy === "requester-tangled-vouch" && by.open === "requester-tangled-vouch", "active entries repaired");
+  assert(by.done === undefined && record[0].policy === undefined, "released left alone, input not mutated");
+});
+
+Deno.test("policy always: no manifest option drops or changes the policy", () => {
+  for (const opts of [{}, { wootty: true }, { agent: true }, { association: "did:plc:x" }, { policy: "open" }, { ownerDid: "did:plc:me" }]) {
+    assert(contractManifest({ name: "vmshell-p", ...opts }).spec.policy === "requester-tangled-vouch", JSON.stringify(opts));
+  }
 });

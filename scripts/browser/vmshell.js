@@ -143,9 +143,18 @@ export function infraRecordURI(infra, did, name) {
  * Replace or append a contract, pruning the oldest released entries when the
  * record is full. Never drops an active entry. Returns the dropped names so
  * the caller can remove their secrets.
+ *
+ * The policy always runs (owner rule): an active entry without
+ * REQUESTER_POLICY is refused, and every other active entry in the record
+ * (one an older page or the synced PDS record left without it, or with
+ * another policy) is written back with it.
  */
 export function addContract(contracts, entry, cap = INFRA_RECORD_CAP) {
-  const list = Array.isArray(contracts) ? contracts.slice() : [];
+  if (entry?.state !== "Released" && entry?.policy !== REQUESTER_POLICY) {
+    throw new Error(`refusing contract ${entry?.name}: its policy is ${JSON.stringify(entry?.policy ?? "")}, not ${REQUESTER_POLICY}`);
+  }
+  const list = (Array.isArray(contracts) ? contracts : []).map((contract) =>
+    contract?.state === "Released" || contract?.policy === REQUESTER_POLICY ? contract : { ...contract, policy: REQUESTER_POLICY });
   const index = list.findIndex((contract) => contract?.name === entry.name);
   if (index >= 0) list[index] = entry;
   else list.push(entry);
