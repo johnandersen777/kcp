@@ -9,7 +9,7 @@
 //   channels, and fetch carries Origin: null without credentials.
 // - connectFrame(frame) gives a MessagePort the kcp worker receives in init.
 // - The frame script (serve/runProgram) starts one module Worker per run from
-//   a blob: bootstrap that imports the program as its own module, and terminates it on its answer, at the
+//   a data: bootstrap that imports the program as its own module, and terminates it on its answer, at the
 //   deadline or on kill: one Worker per Run, as deno is one process per Run.
 //   The frame only relays; program code never runs on the page's thread.
 // - connect(port) (kcp worker) is __socialwebSandbox {run, kill, probe} for
@@ -173,13 +173,15 @@ function runProgram(request, done, cap) {
   let finished = false;
   let worker = null;
   let timer = null;
-  const url = URL.createObjectURL(new Blob([programModule(String(request.source ?? ""), request.env, cap)], { type: "text/javascript" }));
+  // data:, not blob: Chromium fails every module Worker from a blob:null URL
+  // made in an opaque-origin frame (a classic one loads); data: loads in
+  // Chrome and iOS Safari (plan 0037 step 0).
+  const url = "data:text/javascript," + encodeURIComponent(programModule(String(request.source ?? ""), request.env, cap));
   const finish = (result) => {
     if (finished) return;
     finished = true;
     clearTimeout(timer);
     worker?.terminate();
-    URL.revokeObjectURL(url);
     done(result);
   };
   try {
@@ -230,9 +232,10 @@ function relay(cap) {
   parent.postMessage({ type: "policy-sandbox-ready" }, "*");
 }
 
-// Defense in depth (the page has no CSP): scripts only inline, blob: (the
-// per-run Worker) and data: (node shims); fetch only https.
-export const FRAME_CSP = "default-src 'none'; script-src 'unsafe-inline' blob: data:; worker-src blob:; connect-src https:";
+// Defense in depth (the page has no CSP): scripts only inline (the relay),
+// data: (the per-run Worker, node shims) and blob: (the program, imported by
+// the Worker from a blob it creates); fetch only https.
+export const FRAME_CSP = "default-src 'none'; script-src 'unsafe-inline' blob: data:; worker-src data:; connect-src https:";
 
 export function frameSrcdoc(cap = OUTPUT_LIMIT) {
   const code = [bootstrap, nodeShim, rewriteNodeImports, programModule, runProgram, serve, relay].join("\n");
