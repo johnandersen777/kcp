@@ -28,7 +28,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/dynamic"
 
 	dynamiccontext "github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/context"
@@ -41,8 +43,14 @@ import (
 // ran through admission, live the object it was computed from (nil when the
 // object does not exist yet).
 //
-// The body is the client's apply patch with two additions that keep the
-// guarantees of the Update this replaces:
+// The body is the client's apply patch with additions that keep the
+// guarantees of the Update or Create this replaces:
+//   - when live is nil (a create), a fresh random metadata.uid. The backend
+//     overwrites the uid of an object it creates, but rejects a changed uid
+//     on an existing object (422 on metadata.uid), which forwardApply returns
+//     as AlreadyExists, like the Create did. Without it, an object created
+//     between the virtual workspace's Get and the apply, possibly one s.Get
+//     hides, would be modified by the apply and returned to the caller;
 //   - metadata.resourceVersion of live (unless the client set one), so the
 //     backend applies onto exactly the object the virtual workspace admitted;
 //     a concurrent write fails with a Conflict, which the caller retries with
@@ -54,13 +62,18 @@ import (
 func forwardApply(
 	ctx context.Context,
 	delegate dynamic.ResourceInterface,
+	groupResource schema.GroupResource,
 	name string,
 	applyPatch *dynamiccontext.ApplyPatch,
 	admitted, live *unstructured.Unstructured,
 	options *metav1.UpdateOptions,
 	subResources []string,
 ) (*unstructured.Unstructured, error) {
-	data, err := applyPatchBody(applyPatch.Data, admitted, live, options.FieldManager, strings.Join(subResources, "/"))
+	createUID := ""
+	if live == nil {
+		createUID = string(uuid.NewUUID())
+	}
+	data, err := applyPatchBody(applyPatch.Data, admitted, live, createUID, options.FieldManager, strings.Join(subResources, "/"))
 	if err != nil {
 		return nil, err
 	}
@@ -75,11 +88,32 @@ func forwardApply(
 		patchOptions.Force = &force
 	}
 
-	return delegate.Patch(ctx, name, types.ApplyPatchType, data, patchOptions, subResources...)
+	result, err := delegate.Patch(ctx, name, types.ApplyPatchType, data, patchOptions, subResources...)
+	if createUID != "" && isUIDInvalid(err) {
+		return nil, apierrors.NewAlreadyExists(groupResource, name)
+	}
+	return result, err
+}
+
+// isUIDInvalid returns whether err is the backend rejecting a changed metadata.uid.
+func isUIDInvalid(err error) bool {
+	if !apierrors.IsInvalid(err) {
+		return false
+	}
+	status, ok := err.(apierrors.APIStatus)
+	if !ok || status.Status().Details == nil {
+		return false
+	}
+	for _, cause := range status.Status().Details.Causes {
+		if cause.Field == "metadata.uid" {
+			return true
+		}
+	}
+	return false
 }
 
 // applyPatchBody returns the apply patch to send to the backend, see forwardApply.
-func applyPatchBody(data []byte, admitted, live *unstructured.Unstructured, manager, subresource string) ([]byte, error) {
+func applyPatchBody(data []byte, admitted, live *unstructured.Unstructured, createUID, manager, subresource string) ([]byte, error) {
 	jsonData, err := yaml.YAMLToJSON(data)
 	if err != nil {
 		return nil, apierrors.NewBadRequest(fmt.Sprintf("error decoding apply patch: %v", err))
@@ -100,6 +134,11 @@ func applyPatchBody(data []byte, admitted, live *unstructured.Unstructured, mana
 	}
 
 	changed := false
+
+	if createUID != "" {
+		metadata["uid"] = createUID
+		changed = true
+	}
 
 	if live != nil && live.GetResourceVersion() != "" {
 		if rv, _ := metadata["resourceVersion"].(string); rv == "" {

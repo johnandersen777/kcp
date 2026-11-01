@@ -259,15 +259,16 @@ func DefaultDynamicDelegatedStoreFuncs(
 				}
 
 				if isApply {
-					// s.Get can hide an existing object (e.g. a label selector
-					// wrapper). Create would fail on it with AlreadyExists; an
-					// apply would modify it, so check first.
-					if _, err := delegate.Get(ctx, name, metav1.GetOptions{}); err == nil {
-						return nil, apierrors.NewAlreadyExists(resource.GroupResource(), name)
-					} else if !apierrors.IsNotFound(err) {
-						return nil, err
+					if len(subResources) > 0 {
+						// A subresource cannot be created, and the object
+						// may exist hidden by s.Get (e.g. a label selector
+						// wrapper): do not apply onto it.
+						return nil, apierrors.NewNotFound(resource.GroupResource(), name)
 					}
-					return forwardApply(ctx, delegate, name, applyPatch, unstructuredObj, nil, options, subResources)
+					// forwardApply makes the apply fail with AlreadyExists, like
+					// a Create, if an object exists by now, including one s.Get
+					// hides (e.g. a label selector wrapper).
+					return forwardApply(ctx, delegate, resource.GroupResource(), name, applyPatch, unstructuredObj, nil, options, subResources)
 				}
 
 				return delegate.Create(ctx, unstructuredObj, updateToCreateOptions(options), subResources...)
@@ -282,7 +283,7 @@ func DefaultDynamicDelegatedStoreFuncs(
 				if !ok {
 					return nil, fmt.Errorf("not an Unstructured: %T", oldObj)
 				}
-				return forwardApply(ctx, delegate, name, applyPatch, unstructuredObj, oldUnstructured, options, subResources)
+				return forwardApply(ctx, delegate, resource.GroupResource(), name, applyPatch, unstructuredObj, oldUnstructured, options, subResources)
 			}
 
 			return delegate.Update(ctx, unstructuredObj, *options, subResources...)

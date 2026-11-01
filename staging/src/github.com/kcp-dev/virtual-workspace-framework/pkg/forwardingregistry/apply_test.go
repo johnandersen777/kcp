@@ -47,6 +47,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/managedfields"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/audit"
 	"k8s.io/apiserver/pkg/authentication/user"
@@ -87,12 +88,17 @@ func newSSABackend(t *testing.T) *ssaBackend {
 	t.Helper()
 	gv := fieldpath.APIVersion(noxuKind.GroupVersion().String())
 	b := &ssaBackend{objects: map[string]*unstructured.Unstructured{}, fieldManagers: map[string]*managedfields.FieldManager{}}
-	for subresource, reset := range map[string]string{"": "status", "status": "spec"} {
+	// Reset fields as in the apiextensions CRD strategies.
+	for subresource, reset := range map[string][]string{"": {"status"}, "status": {"metadata", "spec"}} {
+		resetSet := fieldpath.NewSet()
+		for _, p := range reset {
+			resetSet.Insert(fieldpath.MakePathOrDie(p))
+		}
 		fm, err := managedfields.NewDefaultCRDFieldManager(
 			managedfields.NewDeducedTypeConverter(),
 			nopConvertor{}, nopDefaulter{}, unstructuredCreater{},
 			noxuKind, noxuKind.GroupVersion(), subresource,
-			map[fieldpath.APIVersion]fieldpath.Filter{gv: fieldpath.NewExcludeSetFilter(fieldpath.NewSet(fieldpath.MakePathOrDie(reset)))},
+			map[fieldpath.APIVersion]fieldpath.Filter{gv: fieldpath.NewExcludeSetFilter(resetSet)},
 		)
 		require.NoError(t, err)
 		b.fieldManagers[subresource] = fm
@@ -211,6 +217,9 @@ func (b *ssaBackend) react(action kcptesting.Action) (bool, runtime.Object, erro
 		if obj.GetResourceVersion() != live.GetResourceVersion() {
 			return true, nil, apierrors.NewConflict(gr, obj.GetName(), fmt.Errorf("the object has been modified"))
 		}
+		if err := validateUIDUpdate(gr, obj, live); err != nil {
+			return true, nil, err
+		}
 		out, err := b.fieldManagers[subresource].Update(live.DeepCopy(), obj, a.UpdateOptions.FieldManager)
 		if err != nil {
 			return true, nil, err
@@ -242,6 +251,13 @@ func (b *ssaBackend) react(action kcptesting.Action) (bool, runtime.Object, erro
 		if rv := patchObj.GetResourceVersion(); rv != "" && (!exists || rv != live.GetResourceVersion()) {
 			return true, nil, apierrors.NewConflict(gr, a.Name, fmt.Errorf("the object has been modified"))
 		}
+		if exists {
+			// On create the registry overwrites metadata.uid; on update
+			// rest.BeforeUpdate rejects a changed one.
+			if err := validateUIDUpdate(gr, patchObj, live); err != nil {
+				return true, nil, err
+			}
+		}
 		force := a.PatchOptions.Force != nil && *a.PatchOptions.Force
 		out, err := b.fieldManagers[subresource].Apply(live.DeepCopy(), patchObj, a.PatchOptions.FieldManager, force)
 		if err != nil {
@@ -253,6 +269,16 @@ func (b *ssaBackend) react(action kcptesting.Action) (bool, runtime.Object, erro
 		return true, store(applied, a.PatchOptions.DryRun), nil
 	}
 	return false, nil, nil
+}
+
+// validateUIDUpdate mirrors ValidateObjectMetaUpdate: metadata.uid is immutable.
+func validateUIDUpdate(gr schema.GroupResource, obj, live *unstructured.Unstructured) error {
+	if uid := obj.GetUID(); uid != "" && uid != live.GetUID() {
+		return apierrors.NewInvalid(schema.GroupKind{Group: gr.Group, Kind: noxuKind.Kind}, obj.GetName(), field.ErrorList{
+			field.Invalid(field.NewPath("metadata", "uid"), uid, "field is immutable"),
+		})
+	}
+	return nil
 }
 
 type nopConvertor struct{}
@@ -296,9 +322,7 @@ func (a *labelAdmission) Admit(_ context.Context, attrs admission.Attributes, _ 
 	a.mu.Lock()
 	a.admitted++
 	a.mu.Unlock()
-	if attrs.GetSubresource() != "" {
-		return nil
-	}
+	// Like the APIExport selector admission, this runs for subresources too.
 	u, ok := attrs.GetObject().(*unstructured.Unstructured)
 	if !ok {
 		return fmt.Errorf("unexpected type %T", attrs.GetObject())
@@ -754,20 +778,73 @@ func TestApplyThroughVirtualWorkspaceHiddenObject(t *testing.T) {
 	require.NoError(t, err)
 	h := newVWHarness(t, forwardingregistry.WithStaticLabelSelector(labels.Requirements{*requirement}))
 
+	h.backend.set(hiddenNoxu())
+
+	res := h.apply("", "provider", specApplyA)
+	requireHiddenUntouched(t, h, res)
+}
+
+// hiddenNoxu is a noxu without the label the tests' selector requires. It has
+// no field the provider's apply sets, so the apply would not conflict on it.
+func hiddenNoxu() *unstructured.Unstructured {
 	hidden := &unstructured.Unstructured{}
 	hidden.SetGroupVersionKind(noxuKind)
 	hidden.SetNamespace("default")
 	hidden.SetName("foo")
-	require.NoError(t, unstructured.SetNestedField(hidden.Object, "hidden", "spec", "a"))
-	h.backend.set(hidden)
+	hidden.SetUID("uid-consumer")
+	_ = unstructured.SetNestedField(hidden.Object, "consumer-secret", "spec", "secret")
+	return hidden
+}
 
-	before := h.backend.numCalls()
-	res := h.apply("", "provider", specApplyA)
+func requireHiddenUntouched(t *testing.T, h *vwHarness, res patchResult) {
+	t.Helper()
 	require.Equal(t, http.StatusConflict, res.code, res.body)
 	require.Contains(t, res.body, "AlreadyExists")
+	require.NotContains(t, res.body, "consumer-secret", "the hidden object must not be returned")
+	live := h.backend.get("default", "foo")
+	_, found, _ := unstructured.NestedString(live.Object, "spec", "a")
+	require.False(t, found, "the hidden object must not be modified")
+	require.Empty(t, live.GetLabels(), "the hidden object must not be labeled")
+	require.Empty(t, live.GetManagedFields(), "the applier must not own fields of the hidden object")
+}
+
+// TestApplyThroughVirtualWorkspaceStatusHiddenObject: a status apply on an
+// object the storage hides answers NotFound and does not reach the object.
+func TestApplyThroughVirtualWorkspaceStatusHiddenObject(t *testing.T) {
+	t.Parallel()
+	requirement, err := labels.NewRequirement("visible", selection.Equals, []string{"true"})
+	require.NoError(t, err)
+	h := newVWHarness(t, forwardingregistry.WithStaticLabelSelector(labels.Requirements{*requirement}))
+	h.backend.set(hiddenNoxu())
+
+	before := h.backend.numCalls()
+	res := h.apply("status", "provider-status", statusApplyWithPending)
+	require.Equal(t, http.StatusNotFound, res.code, res.body)
 	for _, call := range h.backend.callsSince(before) {
 		require.False(t, strings.HasPrefix(call, "patch/"), "a hidden object must not be patched: %v", h.backend.callsSince(before))
 	}
-	a, _, _ := unstructured.NestedString(h.backend.get("default", "foo").Object, "spec", "a")
-	require.Equal(t, "hidden", a)
+	live := h.backend.get("default", "foo")
+	_, found, _ := unstructured.NestedMap(live.Object, "status")
+	require.False(t, found, "the hidden object's status must not be set")
+	require.Empty(t, live.GetManagedFields())
+}
+
+// TestApplyThroughVirtualWorkspaceCreateRaceHiddenObject: the object is created
+// (hidden from the provider) between the virtual workspace's Get, which finds
+// nothing, and the forwarded apply. The apply must fail like the Create it
+// replaces, not merge into the consumer's object.
+func TestApplyThroughVirtualWorkspaceCreateRaceHiddenObject(t *testing.T) {
+	t.Parallel()
+	requirement, err := labels.NewRequirement(injectedLabel, selection.Equals, []string{"true"})
+	require.NoError(t, err)
+	h := newVWHarness(t, forwardingregistry.WithStaticLabelSelector(labels.Requirements{*requirement}))
+
+	var once sync.Once
+	h.client.PrependReactor("patch", "noxus", func(action kcptesting.Action) (bool, runtime.Object, error) {
+		once.Do(func() { h.backend.set(hiddenNoxu()) })
+		return false, nil, nil
+	})
+
+	res := h.apply("", "provider", specApplyA)
+	requireHiddenUntouched(t, h, res)
 }
