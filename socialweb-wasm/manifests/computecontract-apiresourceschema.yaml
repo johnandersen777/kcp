@@ -94,6 +94,16 @@ spec:
                   envFile:
                     type: string
                     default: /etc/atirc/atirc.env
+              association:
+                type: object
+                properties:
+                  subject:
+                    type: string
+                  refFile:
+                    type: string
+                    default: /etc/socialweb-computer/association-ref
+                required:
+                  - subject
               secretsRef:
                 type: object
                 properties:
@@ -181,16 +191,6 @@ spec:
                       - pins
                 required:
                   - clusterRef
-              association:
-                type: object
-                properties:
-                  subject:
-                    type: string
-                  refFile:
-                    type: string
-                    default: /etc/socialweb-computer/association-ref
-                required:
-                  - subject
               ttlSecondsAfterFinished:
                 type: integer
                 format: int32
