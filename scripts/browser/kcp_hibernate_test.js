@@ -171,18 +171,30 @@ Deno.test("capture after a flush: once the seqs are still, never for a no-op flu
   await c.run(2);
   assertEquals(c.saved, [], "not before SOON_QUIET_MS of still seqs");
   await c.run(3);
-  assertEquals(c.saved.map((x) => x.kcp), [10], "captured a few seconds after the flush, long before QUIET_MS (30 s)");
+  assertEquals(c.saved.map((x) => x.kcp), [10], "captured a few seconds after the flush");
 });
 
-Deno.test("no request: moving seqs capture only after the 30 s quiet period", async () => {
+Deno.test("no request: background writes capture once still, at most every 60 s", async () => {
   const c = clockedLoop();
   c.loop.requestSoon(); // unchanged seqs: not armed
   await c.run(1);
   c.seqs.kcp = 10; // a background write, no flush
-  await c.run(20);
-  assertEquals(c.saved, [], "nothing before the quiet period");
-  await c.run(15);
-  assertEquals(c.saved.length, 1, "the regular capture");
+  await c.run(2);
+  assertEquals(c.saved, [], "nothing before QUIET_MS of still seqs");
+  await c.run(2);
+  assertEquals(c.saved.map((x) => x.kcp), [10], "the regular capture");
+});
+
+Deno.test("an idle tab that persists a write every 5-10 s still captures, about once a minute", async () => {
+  const c = clockedLoop();
+  // ~3 min of a live idle page: a write every 7 s, never 30 s quiet
+  await c.run(180, (i) => {
+    if (i % 7 === 0) c.seqs.kcp++;
+  });
+  const at = c.saved.map((x) => (x.at - 1_000_000) / 1000);
+  assert(c.saved.length >= 2 && c.saved.length <= 4, `captures at ${JSON.stringify(at)} s`);
+  assert(at[0] <= 10, `first capture soon after the first write settles, at ${at[0]} s`);
+  for (let i = 1; i < at.length; i++) assert(at[i] - at[i - 1] >= 60, `gap >= 60 s: ${JSON.stringify(at)}`);
 });
 
 Deno.test("a typical VM lifecycle captures at most about twice", async () => {
@@ -204,10 +216,10 @@ Deno.test("a typical VM lifecycle captures at most about twice", async () => {
     if (i % 5 === 0) c.loop.requestSoon();
   });
   await c.run(10);
-  // [62 s: Held settled, 141 s: the regular 30 s-quiet capture of a
-  // background write, 208 s: Released settled]: two from flushes.
+  // [62 s: Held settled, then the background writes at most once a minute,
+  // 208 s: Released settled]: two from flushes.
   const at = c.saved.map((x) => (x.at - 1_000_000) / 1000);
-  assert(c.saved.length <= 3, `captures at ${JSON.stringify(at)} s`);
+  assert(c.saved.length <= 4, `captures at ${JSON.stringify(at)} s`);
   assertEquals(at.filter((s) => (s > 60 && s <= 70) || s > 195).length, 2, "one per settle point");
   // the two settle points are captured right away
   const settledHeld = c.saved.find((x) => x.at > 1_000_000 + 60_000 && x.at <= 1_000_000 + 70_000);
