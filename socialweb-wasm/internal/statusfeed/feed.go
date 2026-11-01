@@ -70,6 +70,10 @@ type Contract struct {
 	// status.atircRevokes (Pending|Done|Abandoned), run before Released.
 	Step         string `json:"step,omitempty"`
 	AtircRevokes string `json:"atircRevokes,omitempty"`
+	// GuestMayRun mirrors the requester's guestMayRun (runner.go): an ok
+	// receipt (status.contract.receipt with receiptOk true), no termination
+	// and no ok release answer, so a guest may still be running.
+	GuestMayRun bool `json:"guestMayRun,omitempty"`
 	// R2Release is status.contract.r2Release: the A8 cascade's guest answer
 	// (phase Requested|Released|Failed|TimedOut; ok is omitted when false).
 	R2Release *R2Release `json:"r2Release,omitempty"`
@@ -368,6 +372,7 @@ func contract(u *unstructured.Unstructured) Contract {
 	c.FromGuest, _, _ = unstructured.NestedBool(u.Object, "spec", "association", "fromGuest")
 	c.Step, _, _ = unstructured.NestedString(u.Object, "status", "execution", "step")
 	c.AtircRevokes, _, _ = unstructured.NestedString(u.Object, "status", "atircRevokes")
+	c.GuestMayRun = guestMayRun(u)
 	if rel, ok, _ := unstructured.NestedMap(u.Object, "status", "contract", "r2Release"); ok {
 		r := &R2Release{}
 		r.Phase, _ = rel["phase"].(string)
@@ -455,4 +460,21 @@ func policyEngine(u *unstructured.Unstructured) *Resource {
 		r.Message = notReady
 	}
 	return r
+}
+
+// guestMayRun is socialweb's requester guestMayRun over the unstructured
+// status.contract: receipt set, receiptOk true, no termination, and no
+// release answer with ok true.
+func guestMayRun(u *unstructured.Unstructured) bool {
+	if _, ok, _ := unstructured.NestedMap(u.Object, "status", "contract", "receipt"); !ok {
+		return false
+	}
+	if receiptOK, _, _ := unstructured.NestedBool(u.Object, "status", "contract", "receiptOk"); !receiptOK {
+		return false
+	}
+	if _, ok, _ := unstructured.NestedFieldNoCopy(u.Object, "status", "contract", "termination"); ok {
+		return false
+	}
+	released, _, _ := unstructured.NestedBool(u.Object, "status", "contract", "release", "ok")
+	return !released
 }

@@ -148,3 +148,34 @@ func TestR2ReleaseProjection(t *testing.T) {
 		t.Fatalf("absent: %+v", c.R2Release)
 	}
 }
+
+func TestGuestMayRun(t *testing.T) {
+	with := func(c map[string]any) Contract {
+		return contract(&unstructured.Unstructured{Object: map[string]any{
+			"metadata": map[string]any{"name": "c"},
+			"status":   map[string]any{"phase": "Failed", "contract": c},
+		}})
+	}
+	receipt := map[string]any{"uri": "at://did:plc:b/x/1", "cid": "bafy"}
+	cases := []struct {
+		name string
+		c    map[string]any
+		want bool
+	}{
+		{"ok receipt, no answer", map[string]any{"receipt": receipt, "receiptOk": true}, true},
+		{"release answered not ok", map[string]any{"receipt": receipt, "receiptOk": true, "release": map[string]any{"ok": false}}, true},
+		{"no receipt", map[string]any{}, false},
+		{"receipt not ok", map[string]any{"receipt": receipt, "receiptOk": false}, false},
+		{"receiptOk unset", map[string]any{"receipt": receipt}, false},
+		{"terminated", map[string]any{"receipt": receipt, "receiptOk": true, "termination": map[string]any{"reason": "exit"}}, false},
+		{"released ok", map[string]any{"receipt": receipt, "receiptOk": true, "release": map[string]any{"ok": true}}, false},
+	}
+	for _, tc := range cases {
+		if got := with(tc.c).GuestMayRun; got != tc.want {
+			t.Errorf("%s: guestMayRun %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if contract(&unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "c"}}}).GuestMayRun {
+		t.Error("no status: no guest")
+	}
+}
