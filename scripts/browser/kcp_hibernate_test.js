@@ -122,3 +122,140 @@ Deno.test("page wiring: snapshots get this tab's token and the previous owner's 
     if (!worker.includes(needle)) throw new Error(`worker lacks ${needle}`);
   }
 });
+
+// rc131 cold boots, without a capture storm (review page-rc131 2e7d88ba5,
+// 1): a flush asks for a capture (requestSoon) that waits until the seqs
+// were still SOON_QUIET_MS and SOON_GAP_MS after the last capture; a hide
+// (request) captures at once. A fake clock drives the loop's tick.
+function clockedLoop({ captured = { kcp: 9, socialweb: 0 } } = {}) {
+  const c = { t: 1_000_000, seqs: { ...captured }, saved: [], tick: null };
+  const store = {
+    kind: "fake",
+    async save(_go, extra, _gzip, beforeCommit) {
+      const e = extra();
+      await beforeCommit();
+      c.saved.push({ at: c.t, kcp: e.seqs.kcp });
+      return { extra: e, bytes: 0, stored: 0, stats: {} };
+    },
+  };
+  c.loop = startHibernation({
+    go: fakeGo(),
+    key: KEY,
+    ready: () => true,
+    seqs: () => ({ ...c.seqs }),
+    extra: () => ({}),
+    captured,
+    store,
+    log: () => {},
+    timers: { setInterval: (fn) => (c.tick = fn) },
+    now: () => c.t,
+  });
+  // advance the clock second by second, ticking like the 1 s interval
+  c.run = async (seconds, each = () => {}) => {
+    for (let i = 0; i < seconds; i++) {
+      c.t += 1000;
+      each(i);
+      await c.tick();
+    }
+  };
+  return c;
+}
+
+Deno.test("capture after a flush: once the seqs are still, never for a no-op flush", async () => {
+  const c = clockedLoop();
+  c.loop.requestSoon(); // a flush that wrote nothing new
+  await c.run(5);
+  assertEquals(c.saved, [], "no capture without new records");
+  c.seqs.kcp = 10; // the flush persisted one message
+  c.loop.requestSoon();
+  await c.run(2);
+  assertEquals(c.saved, [], "not before SOON_QUIET_MS of still seqs");
+  await c.run(3);
+  assertEquals(c.saved.map((x) => x.kcp), [10], "captured a few seconds after the flush, long before QUIET_MS (30 s)");
+});
+
+Deno.test("no request: moving seqs capture only after the 30 s quiet period", async () => {
+  const c = clockedLoop();
+  c.loop.requestSoon(); // unchanged seqs: not armed
+  await c.run(1);
+  c.seqs.kcp = 10; // a background write, no flush
+  await c.run(20);
+  assertEquals(c.saved, [], "nothing before the quiet period");
+  await c.run(15);
+  assertEquals(c.saved.length, 1, "the regular capture");
+});
+
+Deno.test("a typical VM lifecycle captures at most about twice", async () => {
+  const c = clockedLoop();
+  // Request VM to Held: ~60 s of requester status writes every 1-2 s, a
+  // flush at each of 7 phase/step changes.
+  await c.run(60, (i) => {
+    if (i % 2 === 0) c.seqs.kcp++;
+    if (i % 9 === 0) c.loop.requestSoon();
+  });
+  await c.run(10); // Held, settled
+  // minutes of use: occasional background writes, no flushes
+  await c.run(120, (i) => {
+    if (i % 40 === 0) c.seqs.kcp++;
+  });
+  // Release: ~15 s of writes, 3 flushes
+  await c.run(15, (i) => {
+    c.seqs.kcp++;
+    if (i % 5 === 0) c.loop.requestSoon();
+  });
+  await c.run(10);
+  // [62 s: Held settled, 141 s: the regular 30 s-quiet capture of a
+  // background write, 208 s: Released settled]: two from flushes.
+  const at = c.saved.map((x) => (x.at - 1_000_000) / 1000);
+  assert(c.saved.length <= 3, `captures at ${JSON.stringify(at)} s`);
+  assertEquals(at.filter((s) => (s > 60 && s <= 70) || s > 195).length, 2, "one per settle point");
+  // the two settle points are captured right away
+  const settledHeld = c.saved.find((x) => x.at > 1_000_000 + 60_000 && x.at <= 1_000_000 + 70_000);
+  assert(settledHeld, "Held captured once settled");
+  const burst = c.saved.filter((x) => x.at <= 1_000_000 + 60_000);
+  assertEquals(burst.length, 0, "no capture during the bidding burst (seqs never still 3 s)");
+});
+
+Deno.test("a hide captures at once; the worker asks requestSoon after a flush", async () => {
+  const c = clockedLoop();
+  c.seqs.kcp = 10;
+  c.loop.request(); // visibilitychange to hidden
+  await new Promise((r) => setTimeout(r, 10));
+  assertEquals(c.saved.map((x) => x.kcp), [10]);
+  const worker = await Deno.readTextFile(new URL("./kcp_worker.js", import.meta.url));
+  if (!/if \(out\?\.flushed\) hibernation\?\.requestSoon\(\);/.test(worker)) throw new Error("flushes use requestSoon");
+  if (!/type === "hibernate"\) \{\s*hibernation\?\.request\(\);/.test(worker)) throw new Error("hide uses request");
+});
+
+Deno.test("a hide whose flush lands after the hide's tick still captures at once", async () => {
+  const c = clockedLoop();
+  c.loop.request(); // hidden: the flush has not persisted yet, seqs unchanged
+  await c.run(1);
+  assertEquals(c.saved, [], "nothing new yet");
+  c.seqs.kcp = 10; // the hide's flush persists
+  c.loop.requestSoon();
+  await new Promise((r) => setTimeout(r, 10));
+  assertEquals(c.saved.map((x) => x.kcp), [10], "captured without the SOON_QUIET_MS/SOON_GAP_MS wait");
+  // later flushes are ordinary again
+  await c.run(20);
+  c.seqs.kcp = 11;
+  c.loop.requestSoon();
+  await c.run(1);
+  assertEquals(c.saved.length, 1, "a flush long after the hide waits for still seqs");
+  await c.run(4);
+  assertEquals(c.saved.map((x) => x.kcp), [10, 11]);
+});
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+Deno.test("restampOwner stamps only the snapshot this load restored", async () => {
+  let stored = { ...meta("tab-a"), wallMs: 5, memFile: "mem-5.gz" };
+  const store = { readMeta: async () => stored, writeMeta: async (m) => void (stored = structuredClone(m)) };
+  const restored = structuredClone(stored);
+  stored = { ...meta("tab-a"), wallMs: 9, memFile: "mem-9.gz" }; // a capture committed since
+  assertEquals(await restampOwner(store, "tab-b", restored), false, "another snapshot");
+  stored = structuredClone(restored);
+  assertEquals(await restampOwner(store, "tab-b", restored), true, "the restored one");
+});

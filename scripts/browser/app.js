@@ -872,6 +872,8 @@ async function yieldKcp(why) {
   kcpWorker = null;
   kcpWorkerBooting = null;
   kcpGate.fail(new Error(TAKEN_OVER_MESSAGE));
+  // An idle tab gets no feed update after this: disable Request VM now.
+  refreshComputeRequest();
   setStatus("taken over by another tab", "disconnected");
   banners.show("lock", {
     text: TAKEN_OVER_MESSAGE,
@@ -3208,6 +3210,7 @@ function computeRow(fed) {
     contract.chosenDid ? `bidder ${contract.chosenDid}` : "",
     contract.association ? `Associated ${contract.association}` : "",
     contract.associationMessage ? `association: ${contract.associationMessage}` : "",
+    vmshell.agentTokenNote(contract),
     ...vmshell.releaseNotes(contract, lastFeedState?.contractEvents ?? []),
     contract.guestRequester ? `R2: ${contract.guestRequester.did} ${contract.guestRequester.state ?? "Pending"}` +
       `${contract.guestRequester.message ? ` (${contract.guestRequester.message})` : ""}` : "",
@@ -3984,6 +3987,8 @@ const debugHandle = {
   },
   log: (message) => addLog("info", `debug: ${message}`),
   lock: () => kcpLock.state,
+  // kcp's held writes now, as a phase change or an action would.
+  flush: () => flushKcpSoon("debug").then(() => "flushed"),
   banners: () => banners.ids().map((id) => [id, banners.text(id)]),
   // Flushes kcp's held writes first (at most 3 s): a reload does not wait
   // for the pagehide flush.

@@ -720,6 +720,44 @@ export function releaseNotes(contract, contractEvents = [], now = Date.now()) {
     ...notes.map((note) => `${note} (earlier attempt)`)];
 }
 
+/**
+ * The row note for the requester's atirc token mint (socialweb r130: the
+ * agent/R2 token is minted, with a lease, only after the verified receipt;
+ * condition AtircTokenMinted, fed as contract.atircToken {status, reason,
+ * message}). "" for a contract without the agent or R2.
+ */
+export function agentTokenNote(contract) {
+  // socialweb mints and records the condition for spec.agent; an R2-only
+  // contract (guest tools, agent off) never gets one (review page-rc131 2).
+  const token = contract?.atircToken;
+  if (!contract?.agent && !token) return "";
+  const finished = FINISHED.has(contract.phase ?? "");
+  if (!token) return finished ? "" : "agent token: waiting for receipt";
+  if (token.status === "True") {
+    return {
+      Leased: "agent token: leased",
+      Unleased: "agent token: minted without a lease (the atirc server has no leases)",
+      Present: "agent token: in the bundle",
+    }[token.reason] ?? `agent token: minted (${token.reason || "no reason"})`;
+  }
+  const why = token.message || "no message";
+  // r131 3dca8612: a leased mint whose token has no leases claim fails, for good.
+  if (token.reason === "LeaseClaimMissing") return "agent token: server returned no lease (refused)";
+  if (token.reason === "GaveUp") return `agent token: mint GAVE UP: ${why}`;
+  // A finished contract's retry loop exits without a last condition.
+  if (finished) return `agent token: mint failed: ${why}`;
+  // r131 mints only after the verified receipt; before it the requester
+  // records MintFailed "…no verified receipt…" and tries again later.
+  if (/no verified receipt/.test(why)) return "agent token: waiting for receipt";
+  // A receipt outside a DID repo cannot carry a lease: never retried, so no
+  // "attempt 1 of 12" either.
+  if (/is not in a DID repo/.test(why)) return `agent token: mint failed (not retried): ${why.replace(/^attempt \d+ of \d+: /, "")}`;
+  // "attempt N of M": retried while N < M; anything else is not retried.
+  const attempt = /attempt (\d+) of (\d+)/.exec(why);
+  if (attempt && Number(attempt[1]) < Number(attempt[2])) return `agent token: mint failed, retrying: ${why}`;
+  return `agent token: mint failed: ${why}`;
+}
+
 // ", ~N min left" for the requester's remaining wait, "" without a time.
 function minutesLeft(requestedAt, now) {
   const at = Date.parse(requestedAt ?? "");
@@ -848,6 +886,10 @@ export function infraRecordDid(infra) {
 export function infraRecordResolvable(infra, did) {
   const binding = infra?.spec?.record;
   if (!binding) return true;
+  // r131: RecordOrphaned=True means the controller released the record
+  // without a delete (its repo is gone, or it gave up); nothing is left to
+  // orphan, so the infra counts as finished and may go.
+  if (infraCondition(infra, "RecordOrphaned")?.status === "True") return true;
   if (infraCondition(infra, "RecordUnresolved")?.status === "True") return false;
   if ((infra?.status?.conditions ?? []).some((c) => /repo\.read handle/.test(c?.message ?? ""))) return false;
   return binding.repoRef?.name === infraRepoRef(did).name;
