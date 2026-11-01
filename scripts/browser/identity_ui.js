@@ -98,6 +98,12 @@ export function signInView({ requester = true, identity, local = {}, now = Date.
     if (other && handle) {
       return view("signedIn", "warn", `Signed in as ${handle}, not ${typed}.`, did, primary, signOut);
     }
+    // A session granted before the page asked for more scopes keeps working;
+    // socialweb offers a sign-in for the new ones without leaving Ready.
+    if (url && identity.pendingAction?.kind === "signInAgain") {
+      return view("signedIn", "warn", `Signed in as ${handle || did}`,
+        "New permissions are available: sign in again to grant them.", { label: "Grant permissions", action: "open" }, signOut);
+    }
     return view("signedIn", "ok", `Signed in as ${handle || did}`, detail, primary, signOut);
   }
   if (url) {

@@ -73,6 +73,22 @@ Deno.test("signInView waits out the old status after a tap, then trusts it", () 
   assertEquals(at({}, { ...awaiting, phase: "SessionExpired" }).primary.label, "Sign in again");
 });
 
+Deno.test("signInView offers new permissions without leaving Signed in", () => {
+  const upgrade = {
+    ...ready,
+    pendingAction: { kind: "signInAgain", reason: "ScopeUpgrade", url: URL1, expiresAt: "2026-10-24T12:05:00Z" },
+  };
+  const account = { did: ALICE, handle: "alice.bsky.social" };
+  const v = at({ account }, upgrade);
+  assertEquals([v.state, v.tone, v.text, v.primary.label, v.primary.action, v.secondary.action],
+    ["signedIn", "warn", "Signed in as alice.bsky.social", "Grant permissions", "open", "signOut"]);
+  // once opened (or expired) it is the plain signed-in panel again
+  assertEquals(at({ account, used: [URL1] }, upgrade).primary.action, "switch");
+  assertEquals(signInView({ identity: upgrade, local: { account }, now: Date.parse("2026-10-24T12:06:00Z") }).primary.action, "switch");
+  // a typed other handle still says so first
+  assertEquals(at({ account, typed: "bob.test" }, upgrade).text, "Signed in as alice.bsky.social, not bob.test.");
+});
+
 Deno.test("friendlyError hides package prefixes", () => {
   assertEquals(friendlyError("marketidentity: resolving the configured handle x: not found"),
     "resolving the configured handle x: not found");
