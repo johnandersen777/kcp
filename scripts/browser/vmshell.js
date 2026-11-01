@@ -892,6 +892,17 @@ export async function rebindThenDelete({
   return false;
 }
 
+/**
+ * The contracts' phase/step fingerprint for a feed update and whether it
+ * moved since previous (null: the first update, which only sets the base).
+ * A move is a Go-side status write (Held, a release step) the page flushes
+ * at once instead of leaving it in kcp's persist coalescer for up to 10 s.
+ */
+export function contractTransitions(previous, contracts) {
+  const key = (contracts ?? []).map((c) => `${c?.name}:${c?.phase ?? ""}:${c?.step ?? ""}`).sort().join("|");
+  return { key, changed: previous !== null && previous !== undefined && previous !== key };
+}
+
 /** The tab id in name when it is an infra of origin (originInfraName), else null. */
 export function originInfraTab(origin, name) {
   const prefix = originInfraName(origin, "x").slice(0, -1);

@@ -255,3 +255,30 @@ Deno.test("infraRebindSettled waits for the controller to observe the rebind", (
   assertEquals(infraRebindSettled(at({ observedGeneration: 2 }), ALICE, 2), false, "no record yet");
   assertEquals(infraRebindSettled(at({ observedGeneration: 2, record: { uri: "at://x/y/z" } }), ALICE, 2), true);
 });
+
+Deno.test("contractTransitions: a phase or step change flushes once; an unchanged feed does not", async () => {
+  const { contractTransitions } = await import("./vmshell.js");
+  const feed = (phase, step = "") => [{ name: "a", phase: "Held" }, { name: "b", phase, step }];
+  let base = null;
+  const flushes = [];
+  // What applyComputeState does per feed update.
+  const apply = (contracts) => {
+    const t = contractTransitions(base, contracts);
+    base = t.key;
+    if (t.changed) flushes.push(t.key);
+  };
+  apply(feed("Requesting")); // first update: the base
+  apply(feed("Requesting")); // unchanged
+  assertEquals(flushes.length, 0, "no flush without a change");
+  apply(feed("Held")); // the requester wrote Held
+  assertEquals(flushes.length, 1, "one flush for the phase change");
+  apply(feed("Held"));
+  apply([...feed("Held")].reverse()); // order is not a change
+  assertEquals(flushes.length, 1, "unchanged again");
+  apply(feed("Held", "releasingGuestRequester"));
+  assertEquals(flushes.length, 2, "a step change flushes");
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  if (!/const transitions = vmshell\.contractTransitions\(lastContractTransitions, state\.contracts\);\s*lastContractTransitions = transitions\.key;\s*if \(transitions\.changed\) void flushKcpSoon\("contract status"\);/.test(app)) {
+    throw new Error("applyComputeState flushes on contract transitions");
+  }
+});
