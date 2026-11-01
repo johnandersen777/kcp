@@ -526,6 +526,7 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 				WebRTC:   &v1alpha1.IngressWebRTCConfig{},
 			},
 			SecretsFallback: v1alpha1.SecretsFallbackSealed,
+			Components:      browserPolicySandbox(),
 		},
 	}
 	obj.APIVersion = v1alpha1.GroupVersion.String()
@@ -533,15 +534,16 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 	obj.Name = "app"
 	// Never overwrite an existing app: the UI edits spec.identity at runtime
 	// and the worker config may be empty on a reload with restored state.
-	// Only the comms mode and secrets fallback, which the page owns, are
-	// brought up to date (restored state from before Firehose).
+	// Only the comms mode, secrets fallback and policy sandbox, which the
+	// page owns, are brought up to date (restored state from before Firehose).
 	if cur, err := kube.Get[v1alpha1.MarketRequester](ctx, kc.Resource(v1alpha1.MarketRequesterGVR), "app"); err == nil {
 		if cur.Spec.Comms != nil && cur.Spec.Comms.Mode == obj.Spec.Comms.Mode &&
 			cur.Spec.RequesterIngress != nil && cur.Spec.RequesterIngress.ProviderName() == v1alpha1.IngressProviderWebRTC &&
-			cur.Spec.SecretsFallback == obj.Spec.SecretsFallback {
+			cur.Spec.SecretsFallback == obj.Spec.SecretsFallback && hasBrowserPolicySandbox(cur.Spec.Components) {
 			return nil
 		}
-		patch, err := json.Marshal(map[string]any{"spec": map[string]any{"comms": obj.Spec.Comms, "requesterIngress": obj.Spec.RequesterIngress, "secretsFallback": obj.Spec.SecretsFallback}})
+		patch, err := json.Marshal(map[string]any{"spec": map[string]any{"comms": obj.Spec.Comms, "requesterIngress": obj.Spec.RequesterIngress,
+			"secretsFallback": obj.Spec.SecretsFallback, "components": obj.Spec.Components}})
 		if err != nil {
 			return err
 		}
@@ -551,6 +553,26 @@ func (o *Orchestrator) createRoot(ctx context.Context, cfg Config) error {
 	_, err = kube.Apply[*v1alpha1.MarketRequester](ctx, kc.Resource(v1alpha1.MarketRequesterGVR), obj,
 		kube.ApplyOptions{FieldManager: "socialweb-wasm", Force: true})
 	return err
+}
+
+// policyEngineKey names the PolicyEngine the requester app composes.
+var policyEngineKey = compose.ComponentKey(compose.ComponentKindPolicyEngine, compose.PolicyEngineComponent)
+
+// browserPolicySandbox makes the composed PolicyEngine run policy in the
+// page's fenced browser sandbox (plan 0037), as createRoot sets the webrtc
+// ingress provider: the page cannot run deno.
+func browserPolicySandbox() v1alpha1.ComponentOverrides {
+	return v1alpha1.ComponentOverrides{policyEngineKey: {Settings: &v1alpha1.ComponentSettings{
+		PolicyEngine: &v1alpha1.PolicyEngineSettings{
+			Sandbox: &v1alpha1.PolicyEngineSandboxSettings{Provider: policyv1alpha1.PolicySandboxProviderBrowser},
+		},
+	}}}
+}
+
+func hasBrowserPolicySandbox(components v1alpha1.ComponentOverrides) bool {
+	settings := components[policyEngineKey].Settings
+	return settings != nil && settings.PolicyEngine != nil && settings.PolicyEngine.Sandbox != nil &&
+		settings.PolicyEngine.Sandbox.Provider == policyv1alpha1.PolicySandboxProviderBrowser
 }
 
 func (o *Orchestrator) Close() error {
