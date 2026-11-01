@@ -39,7 +39,12 @@ Deno.test("agentTokenNote: a mint without a leases claim is refused (r131); Unle
 
 Deno.test("agentTokenNote: nothing for contracts without a token, or finished before one", () => {
   assertEquals(agentTokenNote({ name: "c", phase: "Held" }), "", "no agent, no R2");
-  assertEquals(agentTokenNote({ name: "c", phase: "Held", guestTools: ["socialweb-computer"] }), "agent token: waiting for receipt", "R2 mints too");
+  assertEquals(agentTokenNote({ name: "c", phase: "Held", guestTools: ["socialweb-computer"] }), "", "R2 only (agent off): socialweb records no mint");
+  assertEquals(
+    agentTokenNote({ name: "c", phase: "Held", guestTools: ["socialweb-computer"], atircToken: { status: "True", reason: "Leased" } }),
+    "agent token: leased",
+    "R2 with a condition shows it",
+  );
   assertEquals(agentTokenNote(agent("Released")), "", "released before any mint");
   assertEquals(agentTokenNote(agent("Released", { status: "True", reason: "Leased" })), "agent token: leased", "history keeps the outcome");
 });
@@ -63,5 +68,22 @@ Deno.test("agentTokenNote: r131 reasons", () => {
   assertEquals(
     agentTokenNote(agent("Held", { status: "False", reason: "LeaseClaimMissing", message: "attempt 1, not retried: the atirc endpoint answered a leased mint with a token that carries no leases claim" })),
     "agent token: server returned no lease (refused)",
+  );
+});
+
+Deno.test("agentTokenNote: finished contracts and never-retried failures (review page-rc131 3)", () => {
+  assertEquals(
+    agentTokenNote(agent("Released", { status: "False", reason: "MintFailed", message: "attempt 3 of 12: lease refused" })),
+    "agent token: mint failed: attempt 3 of 12: lease refused",
+    "no 'retrying' on a Released row",
+  );
+  assertEquals(
+    agentTokenNote(agent("Released", { status: "False", reason: "MintFailed", message: "attempt 1 of 12: the contract has no verified receipt; no atirc token is minted before it" })),
+    "agent token: mint failed: attempt 1 of 12: the contract has no verified receipt; no atirc token is minted before it",
+    "no 'waiting' on a Released row",
+  );
+  assertEquals(
+    agentTokenNote(agent("Held", { status: "False", reason: "MintFailed", message: "attempt 1 of 12: the receipt at://x/y/z is not in a DID repo" })),
+    "agent token: mint failed (not retried): the receipt at://x/y/z is not in a DID repo",
   );
 });

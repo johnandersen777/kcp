@@ -727,9 +727,12 @@ export function releaseNotes(contract, contractEvents = [], now = Date.now()) {
  * message}). "" for a contract without the agent or R2.
  */
 export function agentTokenNote(contract) {
-  if (!contract?.agent && !(contract?.guestTools?.length > 0)) return "";
-  const token = contract.atircToken;
-  if (!token) return FINISHED.has(contract.phase ?? "") ? "" : "agent token: waiting for receipt";
+  // socialweb mints and records the condition for spec.agent; an R2-only
+  // contract (guest tools, agent off) never gets one (review page-rc131 2).
+  const token = contract?.atircToken;
+  if (!contract?.agent && !token) return "";
+  const finished = FINISHED.has(contract.phase ?? "");
+  if (!token) return finished ? "" : "agent token: waiting for receipt";
   if (token.status === "True") {
     return {
       Leased: "agent token: leased",
@@ -741,9 +744,14 @@ export function agentTokenNote(contract) {
   // r131 3dca8612: a leased mint whose token has no leases claim fails, for good.
   if (token.reason === "LeaseClaimMissing") return "agent token: server returned no lease (refused)";
   if (token.reason === "GaveUp") return `agent token: mint GAVE UP: ${why}`;
+  // A finished contract's retry loop exits without a last condition.
+  if (finished) return `agent token: mint failed: ${why}`;
   // r131 mints only after the verified receipt; before it the requester
   // records MintFailed "…no verified receipt…" and tries again later.
   if (/no verified receipt/.test(why)) return "agent token: waiting for receipt";
+  // A receipt outside a DID repo cannot carry a lease: never retried, so no
+  // "attempt 1 of 12" either.
+  if (/is not in a DID repo/.test(why)) return `agent token: mint failed (not retried): ${why.replace(/^attempt \d+ of \d+: /, "")}`;
   // "attempt N of M": retried while N < M; anything else is not retried.
   const attempt = /attempt (\d+) of (\d+)/.exec(why);
   if (attempt && Number(attempt[1]) < Number(attempt[2])) return `agent token: mint failed, retrying: ${why}`;

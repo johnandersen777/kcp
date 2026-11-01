@@ -118,19 +118,19 @@ type Contract struct {
 
 // R2Release is the guest requester's answer to guest.r2Release; the phase
 // decides (OK is nil unless true).
-// Condition is one status condition's status, reason and message.
-type Condition struct {
-	Status  string `json:"status"`
-	Reason  string `json:"reason,omitempty"`
-	Message string `json:"message,omitempty"`
-}
-
 type R2Release struct {
 	Phase       string `json:"phase,omitempty"`
 	OK          *bool  `json:"ok,omitempty"`
 	Message     string `json:"message,omitempty"`
 	RequestedAt string `json:"requestedAt,omitempty"`
 	AnsweredAt  string `json:"answeredAt,omitempty"`
+}
+
+// Condition is one status condition's status, reason and message.
+type Condition struct {
+	Status  string `json:"status"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // GuestRequester is the R2 guest's reported requester DID.
