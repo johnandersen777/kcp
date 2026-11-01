@@ -14,7 +14,7 @@
 // Needs the build's socialweb mirror; without it every case FAILS (no skip:
 // a skip knob on a security gate is a bypass).
 
-import { runInWorker } from "./policy_sandbox.js";
+import { rewriteNodeImports, runInWorker } from "./policy_sandbox.js";
 
 function assert(cond, message) {
   if (!cond) throw new Error(message);
@@ -159,4 +159,18 @@ Deno.test("fail-closed/verdict: every non-answer denies (malformed-output-deny, 
     ["allow not strict", { ...ok, stdout: ok.stdout.replace("allow=true", "allow=yes") }],
     ["one allow=false", { ...ok, stdout: ok.stdout.replace("allow=true\\n", "allow=true\\nallow=false\\n") }],
   ]) assert(!verdict(r).allow, what);
+});
+
+// WebKit denies static data: imports in the opaque-origin Worker, so after
+// the rewrite a bundled action must have no static import of node: or data:
+// left (Deno would accept one, so the runs above do not show it).
+Deno.test("always-run/page/bundled actions keep no static node: or data: import after the rewrite", async () => {
+  if (!haveMirror) throw new Error(`no socialweb mirror at ${mirror.pathname}`);
+  for (const name of ["policy-requester-tangled-vouch", "policy-requester-mutuals", "policy-bidder-mutuals"]) {
+    const src = await Deno.readTextFile(new URL(`bundled-actions/tangy/${name}/dist/index.js`, mirror));
+    const out = rewriteNodeImports(src);
+    const statics = [...out.matchAll(/\bimport\s*[\w${*][^;\n(]{0,200}?\bfrom\s*["'](node|data):/g), ...out.matchAll(/\bimport\s*["'](node|data):/g)];
+    if (statics.length) throw new Error(`${name}: static import left: ${statics[0][0].slice(0, 80)}`);
+    if (/["']node:/.test(out)) throw new Error(`${name}: a node: specifier was not rewritten`);
+  }
 });

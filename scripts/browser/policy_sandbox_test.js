@@ -98,6 +98,12 @@ import { y } from "./not-node.js";`);
   eq(/await import\("data:text\/javascript,[^"]*"\);\nconst m/.test(forms), true, "side effect");
   eq(forms.includes(`const m = await import("data:text/javascript,`), true, "dynamic");
   eq(forms.includes(`import { y } from "./not-node.js";`), true, "other specifiers untouched");
+  // the bundled actions repeat aliased imports of one module (esbuild output)
+  const repeated = await run(`import { Buffer as Buffer2 } from "node:buffer";
+import { Buffer as Buffer3 } from "node:buffer";
+import crypto from "node:crypto";
+console.log(Buffer2 === Buffer3, Buffer2.from("hi").toString("utf8"), typeof crypto.randomBytes);`);
+  eq([repeated.exitCode, repeated.stdout], [0, "true hi function\n"], "repeated aliased imports");
   const r = await run(`import { Buffer } from "node:buffer";
 import crypto from "node:crypto";
 import * as nc from "node:crypto";
