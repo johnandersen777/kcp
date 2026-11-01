@@ -138,6 +138,7 @@ function clockedLoop({ captured = { kcp: 9, socialweb: 0 } } = {}) {
       return { extra: e, bytes: 0, stored: 0, stats: {} };
     },
   };
+  c.store = store;
   c.loop = startHibernation({
     go: fakeGo(),
     key: KEY,
@@ -279,6 +280,35 @@ Deno.test("a hide whose flush lands after the hide's tick still captures at once
   assertEquals(c.saved.length, 1, "a flush long after the hide waits for still seqs");
   await c.run(4);
   assertEquals(c.saved.map((x) => x.kcp), [10, 11]);
+});
+
+Deno.test("a hide during an in-flight capture still captures at once afterwards", async () => {
+  const c = clockedLoop();
+  await c.run(59, (i) => {
+    if (i === 0) c.seqs.kcp = 10;
+  });
+  assertEquals(c.saved, [], "boot grace");
+  // the background capture of seq 10 is due on the next tick; hold its save open
+  let release, entered;
+  const gate = new Promise((r) => (release = r));
+  const inSave = new Promise((r) => (entered = r));
+  const save = c.store.save;
+  c.store.save = async (go, extra, gzip, beforeCommit) => {
+    const e = extra(); // the real capture takes memory and seqs at once
+    entered();
+    await gate;
+    return save(go, () => e, gzip, beforeCommit);
+  };
+  c.t += 1000;
+  const inflight = c.tick();
+  await inSave;
+  c.seqs.kcp = 11; // the hide's flush lands while the capture runs
+  c.loop.request(); // hidden
+  release();
+  await inflight;
+  assertEquals(c.saved.map((x) => x.kcp), [10], "the in-flight capture has the pre-hide seqs");
+  await c.run(1);
+  assertEquals(c.saved.map((x) => x.kcp), [10, 11], "the hide still captured at once");
 });
 
 function assert(condition, message) {
