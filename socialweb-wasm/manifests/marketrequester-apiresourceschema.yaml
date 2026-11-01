@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-33.marketrequesters.socialweb.computer
+  name: v1alpha1-34.marketrequesters.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -247,6 +247,16 @@ spec:
                     items:
                       type: string
                     x-kubernetes-list-type: set
+                  associationRef:
+                    type: object
+                    properties:
+                      uri:
+                        type: string
+                      cid:
+                        type: string
+                    required:
+                      - uri
+                      - cid
                   oauthClientID:
                     type: string
                   oauthRedirectURI:

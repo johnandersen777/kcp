@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-21.computecontracts.socialweb.computer
+  name: v1alpha1-22.computecontracts.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -181,6 +181,16 @@ spec:
                       - pins
                 required:
                   - clusterRef
+              association:
+                type: object
+                properties:
+                  subject:
+                    type: string
+                  refFile:
+                    type: string
+                    default: /etc/socialweb-computer/association-ref
+                required:
+                  - subject
               ttlSecondsAfterFinished:
                 type: integer
                 format: int32
@@ -690,6 +700,16 @@ spec:
                       type: string
                   required:
                     - uri
+              association:
+                type: object
+                properties:
+                  uri:
+                    type: string
+                  cid:
+                    type: string
+                required:
+                  - uri
+                  - cid
       additionalPrinterColumns:
         - name: Phase
           type: string
