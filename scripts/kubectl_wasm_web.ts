@@ -191,6 +191,7 @@ const assets = new Map<string, string>([
   ["/ssh_worker.js", "ssh_worker.js"],
   ["/ssh_cmd.js", "ssh_cmd.js"],
   ["/wasm_snapshot.js", "wasm_snapshot.js"],
+  ["/fetch_retry.js", "fetch_retry.js"],
   ["/kcp_hibernate.js", "kcp_hibernate.js"],
   ["/debug_link.js", "debug_link.js"],
   ["/kcp_lock.js", "kcp_lock.js"],

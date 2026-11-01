@@ -222,6 +222,12 @@ globalThis.__kcpResolve = (callbackID, payload) => {
 };
 
 const { fetchWasm, mib } = await import("./wasm_fetch.js");
+// Go's net/http (and a restored heap, which resolves "fetch" by path) calls
+// globalThis.fetch: retry a GET the browser dropped without a response once.
+const { retryingFetch } = await import("./fetch_retry.js");
+globalThis.fetch = retryingFetch(globalThis.fetch.bind(globalThis), {
+  onRetry: (url, err) => log("info", `fetch dropped without a response (${err.message}); retrying once: ${String(url).split("?")[0]}`),
+});
 const hibernate = await import("./kcp_hibernate.js");
 const go = hibernate.instrument(new globalThis.Go());
 // Low-memory mode (iOS): collect four times as often to keep the heap small. No
@@ -284,12 +290,21 @@ log("info", `kcp.wasm ${mib(wasmBytes)} MiB downloaded + compiled in ${compileMs
 // of a new build runs with it, and its snapshot must still resume the next
 // reload (it never did: every upgrade cost a second cold boot). A load that
 // asks for forceApply cold boots instead of restoring.
-const snapshotKey = await hibernate.snapshotKey(
-  await wasmHash,
-  init.execUrl,
-  // noopLog is boot state too: a restored heap keeps the logging it booted with.
-  JSON.stringify({ ...init.socialweb, restore: undefined, forceApply: undefined, noopLog: init.noopLog || undefined }),
+// noopLog is boot state too: a restored heap keeps the logging it booted with.
+const snapshotConf = { ...init.socialweb, restore: undefined, forceApply: undefined, noopLog: init.noopLog || undefined };
+const snapshotKey = await hibernate.snapshotKey(await wasmHash, init.execUrl, JSON.stringify(snapshotConf));
+// Per-field hashes of the boot configuration, kept with each capture, so a
+// key mismatch names the fields that changed (values are never logged).
+const confHashes = Object.fromEntries(
+  await Promise.all(
+    Object.entries(snapshotConf)
+      .filter(([, v]) => v !== undefined)
+      .map(async ([k, v]) => [k, (await hibernate.sha256(new TextEncoder().encode(JSON.stringify(v)))).slice(0, 12)]),
+  ),
 );
+// What this load did with the stored snapshot; the page logs it and keeps
+// the last one, since early boot lines scroll out of a long cold boot's log.
+let restoreOutcome = "not restored: snapshots are off (low-memory mode or kcp.snapshot=0)";
 const restored = await restoreSnapshot();
 if (init.debugMemory) {
   // Linear memory only grows; its size is the best crash predictor on iOS.
@@ -387,7 +402,7 @@ if (restored && typeof globalThis.socialwebIngressList === "function") {
 }
 const readyMs = Math.round(performance.now() - started);
 log("ok", `kcp ready in ${readyMs}ms`);
-self.postMessage({ type: "ready", restored: restored?.stats ?? null, compileMs, readyMs });
+self.postMessage({ type: "ready", restored: restored?.stats ?? null, restoreOutcome, compileMs, readyMs });
 if (restored && init.hibernate?.owner) {
   hibernate.restampOwner(hibernate.pickStore(init.hibernate.store), init.hibernate.owner.token, restored.meta)
     .catch((err) => log("warn", `snapshot owner restamp failed: ${err?.message ?? err}`));
@@ -400,9 +415,14 @@ hibernation = restoreUnreadable ? null : startHibernationLoop();
 // returns null to cold boot. A failure after the restore started restarts
 // the worker (finishRestore covers failures once Go runs).
 async function restoreSnapshot() {
-  if (!init.hibernate?.enabled || init.hibernate.restore === false) return null;
+  if (!init.hibernate?.enabled) return null;
+  if (init.hibernate.restore === false) {
+    restoreOutcome = "not restored: the page booted cold on purpose (a restore was just abandoned)";
+    return null;
+  }
   if (init.socialweb?.forceApply) {
-    log("info", "snapshot not restored: this load re-applies the socialweb manifests (new build or socialweb.forceApply)");
+    restoreOutcome = "not restored: this load re-applies the socialweb manifests (new build or socialweb.forceApply)";
+    log("info", `snapshot ${restoreOutcome}`);
     return null;
   }
   try {
@@ -414,14 +434,21 @@ async function restoreSnapshot() {
       // Owner fence: only a snapshot of the tab that owned the saved state
       // when this load started (undefined: no fence, memory state).
       owner: init.hibernate.owner ? init.hibernate.owner.previous ?? null : undefined,
+      confHashes,
       store: hibernate.pickStore(init.hibernate.store),
       log,
+      outcome: (o) => {
+        restoreOutcome = o;
+      },
       before(meta) {
         importFsState(meta.extra.fs);
         latestState = meta.extra.latestState ?? null;
       },
     });
-    if (r) log("info", `snapshot restored: ${JSON.stringify(r.stats)}`);
+    if (r) {
+      restoreOutcome = `restored (snapshot ${r.stats.gapS}s old, ${r.stats.storedMiB} MiB ${r.stats.store})`;
+      log("info", `snapshot restored: ${JSON.stringify(r.stats)}`);
+    }
     return r;
   } catch (err) {
     await restartCold(err);
@@ -484,7 +511,7 @@ function startHibernationLoop() {
     log,
     ready: () => typeof globalThis.socialwebHandleRequest === "function" && pending.size === 0,
     seqs: () => ({ ...seqs }),
-    extra: () => ({ fs: exportFsState(), latestState }),
+    extra: () => ({ fs: exportFsState(), latestState, confHashes }),
     owner: init.hibernate.owner
       ? { token: init.hibernate.owner.token, current: () => hibernate.readOwner(init.hibernate.owner.db) }
       : null,

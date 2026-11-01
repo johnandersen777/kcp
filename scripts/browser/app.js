@@ -1002,6 +1002,7 @@ async function kcpBuildChanged() {
 
 async function spawnKcp(useSnapshot = true) {
   const spawnStarted = performance.now();
+  logPreviousSnapshotOutcome();
   const [initialState, socialwebSnapshot, hibernate, buildChanged, sandboxFrame] = await Promise.all([
     loadKcpState(),
     loadInitialState(socialwebStateKey),
@@ -1010,7 +1011,9 @@ async function spawnKcp(useSnapshot = true) {
     policySandboxFrame(),
   ]);
   const policySandboxPort = sandboxFrame ? connectFrame(sandboxFrame) : undefined;
-  if (buildChanged && initialState) addLog("info", "kcp.wasm changed since the saved state; re-applying the socialweb manifests");
+  if (buildChanged) {
+    addLog("info", `kcp.wasm build ${JSON.stringify(kcpBuildEtag)} is not the saved state's ${JSON.stringify(localStorage.getItem("kcp.stateBuild"))}; re-applying the socialweb manifests`);
+  }
   // The values handed to Go, for a backup if it cannot read them.
   restoredRaw = { kcp: initialState, socialweb: socialwebSnapshot };
   const worker = new Worker("/kcp_worker.js", { type: "module" });
@@ -1116,6 +1119,27 @@ function logBootKind(ready, spawnStarted) {
     addLog("debug", `kcp snapshot restore: ${JSON.stringify(ready.restored)}`);
   } else {
     addLog("ok", `kcp cold boot (${seconds}s)`);
+  }
+  if (ready?.restoreOutcome) {
+    addLog("info", `kcp snapshot: ${ready.restoreOutcome}`);
+    try {
+      localStorage.setItem(SNAPSHOT_LAST_KEY, JSON.stringify({ at: new Date().toISOString(), outcome: ready.restoreOutcome }));
+    } catch {
+      // storage full or blocked: the line above still shows it.
+    }
+  }
+}
+
+// The last load's snapshot outcome, logged again early in the next load: a
+// long cold boot scrolls its own early lines out of the log.
+const SNAPSHOT_LAST_KEY = "kcp.snapshot.last";
+
+function logPreviousSnapshotOutcome() {
+  try {
+    const last = JSON.parse(localStorage.getItem(SNAPSHOT_LAST_KEY) ?? "null");
+    if (last?.outcome) addLog("info", `kcp snapshot on the previous load (${last.at}): ${last.outcome}`);
+  } catch {
+    // unreadable or blocked: nothing to report.
   }
 }
 
