@@ -307,12 +307,15 @@ export function releasedEntry(entry, ccRequestedAt = "", now = new Date()) {
 }
 
 /**
- * markFinishedInfraContracts' update: a Requested entry becomes Released and
- * keeps every other field (a releaseRequestedAt too); null for anything else,
- * so an entry a Release already wrote is not written again.
+ * markFinishedInfraContracts' update: a Requested entry becomes Released
+ * like a Release does (releasedEntry: a fresh releaseRequestedAt strictly
+ * after the entry's and the contract's, ccRequestedAt), so the infra
+ * controller re-asks a Failed contract whose guest may still run; every
+ * other field stays. null for anything else, so an entry a Release already
+ * wrote is not written again.
  */
-export function finishedEntry(entry) {
-  return entry?.state === "Requested" ? { ...entry, state: "Released" } : null;
+export function finishedEntry(entry, ccRequestedAt = "", now = new Date()) {
+  return entry?.state === "Requested" ? releasedEntry(entry, ccRequestedAt, now) : null;
 }
 
 const INFRA_WRITE_ATTEMPTS = 3;
@@ -456,6 +459,17 @@ export function canReleaseAgain(contract, sentAt = "") {
 export function releaseTimedOut(contract) {
   return Boolean(contract?.release) && contract?.phase === "Failed" && Boolean(contract?.releaseFailed) &&
     contract?.releaseFailedReason === "ReleaseBound" && releaseAnswered(contract);
+}
+
+/**
+ * The Release button: an active contract, or a plain Failed one whose guest
+ * may still run (the feed's guestMayRun: ok receipt, no termination, no ok
+ * release; no ReleaseFailed needed) with no request pending and no Release
+ * again offered instead.
+ */
+export function releaseOffered(contract) {
+  if (isActive(contract)) return true;
+  return contract?.phase === "Failed" && Boolean(contract?.guestMayRun) && releaseAnswered(contract) && !canReleaseAgain(contract);
 }
 
 /** The row's phase: a pending re-release shows as Releasing, not the earlier Failed. */
