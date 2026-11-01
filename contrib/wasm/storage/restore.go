@@ -324,6 +324,56 @@ func RestoreAll(data []byte) error {
 	return nil
 }
 
+// MergeAll inserts the items of one SnapshotAll-shaped envelope whose keys
+// the live stores do not hold (Store.MergeWith): for a running apiserver,
+// unlike RestoreAll, which replaces every store at boot. The same filter and
+// envelope checks apply. Call it once the resources' APIs are installed
+// (their CRDs established) and before the controllers that own them start.
+// It returns how many items it inserted.
+func MergeAll(data []byte) (int, error) {
+	if len(data) == 0 {
+		return 0, nil
+	}
+	if err := CheckSnapshot(data); err != nil {
+		return 0, err
+	}
+	var all All
+	if err := json.Unmarshal(data, &all); err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrUnreadableSnapshot, err)
+	}
+	names := make([]string, 0, len(all.Stores))
+	for name := range all.Stores {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	total := 0
+	for _, name := range names {
+		raw, err := filterSnapshot(all.Stores[name])
+		if err != nil {
+			return total, fmt.Errorf("filtering store %q: %w", name, err)
+		}
+		added, err := Shared(name).MergeWith(raw, func(key string, itemRaw []byte) (runtime.Object, error) {
+			if decode, ok := decoderFor(key); ok {
+				return decode(itemRaw)
+			}
+			var u unstructured.Unstructured
+			if err := u.UnmarshalJSON(itemRaw); err != nil {
+				return nil, fmt.Errorf("decoding unregistered item %q: %w", key, err)
+			}
+			if u.GetAPIVersion() == "" || u.GetKind() == "" {
+				return nil, fmt.Errorf("unregistered item %q has no apiVersion/kind", key)
+			}
+			return &u, nil
+		})
+		total += added
+		if err != nil {
+			return total, fmt.Errorf("merging store %q: %w", name, err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "merge: %d item(s) inserted\n", total)
+	return total, nil
+}
+
 // snapshotFlush carries FlushSnapshot requests to the OnSnapshot loop. It is
 // unbuffered: without a running loop a request is never taken.
 var snapshotFlush = make(chan chan struct{})

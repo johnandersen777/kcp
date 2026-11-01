@@ -122,3 +122,40 @@ func TestFlushSnapshotPersistsPendingWrites(t *testing.T) {
 	default:
 	}
 }
+
+// MergeAll never replaces a store: a fragment brings back its own keys only,
+// and an unreadable envelope changes nothing.
+func TestMergeAllKeepsTheLiveStore(t *testing.T) {
+	name := "merge-all-test"
+	s := Shared(name)
+	ctx := context.Background()
+	RegisterDecoder(prefix, decodeFetch)
+	if err := s.Create(ctx, key("live"), newFetch("live"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	saved := New()
+	defer saved.Close()
+	if err := saved.Create(ctx, key("saved"), newFetch("saved"), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := saved.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := json.Marshal(All{Version: allVersion, Stores: map[string]json.RawMessage{name: snap}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MergeAll([]byte(`{"version":2,"stores":{}}`)); !errors.Is(err, ErrUnreadableSnapshot) {
+		t.Fatalf("MergeAll(newer envelope) = %v, want ErrUnreadableSnapshot", err)
+	}
+	added, err := MergeAll(envelope)
+	if err != nil || added != 1 {
+		t.Fatalf("MergeAll = %d, %v; want 1", added, err)
+	}
+	for _, n := range []string{"live", "saved"} {
+		if err := s.Get(ctx, key(n), kstorage.GetOptions{}, newFetch("")); err != nil {
+			t.Fatalf("%s missing after MergeAll: %v", n, err)
+		}
+	}
+}
