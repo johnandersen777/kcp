@@ -3590,8 +3590,16 @@ function renderPolicyEngine(engine) {
   if (engine) addLog("info", `PolicyEngine ${engine.name} ${engine.phase ?? "Pending"} ready=${Boolean(engine.ready)} fenced=${engine.fenced ?? "unset"}: ${engine.message ?? ""}`);
 }
 
+// The last contracts phase/step fingerprint (vmshell.contractTransitions).
+let lastContractTransitions = null;
 function applyComputeState(state) {
   lastFeedState = state;
+  // Session 5ne4ov: Held, written by the requester 2 s before a reload, sat
+  // in kcp's persist coalescer and was lost. A phase or step change is
+  // flushed once per feed update (flushKcpSoon coalesces).
+  const transitions = vmshell.contractTransitions(lastContractTransitions, state.contracts);
+  lastContractTransitions = transitions.key;
+  if (transitions.changed) void flushKcpSoon("contract status");
   renderPolicyEngine(state.policyEngine);
   for (const watcher of [...feedWatchers]) watcher(state);
   const contracts = state.contracts ?? [];
