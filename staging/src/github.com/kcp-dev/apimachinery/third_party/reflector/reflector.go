@@ -86,13 +86,32 @@ var (
 	// We used to make the call every 1sec (1 QPS), the goal here is to achieve ~98% traffic reduction when
 	// API server is not healthy. With these parameters, backoff will stop at [30,60) sec interval which is
 	// 0.22 QPS.
-	defaultBackoffInit = 800 * time.Millisecond
+	//
+	// kcp modification: the first retry comes after [100,200) ms instead of [800,1600) ms. kcp starts
+	// informers while it is still creating and binding their APIs (404 until a CRD is served, 429 while
+	// a new watch cache initializes), and each such informer otherwise sat 0.8-3.2 s in backoff on every
+	// boot. The growth (factor 2, jitter 1), the cap and the reset are unchanged: against an unhealthy
+	// apiserver a reflector makes three extra retries (100, 200, 400 ms) per 2 minute reset window
+	// before it reaches the old schedule, and the [30,60) s cap still bounds the steady state.
+	defaultBackoffInit = 100 * time.Millisecond
 	defaultBackoffMax  = 30 * time.Second
 	// If we don't backoff for 2min, assume API server is healthy and we reset the backoff.
 	defaultBackoffReset  = 2 * time.Minute
 	defaultBackoffFactor = 2.0
 	defaultBackoffJitter = 1.0
 )
+
+// defaultBackoff is the list/watch retry backoff of a reflector whose
+// ReflectorOptions.Backoff is nil.
+func defaultBackoff() *wait.Backoff {
+	return &wait.Backoff{
+		Duration: defaultBackoffInit,
+		Cap:      defaultBackoffMax,
+		Steps:    int(math.Ceil(float64(defaultBackoffMax) / float64(defaultBackoffInit))),
+		Factor:   defaultBackoffFactor,
+		Jitter:   defaultBackoffJitter,
+	}
+}
 
 /* kcp: the interfaces are not needed
 // ReflectorStore is the subset of cache.Store that the reflector uses
@@ -293,13 +312,7 @@ func NewReflectorWithOptions(lw cache.ListerWatcher, expectedType interface{}, s
 
 	backoff := options.Backoff
 	if backoff == nil {
-		backoff = &wait.Backoff{
-			Duration: defaultBackoffInit,
-			Cap:      defaultBackoffMax,
-			Steps:    int(math.Ceil(float64(defaultBackoffMax) / float64(defaultBackoffInit))),
-			Factor:   defaultBackoffFactor,
-			Jitter:   defaultBackoffJitter,
-		}
+		backoff = defaultBackoff()
 	}
 
 	// kcp modification: default to cluster-aware key function
