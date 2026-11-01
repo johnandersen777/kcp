@@ -222,6 +222,12 @@ globalThis.__kcpResolve = (callbackID, payload) => {
 };
 
 const { fetchWasm, mib } = await import("./wasm_fetch.js");
+// Go's net/http (and a restored heap, which resolves "fetch" by path) calls
+// globalThis.fetch: retry a GET the browser dropped without a response once.
+const { retryingFetch } = await import("./fetch_retry.js");
+globalThis.fetch = retryingFetch(globalThis.fetch.bind(globalThis), {
+  onRetry: (url, err) => log("info", `fetch dropped without a response (${err.message}); retrying once: ${String(url).split("?")[0]}`),
+});
 const hibernate = await import("./kcp_hibernate.js");
 const go = hibernate.instrument(new globalThis.Go());
 // Low-memory mode (iOS): collect four times as often to keep the heap small. No

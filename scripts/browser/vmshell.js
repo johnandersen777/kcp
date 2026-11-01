@@ -124,11 +124,24 @@ export function recordSynced(infra) {
   return infraCondition(infra, "Synced")?.status === "True";
 }
 
+// A record read the browser dropped without any HTTP response (Safari "Load
+// failed", Chrome "Failed to fetch", Firefox "NetworkError"), as Go's js
+// net/http reports it. The controller retries it, so it is not a failure.
+const NETWORK_DROP = /fetch\(\) failed|Load failed|Failed to fetch|NetworkError/;
+
+/** True while the controller is retrying a transient record read. */
+export function recordSyncRetrying(infra) {
+  const synced = infraCondition(infra, "Synced");
+  if (synced?.status !== "False") return false;
+  return synced.reason === "RecordReadRetrying" || (synced.reason === "RecordUnavailable" && NETWORK_DROP.test(synced.message ?? ""));
+}
+
 /** The record sync failure to show, if the record is invalid or unavailable. */
 export function recordSyncError(infra) {
   const valid = infraCondition(infra, "RecordValid");
   if (valid?.status === "False") return valid.message || "the EphemeralInfra record is invalid";
   const synced = infraCondition(infra, "Synced");
+  if (recordSyncRetrying(infra)) return "";
   if (synced?.status === "False" && (synced.reason === "RecordUnavailable" || synced.reason === "RecordInvalid")) {
     return synced.message || "the EphemeralInfra record is unavailable";
   }

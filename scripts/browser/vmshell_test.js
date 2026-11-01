@@ -20,6 +20,7 @@ import {
   originInfraName,
   randomTabId,
   recordSyncError,
+  recordSyncRetrying,
   recordSynced,
   repoName,
   sessionInfraManifest,
@@ -222,6 +223,17 @@ Deno.test("record conditions drive the sync wait", () => {
   assert(recordSyncError(withConditions([{ type: "Synced", status: "False", reason: "RecordUnavailable", message: "no repo.read" }])) === "no repo.read", "unavailable");
   assert(recordSyncError(withConditions([{ type: "RecordValid", status: "False", message: "bad record" }])) === "bad record", "invalid");
   assert(recordSyncError(withConditions([{ type: "SyncConflict", status: "True", reason: "RecordWon", message: "record won" }])) === "", "conflict is not fatal");
+  // A read the phone dropped (owner report, page-rc135) and rc136's retry reason keep the wait going.
+  const dropped = withConditions([{
+    type: "Synced",
+    status: "False",
+    reason: "RecordUnavailable",
+    message: 'infra: reading at://did:plc:me/computer.socialweb.ephemeralInfra/web-x: xrpc: com.atproto.repo.getRecord: Get "https://pds/xrpc": net/http: fetch() failed: TypeError: Load failed',
+  }]);
+  assert(recordSyncRetrying(dropped) && recordSyncError(dropped) === "", "network drop is retried");
+  const retrying = withConditions([{ type: "Synced", status: "False", reason: "RecordReadRetrying", message: "retrying" }]);
+  assert(recordSyncRetrying(retrying) && recordSyncError(retrying) === "", "RecordReadRetrying is not fatal");
+  assert(!recordSyncRetrying(withConditions([{ type: "Synced", status: "False", reason: "RecordUnavailable", message: "no repo.read" }])), "a real error is not retrying");
   assert(infraRecordURI({ status: { record: { uri: "at://did:plc:me/computer.socialweb.ephemeralInfra/web-x" } } }, "did:plc:me", "web-x") ===
     "at://did:plc:me/computer.socialweb.ephemeralInfra/web-x", "uri");
 });
