@@ -37,6 +37,7 @@ import (
 
 	kcpdynamic "github.com/kcp-dev/client-go/dynamic"
 	dynamicextension "github.com/kcp-dev/virtual-workspace-framework/pkg/client/dynamic"
+	dynamiccontext "github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/context"
 )
 
 // StoreFuncs holds proto-functions that can be mutated by successive actors to wrap behavior.
@@ -202,6 +203,14 @@ func DefaultDynamicDelegatedStoreFuncs(
 
 		requestInfo, _ := genericapirequest.RequestInfoFrom(ctx)
 
+		// A server-side apply PATCH captured by the virtual workspace handler
+		// (apiserver.CaptureApplyPatch) is forwarded to the backend as an apply,
+		// not as the object computed locally: an Update would make the backend
+		// record every field as owned by an Update entry of the field manager,
+		// and a later apply omitting a field would never remove it.
+		applyPatch, isApply := dynamiccontext.ApplyPatchFrom(ctx)
+		isApply = isApply && requestInfo != nil && requestInfo.Verb == "patch"
+
 		doUpdate := func() (*unstructured.Unstructured, error) {
 			needToCreate := false
 			oldObj, err := s.Get(ctx, name, &metav1.GetOptions{})
@@ -228,6 +237,10 @@ func DefaultDynamicDelegatedStoreFuncs(
 			// alone, when the object does not already exist.
 			// For server-side apply, the computed object is used as the body of the
 			// PUT request below, to create the object from the apply patch.
+			if isApply {
+				// Mutating admission records its changes for this attempt only.
+				applyPatch.ResetAdmission()
+			}
 			obj, err := objInfo.UpdatedObject(ctx, oldObj)
 			if err != nil {
 				return nil, err
@@ -249,6 +262,23 @@ func DefaultDynamicDelegatedStoreFuncs(
 					return nil, err
 				}
 
+				if isApply {
+					if len(subResources) > 0 {
+						// A subresource cannot be created, and the object
+						// may exist hidden by s.Get (e.g. a label selector
+						// wrapper): do not apply onto it.
+						return nil, apierrors.NewNotFound(resource.GroupResource(), name)
+					}
+					// The object may exist by now, possibly hidden by s.Get
+					// (e.g. a label selector wrapper): only an atomic Create
+					// fails then (AlreadyExists) instead of applying onto it.
+					// An apply cannot be made to fail on an existing object:
+					// the backend rejects a uid or resourceVersion in an apply
+					// that creates. createAsApply upgrades the Update entry the
+					// Create leaves to Apply afterwards.
+					return createAsApply(ctx, delegate, unstructuredObj, options)
+				}
+
 				return delegate.Create(ctx, unstructuredObj, updateToCreateOptions(options), subResources...)
 			}
 
@@ -256,7 +286,29 @@ func DefaultDynamicDelegatedStoreFuncs(
 				return nil, err
 			}
 
+			if isApply {
+				oldUnstructured, ok := oldObj.(*unstructured.Unstructured)
+				if !ok {
+					return nil, fmt.Errorf("not an Unstructured: %T", oldObj)
+				}
+				return forwardApply(ctx, delegate, resource.GroupResource(), name, applyPatch, oldUnstructured, options, subResources)
+			}
+
 			return delegate.Update(ctx, unstructuredObj, *options, subResources...)
+		}
+
+		if isApply {
+			// Retry only a resourceVersion conflict on the resourceVersion
+			// forwardApply pinned (a write between the Get and the apply).
+			// Field manager conflicts and conflicts on a resourceVersion the
+			// client set do not go away with a fresh Get.
+			var result *unstructured.Unstructured
+			err := retry.OnError(patchConflictRetryBackoff, isPinnedResourceVersionConflict, func() error {
+				var err error
+				result, err = doUpdate()
+				return err
+			})
+			return result, false, unwrapPinnedResourceVersionConflict(err)
 		}
 
 		if requestInfo != nil && requestInfo.Verb == "patch" {
