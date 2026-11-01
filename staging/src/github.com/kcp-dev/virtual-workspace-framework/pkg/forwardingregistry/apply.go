@@ -32,8 +32,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/csaupgrade"
+	"k8s.io/klog/v2"
 
 	dynamiccontext "github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/context"
 )
@@ -41,17 +42,11 @@ import (
 // forwardApply sends a server-side apply to the backend, so that the backend
 // runs the apply itself and records the field manager with operation Apply.
 //
-// live is the object the virtual workspace computed the apply from and ran
-// admission on (nil when the object does not exist yet).
+// live is the existing object the virtual workspace computed the apply from
+// and ran admission on. Creates go through createAsApply instead.
 //
 // The body is the client's apply patch with additions that keep the
-// guarantees of the Update or Create this replaces:
-//   - when live is nil (a create), a fresh random metadata.uid. The backend
-//     overwrites the uid of an object it creates, but rejects a changed uid
-//     on an existing object (422 on metadata.uid), which forwardApply returns
-//     as AlreadyExists, like the Create did. Without it, an object created
-//     between the virtual workspace's Get and the apply, possibly one s.Get
-//     hides, would be modified by the apply and returned to the caller;
+// guarantees of the Update this replaces:
 //   - metadata.resourceVersion of live (unless the client set one), so the
 //     backend applies onto exactly the object the virtual workspace admitted;
 //     a concurrent write fails with a Conflict, which the caller retries with
@@ -78,15 +73,11 @@ func forwardApply(
 	options *metav1.UpdateOptions,
 	subResources []string,
 ) (*unstructured.Unstructured, error) {
-	createUID := ""
-	if live == nil {
-		createUID = string(uuid.NewUUID())
-	}
 	changes, err := admissionChangesFrom(applyPatch)
 	if err != nil {
 		return nil, err
 	}
-	data, pinnedResourceVersion, err := applyPatchBody(groupResource, name, applyPatch.Data, live, createUID, changes)
+	data, pinnedResourceVersion, err := applyPatchBody(groupResource, name, applyPatch.Data, live, changes)
 	if err != nil {
 		return nil, err
 	}
@@ -102,9 +93,6 @@ func forwardApply(
 	}
 
 	result, err := delegate.Patch(ctx, name, types.ApplyPatchType, data, patchOptions, subResources...)
-	if createUID != "" && isUIDInvalid(err) {
-		return nil, apierrors.NewAlreadyExists(groupResource, name)
-	}
 	if pinnedResourceVersion && apierrors.IsConflict(err) && !isFieldManagerConflict(err) {
 		return nil, &pinnedResourceVersionConflict{err: err}
 	}
@@ -149,26 +137,52 @@ func isFieldManagerConflict(err error) bool {
 	return false
 }
 
-// isUIDInvalid returns whether err is the backend rejecting a changed metadata.uid.
-func isUIDInvalid(err error) bool {
-	if !apierrors.IsInvalid(err) {
-		return false
+// createAsApply creates the object a server-side apply computed in the virtual
+// workspace (admitted, after admission) and then records its field manager as
+// an Apply manager.
+//
+// The Create is atomic: it fails with AlreadyExists if the object exists by
+// now, including one the storage hides (e.g. a label selector wrapper). A
+// forwarded apply cannot do that, it would apply onto the existing object;
+// and the backend rejects an apply that creates and carries a uid (409 uid
+// mismatch) or a resourceVersion.
+//
+// The backend records the creating manager with operation Update, so a later
+// apply omitting a field would not remove it. Unless this is a dry run, a JSON
+// patch pinned to the created resourceVersion then turns that Update entry
+// into the manager's Apply entry (client-go csaupgrade). If that fails, e.g.
+// on a concurrent write, the created object is returned anyway: the object
+// then keeps the Update entry, as before apply forwarding.
+func createAsApply(
+	ctx context.Context,
+	delegate dynamic.ResourceInterface,
+	admitted *unstructured.Unstructured,
+	options *metav1.UpdateOptions,
+) (*unstructured.Unstructured, error) {
+	created, err := delegate.Create(ctx, admitted, updateToCreateOptions(options))
+	if err != nil || len(options.DryRun) > 0 {
+		return created, err
 	}
-	status, ok := err.(apierrors.APIStatus)
-	if !ok || status.Status().Details == nil {
-		return false
-	}
-	for _, cause := range status.Status().Details.Causes {
-		if cause.Field == "metadata.uid" {
-			return true
+
+	manager := options.FieldManager
+	upgrade, err := csaupgrade.UpgradeManagedFieldsPatch(created, sets.New(manager), manager)
+	if err != nil || len(upgrade) == 0 {
+		if err != nil {
+			klog.FromContext(ctx).V(2).Info("not upgrading the managed fields of a created object", "name", created.GetName(), "manager", manager, "err", err)
 		}
+		return created, nil
 	}
-	return false
+	upgraded, err := delegate.Patch(ctx, created.GetName(), types.JSONPatchType, upgrade, metav1.PatchOptions{})
+	if err != nil {
+		klog.FromContext(ctx).V(2).Info("could not upgrade the managed fields of a created object", "name", created.GetName(), "manager", manager, "err", err)
+		return created, nil
+	}
+	return upgraded, nil
 }
 
 // applyPatchBody returns the apply patch to send to the backend, see
 // forwardApply, and whether it pinned the resourceVersion of live.
-func applyPatchBody(groupResource schema.GroupResource, name string, data []byte, live *unstructured.Unstructured, createUID string, admission *admissionChanges) ([]byte, bool, error) {
+func applyPatchBody(groupResource schema.GroupResource, name string, data []byte, live *unstructured.Unstructured, admission *admissionChanges) ([]byte, bool, error) {
 	jsonData, err := yaml.YAMLToJSON(data)
 	if err != nil {
 		return nil, false, apierrors.NewBadRequest(fmt.Sprintf("error decoding apply patch: %v", err))
@@ -190,11 +204,6 @@ func applyPatchBody(groupResource schema.GroupResource, name string, data []byte
 
 	changed := false
 	pinned := false
-
-	if createUID != "" {
-		metadata["uid"] = createUID
-		changed = true
-	}
 
 	if live != nil && live.GetResourceVersion() != "" {
 		switch rv, _ := metadata["resourceVersion"].(string); {

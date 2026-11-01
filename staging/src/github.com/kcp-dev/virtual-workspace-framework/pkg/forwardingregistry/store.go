@@ -269,10 +269,14 @@ func DefaultDynamicDelegatedStoreFuncs(
 						// wrapper): do not apply onto it.
 						return nil, apierrors.NewNotFound(resource.GroupResource(), name)
 					}
-					// forwardApply makes the apply fail with AlreadyExists, like
-					// a Create, if an object exists by now, including one s.Get
-					// hides (e.g. a label selector wrapper).
-					return forwardApply(ctx, delegate, resource.GroupResource(), name, applyPatch, nil, options, subResources)
+					// The object may exist by now, possibly hidden by s.Get
+					// (e.g. a label selector wrapper): only an atomic Create
+					// fails then (AlreadyExists) instead of applying onto it.
+					// An apply cannot be made to fail on an existing object:
+					// the backend rejects a uid or resourceVersion in an apply
+					// that creates. createAsApply upgrades the Update entry the
+					// Create leaves to Apply afterwards.
+					return createAsApply(ctx, delegate, unstructuredObj, options)
 				}
 
 				return delegate.Create(ctx, unstructuredObj, updateToCreateOptions(options), subResources...)

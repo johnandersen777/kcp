@@ -228,8 +228,11 @@ func (b *ssaBackend) react(action kcptesting.Action) (bool, runtime.Object, erro
 
 	case kcptesting.PatchActionImpl:
 		b.calls = append(b.calls, "patch/"+subresource+"/"+string(a.PatchType))
+		if a.PatchType == types.JSONPatchType {
+			return b.managedFieldsJSONPatch(gr, namespace, subresource, a)
+		}
 		if a.PatchType != types.ApplyPatchType {
-			return true, nil, fmt.Errorf("fake backend only supports apply patches, got %s", a.PatchType)
+			return true, nil, fmt.Errorf("fake backend only supports apply and managedFields JSON patches, got %s", a.PatchType)
 		}
 		patchJSON, err := yaml.YAMLToJSON(a.Patch)
 		if err != nil {
@@ -243,6 +246,11 @@ func (b *ssaBackend) react(action kcptesting.Action) (bool, runtime.Object, erro
 		if !exists {
 			if subresource != "" {
 				return true, nil, apierrors.NewNotFound(gr, a.Name)
+			}
+			if uid := patchObj.GetUID(); uid != "" {
+				// k8s.io/apiserver/pkg/endpoints/handlers/patch.go rejects an
+				// apply that creates and carries a uid.
+				return true, nil, apierrors.NewConflict(gr, a.Name, fmt.Errorf("uid mismatch: the provided object specified uid %s, and no existing object was found", uid))
 			}
 			live = &unstructured.Unstructured{}
 			live.SetGroupVersionKind(patchObj.GroupVersionKind())
@@ -269,6 +277,62 @@ func (b *ssaBackend) react(action kcptesting.Action) (bool, runtime.Object, erro
 		return true, store(applied, a.PatchOptions.DryRun), nil
 	}
 	return false, nil, nil
+}
+
+// managedFieldsJSONPatch handles the JSON patches client-go csaupgrade sends:
+// replace /metadata/managedFields and /metadata/resourceVersion (the latter as
+// a precondition), stored as an update that keeps the patched managedFields.
+// Callers hold b.mu.
+func (b *ssaBackend) managedFieldsJSONPatch(gr schema.GroupResource, namespace, subresource string, a kcptesting.PatchActionImpl) (bool, runtime.Object, error) {
+	if subresource != "" {
+		return true, nil, fmt.Errorf("fake backend: managedFields JSON patch on subresource %q", subresource)
+	}
+	live, ok := b.objects[b.key(namespace, a.Name)]
+	if !ok {
+		return true, nil, apierrors.NewNotFound(gr, a.Name)
+	}
+	var ops []struct {
+		Op    string          `json:"op"`
+		Path  string          `json:"path"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := json.Unmarshal(a.Patch, &ops); err != nil {
+		return true, nil, apierrors.NewBadRequest(err.Error())
+	}
+	patched := live.DeepCopy()
+	for _, op := range ops {
+		switch {
+		case op.Op == "replace" && op.Path == "/metadata/resourceVersion":
+			var rv string
+			if err := json.Unmarshal(op.Value, &rv); err != nil {
+				return true, nil, apierrors.NewBadRequest(err.Error())
+			}
+			if rv != live.GetResourceVersion() {
+				return true, nil, apierrors.NewConflict(gr, a.Name, fmt.Errorf("the object has been modified"))
+			}
+		case op.Op == "replace" && op.Path == "/metadata/managedFields":
+			var managedFields []metav1.ManagedFieldsEntry
+			if err := json.Unmarshal(op.Value, &managedFields); err != nil {
+				return true, nil, apierrors.NewBadRequest(err.Error())
+			}
+			patched.SetManagedFields(managedFields)
+		default:
+			return true, nil, fmt.Errorf("fake backend: unsupported JSON patch op %s %s", op.Op, op.Path)
+		}
+	}
+	manager := a.PatchOptions.FieldManager
+	if manager == "" {
+		manager = "json-patch-client"
+	}
+	out, err := b.fieldManagers[""].Update(live.DeepCopy(), patched, manager)
+	if err != nil {
+		return true, nil, err
+	}
+	b.rv++
+	stored := out.(*unstructured.Unstructured).DeepCopy()
+	stored.SetResourceVersion(strconv.Itoa(b.rv))
+	b.objects[b.key(namespace, a.Name)] = stored
+	return true, stored.DeepCopy(), nil
 }
 
 // validateUIDUpdate mirrors ValidateObjectMetaUpdate: metadata.uid is immutable.
@@ -579,10 +643,11 @@ func TestApplyThroughVirtualWorkspace(t *testing.T) {
 	before := h.backend.numCalls()
 	res := h.apply("", "provider", specApplyAB)
 	require.Equal(t, http.StatusOK, res.code, res.body)
-	require.Contains(t, h.backend.callsSince(before), "patch//"+string(types.ApplyPatchType), "the apply must be forwarded as an apply patch")
-	require.NotContains(t, h.backend.callsSince(before), "create")
+	// An atomic Create, then the Update entry it leaves upgraded to Apply.
+	require.Equal(t, []string{"get", "create", "patch//" + string(types.JSONPatchType)}, h.backend.callsSince(before))
 	live := h.backend.get("default", "foo")
 	require.NotNil(t, live)
+	require.Equal(t, live.GetResourceVersion(), res.obj.GetResourceVersion(), "the response is the upgraded object")
 	requireOnlyApply(t, live, "provider", "")
 	require.Equal(t, "true", live.GetLabels()[injectedLabel], "the label injected by mutating admission must be stored")
 
@@ -1004,13 +1069,85 @@ func TestApplyThroughVirtualWorkspaceCreateRaceHiddenObject(t *testing.T) {
 	h := newVWHarness(t, forwardingregistry.WithStaticLabelSelector(labels.Requirements{*requirement}))
 
 	var once sync.Once
-	h.client.PrependReactor("patch", "noxus", func(action kcptesting.Action) (bool, runtime.Object, error) {
+	race := func(action kcptesting.Action) (bool, runtime.Object, error) {
 		once.Do(func() { h.backend.set(hiddenNoxu()) })
 		return false, nil, nil
-	})
+	}
+	// Whatever the virtual workspace writes with first after its Get.
+	h.client.PrependReactor("create", "noxus", race)
+	h.client.PrependReactor("patch", "noxus", race)
 
 	res := h.apply("", "provider", specApplyA)
 	requireHiddenUntouched(t, h, res)
+}
+
+// TestApplyThroughVirtualWorkspaceCreate covers the create path: an atomic
+// Create, then a JSON patch pinned to the created resourceVersion that turns
+// the creator's Update entry into its Apply entry.
+func TestApplyThroughVirtualWorkspaceCreate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a client uid is rejected like by a kube apiserver", func(t *testing.T) {
+		t.Parallel()
+		h := newVWHarness(t, nil)
+		before := h.backend.numCalls()
+		res := h.apply("", "provider", strings.Replace(specApplyA, "  namespace: default\n", "  namespace: default\n  uid: 66666666-2222-3333-4444-555555555555\n", 1))
+		require.Equal(t, http.StatusConflict, res.code, res.body)
+		require.Contains(t, res.body, "uid mismatch")
+		require.Equal(t, []string{"get"}, h.backend.callsSince(before))
+		require.Nil(t, h.backend.get("default", "foo"))
+	})
+
+	t.Run("dry run creates nothing and does not upgrade", func(t *testing.T) {
+		t.Parallel()
+		h := newVWHarness(t, nil)
+		before := h.backend.numCalls()
+		res := h.apply("", "provider", specApplyAB, "dryRun=All")
+		require.Equal(t, http.StatusOK, res.code, res.body)
+		b, _, _ := unstructured.NestedString(res.obj.Object, "spec", "b")
+		require.Equal(t, "2", b)
+		require.Equal(t, []string{"get", "create"}, h.backend.callsSince(before))
+		require.Nil(t, h.backend.get("default", "foo"))
+	})
+
+	t.Run("a write between the Create and the upgrade keeps the created object", func(t *testing.T) {
+		t.Parallel()
+		h := newVWHarness(t, nil)
+		var once sync.Once
+		h.client.PrependReactor("patch", "noxus", func(action kcptesting.Action) (bool, runtime.Object, error) {
+			if action.(kcptesting.PatchActionImpl).PatchType == types.JSONPatchType {
+				once.Do(func() {
+					// Another client writes in between.
+					live := h.backend.get("default", "foo")
+					require.NoError(t, unstructured.SetNestedField(live.Object, "x", "spec", "other"))
+					h.backend.set(live)
+				})
+			}
+			return false, nil, nil
+		})
+
+		res := h.apply("", "provider", specApplyAB)
+		require.Equal(t, http.StatusOK, res.code, "the create succeeded, so the request does: %s", res.body)
+		b, _, _ := unstructured.NestedString(res.obj.Object, "spec", "b")
+		require.Equal(t, "2", b)
+		live := h.backend.get("default", "foo")
+		entries := managedFieldsOf(live, "provider", "")
+		require.Len(t, entries, 1, describeManagedFields(live))
+		require.Equal(t, metav1.ManagedFieldsOperationUpdate, entries[0].Operation, "the pinned upgrade must not apply onto a changed object")
+	})
+
+	t.Run("omitted fields are removed after a create", func(t *testing.T) {
+		t.Parallel()
+		h := newVWHarness(t, nil)
+		require.Equal(t, http.StatusOK, h.apply("", "provider", specApplyAB).code)
+		res := h.apply("", "provider", specApplyA)
+		require.Equal(t, http.StatusOK, res.code, res.body)
+		live := h.backend.get("default", "foo")
+		_, found, _ := unstructured.NestedString(live.Object, "spec", "b")
+		require.False(t, found, describeManagedFields(live))
+		require.Equal(t, "true", live.GetLabels()[injectedLabel])
+		requireOnlyApply(t, live, "provider", "")
+	})
 }
 
 // mutatingAdmission runs mutate on create and update, for any subresource.
