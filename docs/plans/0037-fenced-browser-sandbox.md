@@ -365,3 +365,11 @@ Open questions for the owner:
 - Page 059187059 (socialweb integ-rc126 ad824f87) deployed to shell.socialweb.computer; scope unchanged (25 tokens).
 - Prod check (drives-oauth): alice signed in 17:58:55Z; probe 17:58:57.0Z "policy sandbox: fenced, ready (ProbePassed ...)".
 - Page policy suite at ad824f87: 70/0 (PT twins green; no-trust-snapshot deny without network; deadline/cancel with a real stall); deno 142/0; headless fence PASS.
+
+## rc127 page in prod (2026-10-30)
+
+- Page a8-page 7ae4a4bbb (socialweb integ-rc127 97013700) merged as 6b2a8b4b8 and deployed to shell.socialweb.computer from hat-8 (`~/src/kcp/kcp-wasm-mac`); prod kcp.wasm.gz and page JS hashes match the build; scope 27 tokens (Start R2 adds 2), ComputeContract schema revision 30.
+- Page changes: Start R2; release cascade, r2Release and atircRevokes rows with the 24 min guest requester bound and time left; every release is one SSA apply of `{spec.release, spec.releaseRequestedAt}` under `socialweb.computer/requester-release` (the requester's own manager; the ephemeralinfra composer manager would drop the infra spec); a release outcome counts only when `status.release.requestedAt` matches; the socialweb vault snapshot (release marker, atircMinted) saves at once and flushes on hide/pagehide.
+- Reviews: review127 round 4 on 7ae4a4bbb, no blocking. Tests: deno 162/0, policy-suite.sh green (82 deno, 12 fence checks, browsersandbox Go).
+- Prod check (drives-oauth, fresh profile): alice signed in 19:28:29Z with the new scopes; probe 19:28:31.7Z "policy sandbox: fenced, ready (ProbePassed ...)". PASS.
+- Open: iOS lowMemory has no kcp snapshot, so a reload forgets contracts and revokes do not resume (pre-existing; socialweb rc128 vault sweep). Memory-only storage (no IndexedDB): owner to choose refuse-to-mint, short token exp, or allow with warning. rc128 page lows on branch page-rc128 (4c52122bd beforeunload while revokes pending, 2fd178791 serve-public doc).
