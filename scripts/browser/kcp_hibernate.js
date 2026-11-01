@@ -438,6 +438,7 @@ export function startHibernation({
   let want = false; // a hide: capture as soon as kcp is idle
   let soon = false; // a flush: capture once still, at most every SOON_GAP_MS
   let hideAt = -Infinity;
+  let asks = 0; // request()/requestSoon() calls: those during a capture are not answered by it
   let running = null; // the in-flight save
   let disabled = false;
   let lastReason = "";
@@ -473,6 +474,7 @@ export function startHibernation({
       return;
     }
     const background = !want && !soon;
+    const asked = asks;
     let done;
     running = new Promise((resolve) => (done = resolve));
     const t0 = performance.now();
@@ -487,9 +489,11 @@ export function startHibernation({
       const meta = await store.save(go, () => ({ ...extra(), seqs: seqs(), key, owner: owner?.token ?? null }), gzip, stillOwner);
       lastSeqs = meta.extra.seqs;
       lastAt = now();
-      want = false;
-      soon = false;
-      hideAt = -Infinity; // one capture per hide
+      if (asks === asked) {
+        want = false;
+        soon = false;
+        hideAt = -Infinity; // one capture per hide
+      }
       everyMs = background ? Math.min(everyMs * 2, MAX_EVERY_MS) : EVERY_MS;
       log("info", `snapshot saved to ${store.kind}: ${(meta.bytes / 1048576).toFixed(0)} MiB memory, ` +
         `${(meta.stored / 1048576).toFixed(0)} MiB stored${gzip ? " (gzip)" : ""}, capture ${meta.stats.captureMs}ms, ` +
@@ -504,7 +508,7 @@ export function startHibernation({
       if (err?.name === "QuotaExceededError") disabled = true;
       // A failed capture counts for the gaps: no retry every second.
       lastAt = now();
-      want = false;
+      if (asks === asked) want = false;
     } finally {
       running = null;
       done();
@@ -514,6 +518,7 @@ export function startHibernation({
   return {
     /** The tab is being hidden: capture as soon as kcp is idle. */
     request() {
+      asks++;
       want = true;
       hideAt = now();
       everyMs = EVERY_MS;
@@ -526,6 +531,7 @@ export function startHibernation({
      */
     requestSoon() {
       if (lastSeqs && sameSeqs(lastSeqs, seqs())) return;
+      asks++;
       everyMs = EVERY_MS;
       if (now() - hideAt < HIDE_FLUSH_MS) {
         want = true;
