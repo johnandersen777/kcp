@@ -35,6 +35,7 @@ import * as vmshell from "./vmshell.js";
 import * as webrtcGuest from "./webrtc_guest.js";
 import * as sshCmd from "./ssh_cmd.js";
 import { discardSnapshot } from "./kcp_hibernate.js";
+import { wasmBuildId } from "./wasm_fetch.js";
 import { ControlStream, DebugLogSender } from "./debug_link.js";
 import { connectFrame, policyEngineStatus, startFrame } from "./policy_sandbox.js";
 
@@ -730,9 +731,10 @@ function devServer() {
 
 async function kcpBuildChanged() {
   try {
-    kcpBuildEtag = (await fetch("/kcp.wasm", { method: "HEAD" })).headers.get("etag") ?? "";
-    // No record means state from before this check: re-apply to be safe.
-    return localStorage.getItem("kcp.stateBuild") !== kcpBuildEtag;
+    kcpBuildEtag = await wasmBuildId("/kcp.wasm");
+    // No record means state from before this check, and no build id means the
+    // host told us nothing (pages before this fix stored ""): re-apply to be safe.
+    return kcpBuildEtag === "" || localStorage.getItem("kcp.stateBuild") !== kcpBuildEtag;
   } catch {
     return false;
   }
