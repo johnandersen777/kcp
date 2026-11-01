@@ -9,6 +9,10 @@
 import {
   applySnapshot,
   assembleSnapshot,
+  backendNotice,
+  backupUnreadable,
+  MEMORY_FALLBACK_MESSAGE,
+  unreadableMessage,
   createIndexedDBBackend,
   createMemoryBackend,
   createPersister,
@@ -292,8 +296,72 @@ Deno.test("persister: flushAll (hidden, pagehide) starts every pending save at o
 Deno.test("persister: the page saves socialweb immediately and flushes on hidden and pagehide", async () => {
   const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
   assert(/createPersister\(\{[\s\S]*?immediate: \[socialwebStateKey\]/.test(app), "socialweb key is immediate");
-  assert(/"socialweb-persist"\) \{\s*void persister\.schedule\(socialwebStateKey/.test(app), "socialweb-persist goes to the persister");
+  assert(/"socialweb-persist"\) \{\s*if \(!kcpStateOwned\(\)\) return;\s*void persister\.schedule\(socialwebStateKey/.test(app), "socialweb-persist goes to the persister");
   assert(/addEventListener\("pagehide", \(\) => void persister\.flushAll\(\)\)/.test(app), "pagehide flushes");
   assert(/visibilityState !== "hidden"\) return;\s*void persister\.flushAll\(\)/.test(app), "hidden flushes");
   assert(!/schedulePersist/.test(app), "the old debounced path is gone");
+});
+
+// --- rc129: memory fallback notice, unreadable state backups, stop ----------
+
+Deno.test("backendNotice: IndexedDB logs an ok line; memory adds the banner and warning", () => {
+  const idb = backendNotice({ kind: "indexeddb", reason: null });
+  assertEquals(JSON.stringify(idb), JSON.stringify({ level: "ok", line: "kcp state backend: indexeddb", banner: null, warn: null }));
+  const blocked = backendNotice({ kind: "memory", reason: new Error("SecurityError") });
+  assertEquals(blocked.level, "warn");
+  assertEquals(blocked.line, "kcp state backend: memory (IndexedDB unavailable: SecurityError)");
+  assertEquals(blocked.banner, MEMORY_FALLBACK_MESSAGE);
+  assertEquals(blocked.banner, "This browser is not saving state: a reload loses your sign-in, VMs and tokens");
+  assertEquals(blocked.warn.startsWith(MEMORY_FALLBACK_MESSAGE), true);
+  assertEquals(backendNotice({ kind: "memory", reason: null }).line, "kcp state backend: memory (no IndexedDB)");
+});
+
+Deno.test("openBestBackend without IndexedDB gives memory, which backendNotice bannered", async () => {
+  const picked = await openBestBackend({ indexedDB: undefined });
+  assertEquals(picked.kind, "memory");
+  assertEquals(backendNotice(picked).banner, MEMORY_FALLBACK_MESSAGE);
+});
+
+Deno.test("backupUnreadable copies the raw value once, past the per-value limit", async () => {
+  const backend = createMemoryBackend({ maxBytes: 4 });
+  const raw = '{"version":2,"stores":{}}';
+  const at = new Date("2026-10-30T12:00:00Z");
+  const key = await backupUnreadable(backend, "kcp", raw, at);
+  assertEquals(key, "kcp-unreadable-2026-10-30T12:00:00.000Z");
+  assertEquals(await backend.load(key), raw);
+  assertEquals(await backupUnreadable(backend, "kcp", raw, new Date("2026-10-30T13:00:00Z")), "", "same value again");
+  assertEquals((await backend.loadPrefix("kcp-unreadable-")).length, 1);
+  const other = await backupUnreadable(backend, "socialweb", "{not json", at);
+  assertEquals(other, "socialweb-unreadable-2026-10-30T12:00:00.000Z");
+  assertEquals(await backupUnreadable(backend, "kcp", "", at), null, "nothing to back up");
+  assertEquals(unreadableMessage("socialweb"), "saved socialweb state could not be read; not saving over it");
+});
+
+Deno.test("createPersister stop drops queued saves and ignores later ones", async () => {
+  const saved = [];
+  const store = { save: async (k, v) => saved.push([k, v]), apply: async () => {} };
+  const timers = { setTimeout: (fn) => (setTimeout(fn, 5)), clearTimeout };
+  const p = createPersister({ backend: () => Promise.resolve(store), timers });
+  await p.schedule("kcp-x", "old");
+  p.stop();
+  await p.schedule("kcp-x", "new");
+  await new Promise((r) => setTimeout(r, 20));
+  await p.flushAll();
+  assertEquals(saved.length, 0);
+});
+
+Deno.test("page wiring: backend line pinned, memory banner + console.warn, unreadable state backed up first", async () => {
+  const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
+  const html = await Deno.readTextFile(new URL("./app.html", import.meta.url));
+  assert(/addLog\(notice\.level, notice\.line, \{ pinned: true \}\)/.test(app), "backend line pinned at its level");
+  assert(/:not\(\.log-pinned\)/.test(app), "trimming keeps pinned rows");
+  assert(/banners\.show\("memory", \{ text: notice\.banner[\s\S]{0,80}console\.warn\(notice\.warn\)/.test(app), "banner and console.warn");
+  assert(/<div id="banners" hidden><\/div>/.test(html), "banner container");
+  assert(!/#log:not\(\.verbose\) \.log-(ok|warn)/.test(html), "ok/warn rows are never filtered");
+  const handler = app.slice(app.indexOf("async function restoreUnreadable"));
+  assert(handler.indexOf("backupUnreadable(") < handler.indexOf("banners.show("), "backup before the banner");
+  assert(/"restore-unreadable"\) \{\s*void restoreUnreadable\(data\.channel, data\.message\)/.test(app), "worker message handled");
+  const worker = await Deno.readTextFile(new URL("./kcp_worker.js", import.meta.url));
+  assert(/globalThis\.__kcpRestoreFailed = /.test(worker), "worker hook for Go");
+  assert(/hibernation = restoreUnreadable \? null : startHibernationLoop\(\)/.test(worker), "no capture of an unreadable session");
 });
