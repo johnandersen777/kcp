@@ -163,6 +163,7 @@ function clockedLoop({ captured = { kcp: 9, socialweb: 0 } } = {}) {
 
 Deno.test("capture after a flush: once the seqs are still, never for a no-op flush", async () => {
   const c = clockedLoop();
+  await c.run(15); // past the SOON_GAP_MS boot grace
   c.loop.requestSoon(); // a flush that wrote nothing new
   await c.run(5);
   assertEquals(c.saved, [], "no capture without new records");
@@ -176,6 +177,7 @@ Deno.test("capture after a flush: once the seqs are still, never for a no-op flu
 
 Deno.test("no request: background writes capture once still, at most every 60 s", async () => {
   const c = clockedLoop();
+  await c.run(60); // past the boot grace
   c.loop.requestSoon(); // unchanged seqs: not armed
   await c.run(1);
   c.seqs.kcp = 10; // a background write, no flush
@@ -185,16 +187,37 @@ Deno.test("no request: background writes capture once still, at most every 60 s"
   assertEquals(c.saved.map((x) => x.kcp), [10], "the regular capture");
 });
 
-Deno.test("an idle tab that persists a write every 5-10 s still captures, about once a minute", async () => {
+Deno.test("an idle tab that persists a write every 5-10 s captures with a doubling gap, none during boot", async () => {
   const c = clockedLoop();
-  // ~3 min of a live idle page: a write every 7 s, never 30 s quiet
-  await c.run(180, (i) => {
+  // 30 min of a live idle page: a write every 7 s, never 30 s quiet
+  await c.run(1800, (i) => {
     if (i % 7 === 0) c.seqs.kcp++;
   });
   const at = c.saved.map((x) => (x.at - 1_000_000) / 1000);
-  assert(c.saved.length >= 2 && c.saved.length <= 4, `captures at ${JSON.stringify(at)} s`);
-  assert(at[0] <= 10, `first capture soon after the first write settles, at ${at[0]} s`);
-  for (let i = 1; i < at.length; i++) assert(at[i] - at[i - 1] >= 60, `gap >= 60 s: ${JSON.stringify(at)}`);
+  assert(at[0] >= 60 && at[0] <= 70, `boot grace: first capture after 60 s, at ${JSON.stringify(at)}`);
+  const gaps = at.slice(1).map((x, i) => x - at[i]);
+  // 60 s, 120 s, 240 s, 480 s, then capped at 600 s (each +up to 7 s for still seqs)
+  const want = [120, 240, 480, 600, 600];
+  for (let i = 0; i < gaps.length; i++) {
+    assert(gaps[i] >= want[Math.min(i, want.length - 1)] && gaps[i] <= want[Math.min(i, want.length - 1)] + 10, `gaps ${JSON.stringify(gaps)}`);
+  }
+  assert(c.saved.length <= 6, `captures at ${JSON.stringify(at)} s`);
+});
+
+Deno.test("a flush or hide resets the background gap to 60 s", async () => {
+  const c = clockedLoop();
+  await c.run(900, (i) => {
+    if (i % 7 === 0) c.seqs.kcp++;
+  });
+  const before = c.saved.length; // 60 s, +120 s, +240 s, +480 s: the gap is now long
+  c.seqs.kcp++;
+  c.loop.requestSoon(); // a contract step change flushed
+  await c.run(20);
+  assertEquals(c.saved.length, before + 1, "the flush captured");
+  await c.run(80, (i) => {
+    if (i % 7 === 0) c.seqs.kcp++;
+  });
+  assertEquals(c.saved.length, before + 2, "next background capture after 60 s again");
 });
 
 Deno.test("a typical VM lifecycle captures at most about twice", async () => {
