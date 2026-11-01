@@ -71,9 +71,10 @@ Deno.test("page wiring: kcp calls wait for ready; probes retry; Request VM never
   assert(/kcpGate\.fail\(new Error\(TAKEN_OVER_MESSAGE\)\)/.test(app), "a take over fails the waiters");
   assert(/if \(schema === undefined\) \{\s*r2StartServed = null;/.test(app), "a failed R2 probe is asked again");
   assert(!/stay off: /.test(app), "no permanent off");
-  const req = app.slice(app.indexOf("async function requestVM"), app.indexOf("async function requestVM") + 1200);
-  assert(req.indexOf('addLog("info", "Request VM clicked")') >= 0, "click logged");
-  assert(/kcp is still starting; the request runs once it is up/.test(req) && /await kcpWorkerReady\(\)/.test(req), "click before ready is queued with a message");
+  const runner = await Deno.readTextFile(new URL("./request_vm.js", import.meta.url));
+  assert(runner.includes('log("info", "Request VM clicked")'), "click logged");
+  assert(/kcp is still starting; the request runs once it is up/.test(runner) && /await waitKcp\(\)/.test(runner), "click before ready is queued with a message");
+  assert(/await kcpWorkerReady\(REQUEST_KCP_WAIT_MS\)/.test(app), "the queued click waits for kcp (10 min)");
 });
 
 // Session 9xc9tc: Request VM was enabled by the feed before its listener was
@@ -92,38 +93,49 @@ Deno.test("page wiring: compute and identity listeners are bound before kcp boot
   assert(/identitySignInEl\.addEventListener\("click"/.test(ui) && /initComputeUI\(\);/.test(ui), "identity and compute listeners in init");
   const compute = app.slice(app.indexOf("function initComputeUI"), app.indexOf("function initComputeUI") + 300);
   assert(/computeRequestEl\.addEventListener\("click", \(\) => \{[\s\S]*?void requestVM\(\);/.test(compute), "Request VM click goes to requestVM");
-  assert(/computeRequestEl\.disabled = !socialwebUIReady \|\|/.test(app), "Request VM stays disabled until the UI is initialised");
+  assert(/return !socialwebUIReady \|\| computeBusy \|\|/.test(app) && /computeRequestEl\.disabled = computeRequestDisabled\(state\)/.test(app), "Request VM stays disabled until the UI is initialised");
   assert(/identitySignInEl\.disabled = !socialwebUIReady \|\|/.test(app), "Sign in stays disabled until the UI is initialised");
 });
 
-// A click that lands before kcp is ready reaches requestVM, which logs it and
-// queues it behind kcp ready (the gate), with the visible message.
+// A click that lands before kcp is ready reaches requestVM (the real
+// request_vm.js runner), which logs it and queues it behind kcp ready.
 Deno.test("a Request VM click before kcp ready is logged and queued, then runs", async () => {
+  const { createRequestRunner } = await import("./request_vm.js");
   const gate = createReadyGate();
   const log = [];
   let status = "";
-  const requestVM = async () => {
-    log.push("Request VM clicked");
-    status = "kcp is still starting; the request runs once it is up";
-    await gate.wait();
-    log.push("requesting ComputeContract");
-  };
+  let busy = false;
+  let kcpUp = false;
+  const run = createRequestRunner({
+    getBusy: () => busy,
+    setBusy: (b) => (busy = b),
+    kcpUp: () => kcpUp,
+    waitKcp: () => gate.wait(),
+    identityReadyFor: () => true,
+    refresh: () => {},
+    status: (text) => (status = text),
+    log: (_level, message) => log.push(message),
+  });
   const listeners = [];
   const button = { addEventListener: (_t, fn) => listeners.push(fn), click: () => listeners.forEach((fn) => fn()) };
-  button.addEventListener("click", () => void requestVM()); // initComputeUI, at page init
+  let done;
+  button.addEventListener("click", () => {
+    done = run({ did: "did:plc:alice", prepare: async () => ({}), request: async () => (log.push("requesting ComputeContract"), true) });
+  }); // initComputeUI, at page init
   button.click(); // the user, before kcp is ready
   await tick();
-  assertEquals(log, ["Request VM clicked"]);
+  assertEquals(log, ["Request VM clicked", "Request VM waits for kcp to be ready"]);
   assertEquals(status, "kcp is still starting; the request runs once it is up");
+  kcpUp = true;
   gate.open("worker");
-  await tick();
-  assertEquals(log, ["Request VM clicked", "requesting ComputeContract"]);
+  assertEquals(await done, "requested");
+  assertEquals(log.at(-1), "requesting ComputeContract");
 });
 
 Deno.test("page wiring: Request VM shows its progress while the infra and record take time", async () => {
   const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
-  const req = app.slice(app.indexOf("async function requestVM"), app.indexOf("async function requestVM") + 4000);
-  const steps = ['progress("preparing this tab\'s infra")', "sessionInfra((step) => progress(step))", 'progress("creating the contract")', "await setInfraContract("];
+  const req = app.slice(app.indexOf("async function requestVMFor"), app.indexOf("async function requestVMFor") + 4000);
+  const steps = ['progress("preparing this tab\'s infra")', "sessionInfra((step) => progress(step), did)", 'progress("creating the contract")', "await setInfraContract("];
   let at = 0;
   for (const step of steps) {
     const i = req.indexOf(step, at);

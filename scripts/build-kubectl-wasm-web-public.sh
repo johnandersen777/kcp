@@ -77,6 +77,7 @@ assets=(
   kcp_lock.js
   page_banner.js
   ready_gate.js
+  request_vm.js
 )
 wasm_modules=(
   kcp.wasm
