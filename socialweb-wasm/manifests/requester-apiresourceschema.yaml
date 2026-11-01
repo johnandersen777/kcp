@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-28.requesters.socialweb.computer
+  name: v1alpha1-27.requesters.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -678,33 +678,6 @@ spec:
                   - path
               suspendParticipation:
                 type: boolean
-              retention:
-                type: object
-                properties:
-                  mode:
-                    type: string
-                    enum:
-                      - DryRun
-                      - Delete
-                  days:
-                    type: integer
-                    format: int32
-                    minimum: 0
-                    maximum: 3650
-                  infraDays:
-                    type: integer
-                    format: int32
-                    minimum: 0
-                    maximum: 3650
-                  delaySeconds:
-                    type: integer
-                    format: int32
-                    minimum: 0
-                    maximum: 86400
-                  keep:
-                    type: array
-                    items:
-                      type: string
           status:
             type: object
             properties:
