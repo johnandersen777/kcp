@@ -82,7 +82,22 @@ Deno.test("kill ends a run early", async () => {
 });
 
 Deno.test("node: imports of the bundled actions resolve to shims", async () => {
-  eq(rewriteNodeImports(`import x from "node:crypto";`).startsWith(`import x from "data:text/javascript,`), true, "rewrite");
+  // WebKit denies static data: imports in the Worker: every form becomes a top-level await
+  const forms = rewriteNodeImports(`import x from "node:crypto";
+import { a, b as c } from 'node:buffer';
+import d, { e } from "node:crypto";
+import * as ns from "node:dns/promises";
+import "node:buffer";
+const m = await import("node:crypto");
+import { y } from "./not-node.js";`);
+  eq(/\bimport\s[^(]*\bfrom\s*["']data:/.test(forms) || /\bimport\s*["']data:/.test(forms), false, "no static data: import left");
+  eq(forms.includes(`const { default: x } = await import("data:text/javascript,`), true, "default");
+  eq(forms.includes(`const { a, b: c } = await import("data:text/javascript,`), true, "named + as");
+  eq(forms.includes(`const { default: d, e } = await import("data:text/javascript,`), true, "default + named");
+  eq(forms.includes(`const ns = await import("data:text/javascript,`), true, "namespace");
+  eq(/await import\("data:text\/javascript,[^"]*"\);\nconst m/.test(forms), true, "side effect");
+  eq(forms.includes(`const m = await import("data:text/javascript,`), true, "dynamic");
+  eq(forms.includes(`import { y } from "./not-node.js";`), true, "other specifiers untouched");
   const r = await run(`import { Buffer } from "node:buffer";
 import crypto from "node:crypto";
 import * as nc from "node:crypto";

@@ -96,7 +96,9 @@ function bootstrap(env, cap, program) {
   // (incl. top-level await) is observed: done exits 0, as deno does at the
   // end of the main module; a throw is dispatched as an "unhandledrejection"
   // event, as deno does for its main module.
-  const evaluated = import(URL.createObjectURL(new Blob([program], { type: "text/javascript" })));
+  // data:, not blob:: WebKit denies a module load of a blob: URL made in this
+  // opaque-origin Worker as cross-origin (iOS WKWebView probe, plan 0038 I6).
+  const evaluated = import("data:text/javascript," + encodeURIComponent(program));
   evaluated.then(() => exit(0), (reason) => {
     const event = Object.assign(new Event("unhandledrejection", { cancelable: true }), { reason, promise: evaluated });
     dispatchEvent(event);
@@ -158,9 +160,33 @@ export default { resolveTxt, lookup, Resolver };`,
 
 // ponytail: a regex, so a "node:" specifier spelled inside a string literal
 // is rewritten too; a parser if a policy ever needs that text verbatim.
+// node: imports become loads of their data: shims. WebKit denies a static
+// import of a data: module inside the opaque-origin Worker (a dynamic
+// import() of one loads), so static forms turn into top-level awaits:
+// import d, { a, b as c } from "node:x" -> const { default: d, a, b: c } =
+// await import("data:..."); import * as ns from -> const ns = await import;
+// import "node:x" -> await import. Only node: specifiers are touched.
 function rewriteNodeImports(source) {
-  return source.replace(/(\bfrom\s*|\bimport\s*\(?\s*)(["'])node:([\w/]+)\2/g,
-    (_m, head, _q, name) => head + JSON.stringify(nodeShim(name)));
+  const shim = (name) => JSON.stringify(nodeShim(name));
+  const fields = (named) => named.split(",").map((part) => part.trim()).filter(Boolean)
+    .map((part) => part.replace(/^([\w$]+)\s+as\s+([\w$]+)$/, "$1: $2")).join(", ");
+  return source
+    .replace(/\bimport\s+([\w$]+\s*,\s*)?(\*\s*as\s+[\w$]+|\{[^}]*\}|[\w$]+)\s*from\s*(["'])node:([\w/]+)\3\s*;?/g,
+      (_m, first, clause, _q, name) => {
+        const def = first ? first.replace(/\s*,\s*$/, "") : "";
+        const mod = `await import(${shim(name)})`;
+        if (clause.startsWith("*")) {
+          const ns = clause.replace(/^\*\s*as\s+/, "");
+          return `const ${ns} = ${mod};` + (def ? ` const ${def} = ${ns}.default;` : "");
+        }
+        if (clause.startsWith("{")) {
+          const named = fields(clause.slice(1, -1));
+          return `const { ${[def && `default: ${def}`, named].filter(Boolean).join(", ")} } = ${mod};`;
+        }
+        return `const { default: ${clause} } = ${mod};`;
+      })
+    .replace(/\bimport\s*(["'])node:([\w/]+)\1\s*;?/g, (_m, _q, name) => `await import(${shim(name)});`)
+    .replace(/(\bimport\s*\(\s*)(["'])node:([\w/]+)\2/g, (_m, head, _q, name) => head + shim(name));
 }
 
 function programModule(source, env, cap) {

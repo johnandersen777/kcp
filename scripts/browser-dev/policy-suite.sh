@@ -18,4 +18,10 @@ sed -i.bak -e "s#=> /tmp/linux-kcp-mirror#=> $W/.work/socialweb-mirror#" \
   -e "s#=> /[^ ]*/staging/src/#=> $W/staging/src/#" \
   -e "s#kcp-dev/kcp => \.\./#kcp-dev/kcp => $W/#" "$mod"
 cd socialweb-wasm
-PATH="$(go env GOROOT)/lib/wasm:$PATH" GOOS=js GOARCH=wasm go test -v -modfile="$mod" ./internal/browsersandbox
+# Go js/wasm caps argv+env at ~12 KiB, which an agent session's env alone
+# nearly fills ("total length of command line and environment variables
+# exceeds limit"): run the test with only what go needs.
+gr=$(go env GOROOT)
+env -i HOME="$HOME" TMPDIR="$TMPDIR" PATH="$gr/lib/wasm:$(dirname "$(command -v go)"):$(dirname "$(command -v node)"):/usr/bin:/bin" \
+  GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.9}" GOPATH="$(go env GOPATH)" GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)" \
+  GOOS=js GOARCH=wasm go test -v -modfile="$mod" ./internal/browsersandbox
