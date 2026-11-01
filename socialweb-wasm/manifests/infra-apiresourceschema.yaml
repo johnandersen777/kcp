@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-11.infras.socialweb.computer
+  name: v1alpha1-12.infras.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -134,6 +134,9 @@ spec:
                       x-kubernetes-list-type: set
                   required:
                     - name
+                x-kubernetes-list-type: map
+                x-kubernetes-list-map-keys:
+                  - name
               secrets:
                 type: array
                 items:
