@@ -6,12 +6,12 @@ spec:
   resources:
     - group: socialweb.computer
       name: computecontracts
-      schema: v1alpha1-27.computecontracts.socialweb.computer
+      schema: v1alpha1-28.computecontracts.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer
       name: contractevents
-      schema: v1alpha1-4.contractevents.socialweb.computer
+      schema: v1alpha1-5.contractevents.socialweb.computer
       storage:
         crd: {}
     - group: socialweb.computer

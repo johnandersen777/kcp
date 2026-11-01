@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-4.contractevents.socialweb.computer
+  name: v1alpha1-5.contractevents.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -50,6 +50,8 @@ spec:
                   - com.publicdomainrelay.temp.compute.events.guest.secrets
                   - com.publicdomainrelay.temp.compute.events.guest.agentStart
                   - com.publicdomainrelay.temp.compute.events.guest.secretsUpdated
+                  - com.publicdomainrelay.temp.compute.events.guest.r2Start
+                  - com.publicdomainrelay.temp.compute.events.guest.r2Release
               kind:
                 type: string
                 maxLength: 32
@@ -80,6 +82,18 @@ spec:
                 required:
                   - uri
                   - cid
+              r2Start:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    pattern: ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
+                  agent:
+                    type: boolean
+                  hold:
+                    type: boolean
+                required:
+                  - name
             required:
               - contractRef
               - nsid
