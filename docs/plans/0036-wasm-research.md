@@ -128,3 +128,4 @@ relative to ~/src/kcp/socialweb-computer-kcp at origin/main.
 - guest.requesterDid 17:15:49Z; page row "R2: ... Pending" 17:15:51Z -> "Verified" 17:15:52Z (one getRecord of R2's associationRequest through xrpc.fedproxy.com).
 - R2's own RFP 3mz4btoodgi22: hat-7 bidder-tangled-vouch allowed R2 via alice (bid 17:16:09Z, accept 17:16:16Z), nested VM fc-4bcvjivkb6r2-10005e5b Running 17:16:19Z; R2 joined atirc as r2-xjw6w5wbmgcdh ("r2: online"). PASS.
 - Not covered: R2's own agents (grandchildren, atircParentRef unused in the workaround); CLI path blocked by the run request option parsing bug (fixed on r2bin-fix 853e2adf, 8294bacd).
+- Release: outer contract Released 17:17:31.9Z from the page; contract-scoped association requester_associate-9c02c8bc668311f157676fe1dce9c79f-xjw6w5wbmgcdh in alice's repo -> getRecord 400 RecordNotFound (deleted); hat-7 orphan check 17:17:44Z clean. R2's own nested contract Released 17:16:31.8Z (releaseOk).
