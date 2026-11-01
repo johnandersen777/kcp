@@ -738,10 +738,16 @@ export function agentTokenNote(contract) {
     }[token.reason] ?? `agent token: minted (${token.reason || "no reason"})`;
   }
   const why = token.message || "no message";
-  // r131 3dca8612: a leased mint whose token has no leases claim fails.
+  // r131 3dca8612: a leased mint whose token has no leases claim fails, for good.
   if (token.reason === "LeaseClaimMissing") return "agent token: server returned no lease (refused)";
   if (token.reason === "GaveUp") return `agent token: mint GAVE UP: ${why}`;
-  return `agent token: mint failed, retrying: ${why}`;
+  // r131 mints only after the verified receipt; before it the requester
+  // records MintFailed "…no verified receipt…" and tries again later.
+  if (/no verified receipt/.test(why)) return "agent token: waiting for receipt";
+  // "attempt N of M": retried while N < M; anything else is not retried.
+  const attempt = /attempt (\d+) of (\d+)/.exec(why);
+  if (attempt && Number(attempt[1]) < Number(attempt[2])) return `agent token: mint failed, retrying: ${why}`;
+  return `agent token: mint failed: ${why}`;
 }
 
 // ", ~N min left" for the requester's remaining wait, "" without a time.
@@ -872,6 +878,10 @@ export function infraRecordDid(infra) {
 export function infraRecordResolvable(infra, did) {
   const binding = infra?.spec?.record;
   if (!binding) return true;
+  // r131: RecordOrphaned=True means the controller released the record
+  // without a delete (its repo is gone, or it gave up); nothing is left to
+  // orphan, so the infra counts as finished and may go.
+  if (infraCondition(infra, "RecordOrphaned")?.status === "True") return true;
   if (infraCondition(infra, "RecordUnresolved")?.status === "True") return false;
   if ((infra?.status?.conditions ?? []).some((c) => /repo\.read handle/.test(c?.message ?? ""))) return false;
   return binding.repoRef?.name === infraRepoRef(did).name;

@@ -48,3 +48,20 @@ Deno.test("page wiring: the row shows the agent token note", async () => {
   const app = await Deno.readTextFile(new URL("./app.js", import.meta.url));
   if (!/vmshell\.agentTokenNote\(contract\),\s*\.\.\.vmshell\.releaseNotes/.test(app)) throw new Error("row lacks agentTokenNote");
 });
+
+Deno.test("agentTokenNote: r131 reasons", () => {
+  assertEquals(
+    agentTokenNote(agent("Held", { status: "False", reason: "MintFailed", message: "attempt 1 of 12: the contract has no verified receipt; no atirc token is minted before it" })),
+    "agent token: waiting for receipt",
+    "before the receipt",
+  );
+  assertEquals(
+    agentTokenNote(agent("Held", { status: "False", reason: "MintFailed", message: "attempt 12 of 12: lease refused" })),
+    "agent token: mint failed: attempt 12 of 12: lease refused",
+    "the last attempt is not 'retrying'",
+  );
+  assertEquals(
+    agentTokenNote(agent("Held", { status: "False", reason: "LeaseClaimMissing", message: "attempt 1, not retried: the atirc endpoint answered a leased mint with a token that carries no leases claim" })),
+    "agent token: server returned no lease (refused)",
+  );
+});

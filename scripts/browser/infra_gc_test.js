@@ -282,3 +282,11 @@ Deno.test("contractTransitions: a phase or step change flushes once; an unchange
     throw new Error("applyComputeState flushes on contract transitions");
   }
 });
+
+Deno.test("planInfraGC: an infra whose record the controller orphaned (r131) counts as finished", () => {
+  const orphaned = infra(ORIGIN, "orph01", [], { spec: { record: infraRecordBinding(BOB) } });
+  orphaned.status = { conditions: [unresolved, { type: "RecordOrphaned", status: "True", reason: "RepoNotFound" }] };
+  assertEquals(infraRecordResolvable(orphaned, ALICE), true);
+  const plan = planInfraGC({ infras: [orphaned], contracts: [], origin: ORIGIN, tabId: ME, did: ALICE, now: NOW });
+  assertEquals(plan.map((step) => step.action), ["delete"], "not kept forever");
+});
