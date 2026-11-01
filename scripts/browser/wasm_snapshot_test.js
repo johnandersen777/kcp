@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
-import { closeRestoredSockets, deadSocket, instrument, isSocket, socketEntry } from "./wasm_snapshot.js";
+import { busy, closeRestoredSockets, deadSocket, instrument, isSocket, socketEntry } from "./wasm_snapshot.js";
 
 // fakeGo is the part of wasm_exec's Go that socket capture and restore touch:
 // func wrappers record their calls.
@@ -42,6 +42,12 @@ function fakeGo() {
 // globalThis.WebSocket when called, so a plain class stands in for it.
 class FakeWebSocket {}
 globalThis.WebSocket = FakeWebSocket;
+
+// instrument wraps globalThis.Worker once, so the stand-in goes in first.
+class FakeWorker {
+  terminate() {}
+}
+globalThis.Worker = FakeWorker;
 
 function socketLike() {
   return new FakeWebSocket();
@@ -81,6 +87,7 @@ Deno.test("closeRestoredSockets fires the captured onclose with an abnormal clos
   assertEquals(go.calls[0].id, 7);
   assertEquals(go.calls[0].self, socket);
   assertEquals(go.calls[0].event.code, 1006);
+  assertEquals(go.calls[0].event.reason, "restored from a memory snapshot");
   assertEquals(go.calls[0].event.wasClean, false);
 });
 
@@ -108,4 +115,26 @@ Deno.test("closeRestoredSockets skips a socket without a handler", () => {
   const go = fakeGo();
   closeRestoredSockets(go, [{ socket: deadSocket() }]);
   assertEquals(go.calls, []);
+});
+
+Deno.test("busy waits for a Worker Go started until Go terminates it", () => {
+  let w;
+  const go = fakeGo();
+  assert(!busy(go).includes("Worker"));
+  // Go runs inside _resume: a Worker constructed there is Go's.
+  const g = { ...fakeGo(), _resume() {
+    w = new globalThis.Worker("x.js");
+  } };
+  instrument(g);
+  g._resume();
+  assertEquals(busy(g), "1 Go-started Worker(s) running");
+  w.terminate();
+  assert(!busy(g).includes("Worker"));
+});
+
+Deno.test("a Worker page JS starts outside Go does not hold the capture", () => {
+  const g = fakeGo();
+  const w = new globalThis.Worker("y.js");
+  assert(!busy(g).includes("Worker"));
+  w.terminate();
 });

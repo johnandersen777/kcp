@@ -52,9 +52,33 @@ function patchThen() {
   };
 }
 
+// A Worker Go starts (the sandbox runner, socialweb internal/sandbox/worker)
+// answers through event listeners, not a Promise, and does not survive a
+// restore: Go would wait out its run timeout for a stand-in that never
+// answers. So a capture waits until every Go-started Worker is terminated.
+const goWorkers = new Set();
+let workerPatched = false;
+
+function patchWorker() {
+  const Base = globalThis.Worker;
+  if (workerPatched || typeof Base !== "function") return;
+  workerPatched = true;
+  globalThis.Worker = class extends Base {
+    constructor(...args) {
+      super(...args);
+      if (goDepth > 0) goWorkers.add(this);
+    }
+    terminate() {
+      goWorkers.delete(this);
+      return super.terminate();
+    }
+  };
+}
+
 // instrument must run right after `new Go()`, before run() or restore().
 export function instrument(go) {
   patchThen();
+  patchWorker();
   const make = go._makeFuncWrapper.bind(go);
   go._makeFuncWrapper = (id) => {
     const fn = make(id);
@@ -96,6 +120,7 @@ export function busy(go) {
   if (go.exited) return "Go program has exited";
   if (goDepth > 0 || go._pendingEvent) return "inside a Go callback";
   if (goAwaits > 0) return `Go awaits ${goAwaits} promise(s)`;
+  if (goWorkers.size > 0) return `${goWorkers.size} Go-started Worker(s) running`;
   if (!Object.keys(go._inst?.exports ?? {}).some((n) => n.startsWith("__snap_g"))) {
     return "wasm globals are not exported (scripts/wasm_globals.js)";
   }
@@ -235,6 +260,11 @@ export function socketEntry(v) {
 
 const SOCKET_CLOSED = 3;
 
+// The close a restored socket gets. socialweb wsconn matches this code and
+// reason to redial at once with its backoff reset; keep them in step.
+export const RESTORE_CLOSE_CODE = 1006;
+export const RESTORE_CLOSE_REASON = "restored from a memory snapshot";
+
 export function deadSocket() {
   return {
     readyState: SOCKET_CLOSED,
@@ -262,7 +292,7 @@ export function closeRestoredSockets(go, sockets) {
       : go._values.find((v, i) => i >= GO_ROOTS && funcIds.get(v) === onclose) ?? go._makeFuncWrapper(onclose);
     if (!handler) continue;
     try {
-      handler.call(socket, { type: "close", code: 1006, reason: "restored from a memory snapshot", wasClean: false });
+      handler.call(socket, { type: "close", code: RESTORE_CLOSE_CODE, reason: RESTORE_CLOSE_REASON, wasClean: false });
     } catch (err) {
       console.warn("closing a restored WebSocket:", err);
     }
