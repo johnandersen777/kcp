@@ -1,7 +1,7 @@
 // Copyright 2026 The KCP Authors.
 // SPDX-License-Identifier: Apache-2.0
 
-import { friendlyError, GRACE_MS, signInURL, signInView } from "./identity_ui.js";
+import { friendlyError, GRACE_MS, signInLinkRequest, signInURL, signInView } from "./identity_ui.js";
 
 function assertEquals(actual, expected, label = "value") {
   const a = JSON.stringify(actual);
@@ -104,6 +104,14 @@ Deno.test("signInView offers new permissions without leaving Signed in", () => {
     ["signedIn", "warn", "kcp is still starting", "signOut"]);
   // a typed other handle still says so first
   assertEquals(at({ account, typed: "bob.test" }, upgrade).text, "Signed in as alice.bsky.social, not bob.test.");
+});
+
+Deno.test("signInLinkRequest stamps spec.signInRequestedAt and nothing else", () => {
+  const req = signInLinkRequest("/apis/socialweb.computer/v1alpha1", new Date("2026-10-31T01:00:00Z"));
+  assertEquals([req.method, req.contentType], ["PATCH", "application/apply-patch+yaml"]);
+  assertEquals(req.path, "/apis/socialweb.computer/v1alpha1/marketidentities/requester?fieldManager=socialweb.computer%2Fsignin&force=true");
+  assertEquals(JSON.stringify(req.body.spec), JSON.stringify({ signInRequestedAt: "2026-10-31T01:00:00.000Z" }));
+  assertEquals([req.body.kind, req.body.metadata.name], ["MarketIdentity", "requester"]);
 });
 
 Deno.test("friendlyError hides package prefixes", () => {
