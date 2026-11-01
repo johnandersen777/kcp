@@ -280,10 +280,14 @@ const module = await WebAssembly.compileStreaming(wasmResponse);
 const compileMs = Math.round(performance.now() - fetchStarted);
 log("info", `kcp.wasm ${mib(wasmBytes)} MiB downloaded + compiled in ${compileMs}ms`);
 
+// forceApply is not boot configuration a snapshot depends on: the first load
+// of a new build runs with it, and its snapshot must still resume the next
+// reload (it never did: every upgrade cost a second cold boot). A load that
+// asks for forceApply cold boots instead of restoring.
 const snapshotKey = await hibernate.snapshotKey(
   await wasmHash,
   init.execUrl,
-  JSON.stringify({ ...init.socialweb, restore: undefined }),
+  JSON.stringify({ ...init.socialweb, restore: undefined, forceApply: undefined }),
 );
 const restored = await restoreSnapshot();
 if (init.debugMemory) {
@@ -396,6 +400,10 @@ hibernation = restoreUnreadable ? null : startHibernationLoop();
 // the worker (finishRestore covers failures once Go runs).
 async function restoreSnapshot() {
   if (!init.hibernate?.enabled || init.hibernate.restore === false) return null;
+  if (init.socialweb?.forceApply) {
+    log("info", "snapshot not restored: this load re-applies the socialweb manifests (new build or socialweb.forceApply)");
+    return null;
+  }
   try {
     const r = await hibernate.tryRestore({
       go,
