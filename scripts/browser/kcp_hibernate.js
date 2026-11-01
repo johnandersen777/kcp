@@ -56,8 +56,12 @@ const IDB = "kcp-snapshot";
 // ponytail: fixed interval; back off if long sessions keep the state dirty.
 const EVERY_MS = 60 * 1000;
 // Capture once the persisted state has been still this long (boot and the
-// socialweb compose write in bursts), unless the page is going away.
-const QUIET_MS = 30 * 1000;
+// socialweb compose write in bursts), unless the page is going away. A live
+// page persists a write every 5-10 s even when idle, so a longer quiet period
+// never came and an idle tab never captured; a hide capture (~5 s) does not
+// finish before a reload or close unloads the page (page-rc131 dev boot
+// timing: three cold boots in a row).
+const QUIET_MS = 3 * 1000;
 const CHUNK = 4 << 20;
 
 /** The kcp-wasm state database's owner key (state_store.js OWNER_KEY). */
