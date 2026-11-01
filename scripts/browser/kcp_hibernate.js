@@ -489,20 +489,23 @@ export function startHibernation({
       return;
     }
     const t = now();
+    // Logs why this tick waits, once per change of reason (the debug log is
+    // the only way to tell a busy tab from a churning one).
+    const wait = (reason) => {
+      if (reason !== lastReason) log("debug", `snapshot deferred: ${reason}`);
+      lastReason = reason;
+    };
     if (want) {
       // a hide: at once
     } else if (soon) {
-      if (t - changedAt < SOON_QUIET_MS || (lastAt && t - lastAt < SOON_GAP_MS)) return;
+      if (t - changedAt < SOON_QUIET_MS) return wait("the persisted state is still changing");
+      if (lastAt && t - lastAt < SOON_GAP_MS) return wait(`within ${SOON_GAP_MS / 1000}s of the last capture`);
     } else {
-      if (t - changedAt < QUIET_MS) return;
-      if (t - lastAt < everyMs) return;
+      if (t - changedAt < QUIET_MS) return wait("the persisted state is still changing");
+      if (t - lastAt < everyMs) return wait(`within ${Math.round(everyMs / 1000)}s of the last capture or boot`);
     }
     const reason = !ready() ? "kcp or socialweb not ready, or a request is in flight" : busy(go);
-    if (reason) {
-      if (reason !== lastReason) log("debug", `snapshot deferred: ${reason}`);
-      lastReason = reason;
-      return;
-    }
+    if (reason) return wait(reason);
     const background = !want && !soon;
     const asked = asks;
     const wantAsked = wantAsks;

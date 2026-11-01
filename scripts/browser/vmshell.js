@@ -148,10 +148,15 @@ export function recordSyncError(infra) {
   return "";
 }
 
+// The record the controller bound: the infra's name, or (socialweb rc140) a
+// successor rkey `<name>-<8 hex of the object UID>` when that name already
+// holds an ended record, which is kept rather than deleted; later successors
+// of the same object append `-<n>` (socialweb infra.Successor, n >= 2).
 export function infraRecordURI(infra, did, name) {
   if (!did || !name) return "";
-  const uri = `at://${did}/computer.socialweb.ephemeralInfra/${name}`;
-  return infra?.status?.record?.uri === uri ? uri : "";
+  const base = `at://${did}/computer.socialweb.ephemeralInfra/${name}`;
+  const uri = String(infra?.status?.record?.uri ?? "");
+  return uri === base || (uri.startsWith(`${base}-`) && /^[0-9a-f]{8}(-[1-9][0-9]*)?$/.test(uri.slice(base.length + 1))) ? uri : "";
 }
 
 /**
@@ -726,7 +731,10 @@ export function releaseNotes(contract, contractEvents = [], now = Date.now()) {
     notes.push(`R2 release: asked (${asked.phase ?? "Pending"}); answered or ${R2_RELEASE_MINUTES} min bound passed`);
   }
   const revokes = { Pending: "tokens: revoking", Done: "tokens: revoked", Abandoned: "tokens: revoke ABANDONED, revoke them by hand" };
-  if (contract?.atircRevokes) notes.push(revokes[contract.atircRevokes] ?? `tokens: ${contract.atircRevokes}`);
+  // A contract that failed before any mint (no bids, no VM) still finishes
+  // its revoke step; "revoked" would claim a token that never existed.
+  if (contract?.atircRevokes === "Done" && !contract?.atircToken) notes.push("tokens: none minted");
+  else if (contract?.atircRevokes) notes.push(revokes[contract.atircRevokes] ?? `tokens: ${contract.atircRevokes}`);
   if (!releasePending(contract)) return notes;
   // The outcomes above answer an earlier Release; the requester restarts it.
   return [`release: requested ${contract.releaseRequestedAt}, pending (the earlier release failed${contract.message ? `: ${contract.message}` : ""})`,
@@ -892,7 +900,8 @@ export function infraRecordDid(infra) {
 
 /**
  * Whether the infra controller can reach the infra's PDS record, so deleting
- * the infra also deletes the record: no RecordUnresolved=True (nor the older
+ * the infra ends it there (socialweb rc140 writes a final endedAt status and
+ * keeps the record; older controllers deleted it): no RecordUnresolved=True (nor the older
  * "repo.read handle" sync error) and spec.record.repoRef names did's current
  * repo. An infra without a record binding has no record to orphan.
  */
@@ -912,7 +921,7 @@ export function infraRecordResolvable(infra, did) {
  * After a rebind written at generation: the controller has reconciled it
  * (status.observedGeneration) and the record now resolves (no
  * RecordUnresolved=True, the current repo, a record URI), so a delete also
- * deletes the PDS record.
+ * reaches the PDS record (its final ended status).
  */
 export function infraRebindSettled(infra, did, generation) {
   return Number(infra?.status?.observedGeneration ?? 0) >= Number(generation ?? 0) &&
@@ -923,7 +932,8 @@ export function infraRebindSettled(infra, did, generation) {
  * The GC's rebind-delete: rebinds infra name's spec.record to did's binding
  * (composeInfra, the page's full-spec apply; serialize is the page's infra
  * write queue), waits up to timeoutMs for infraRebindSettled, and only then
- * deletes the infra so the controller deletes its PDS record. Returns true
+ * deletes the infra so the controller writes the record's final ended
+ * status (rc140; older controllers deleted the record). Returns true
  * when deleted, false when it was kept (record still unresolved).
  */
 export async function rebindThenDelete({
@@ -1003,8 +1013,9 @@ export function planInfraGC({ infras, contracts, origin, tabId, did, now = Date.
       } else if (infraRecordResolvable(infra, did)) {
         plan.push({ name, action: "delete", reason: `no live ComputeContract; finished ${hours} h ago`, live });
       } else {
-        // Deleting it now would orphan its PDS record (the controller cannot
-        // reach the repo). The same DID's: rebind, wait for the record, then
+        // Deleting it now would leave its PDS record without its final ended
+        // status (the controller cannot reach the repo). The same DID's:
+        // rebind, wait for the record, then
         // delete; anyone else's: keep.
         const owner = infraRecordDid(infra);
         const mine = owner ? owner === did : infra.spec?.record?.repoRef?.name === infraRepoRef(did).name;

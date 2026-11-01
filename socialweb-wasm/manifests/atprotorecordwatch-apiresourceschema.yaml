@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-6.atprotorecordwatches.socialweb.computer
+  name: v1alpha1-7.atprotorecordwatches.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -48,6 +48,11 @@ spec:
                 type: string
               collection:
                 type: string
+              rkeys:
+                type: array
+                items:
+                  type: string
+                x-kubernetes-list-type: set
               match:
                 type: array
                 items:

@@ -595,6 +595,9 @@ func (s *Store) guaranteedUpdate(
 	if log := UpdateLog; log != nil {
 		log(ctx, key, true)
 	}
+	if diff := UpdateDiffLog; diff != nil && exists {
+		diff(ctx, key, orig, stored)
+	}
 	return stored, m, nil
 }
 
@@ -1280,6 +1283,11 @@ func countUpdate(key string, written bool) {
 // which object a controller keeps re-applying, by which verb and user, and
 // which writes keep an idle page's persisted state moving.
 var UpdateLog func(ctx context.Context, key string, written bool)
+
+// UpdateDiffLog, when set (debug only, before the apiserver starts), is
+// called after every written update of an existing object with the stored
+// object before and after: which fields a controller keeps changing.
+var UpdateDiffLog func(ctx context.Context, key string, before, after runtime.Object)
 
 // TakeUpdateCounts returns and resets the counts: resource -> {written, noop}.
 func TakeUpdateCounts() map[string][2]int64 {

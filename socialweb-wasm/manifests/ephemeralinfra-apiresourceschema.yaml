@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v1alpha1-12.ephemeralinfras.socialweb.computer
+  name: v1alpha1-13.ephemeralinfras.socialweb.computer
 spec:
   group: socialweb.computer
   names:
@@ -356,6 +356,7 @@ spec:
                   - Degraded
                   - Ending
                   - Deleting
+                  - Ended
               message:
                 type: string
               contracts:
@@ -421,6 +422,7 @@ spec:
                 enum:
                   - Complete
                   - Deadline
+                  - Deleted
       additionalPrinterColumns:
         - name: Phase
           type: string
