@@ -37,6 +37,7 @@ import (
 
 	kcpdynamic "github.com/kcp-dev/client-go/dynamic"
 	dynamicextension "github.com/kcp-dev/virtual-workspace-framework/pkg/client/dynamic"
+	dynamiccontext "github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/context"
 )
 
 // StoreFuncs holds proto-functions that can be mutated by successive actors to wrap behavior.
@@ -202,6 +203,14 @@ func DefaultDynamicDelegatedStoreFuncs(
 
 		requestInfo, _ := genericapirequest.RequestInfoFrom(ctx)
 
+		// A server-side apply PATCH captured by the virtual workspace handler
+		// (apiserver.CaptureApplyPatch) is forwarded to the backend as an apply,
+		// not as the object computed locally: an Update would make the backend
+		// record every field as owned by an Update entry of the field manager,
+		// and a later apply omitting a field would never remove it.
+		applyPatch, isApply := dynamiccontext.ApplyPatchFrom(ctx)
+		isApply = isApply && requestInfo != nil && requestInfo.Verb == "patch"
+
 		doUpdate := func() (*unstructured.Unstructured, error) {
 			needToCreate := false
 			oldObj, err := s.Get(ctx, name, &metav1.GetOptions{})
@@ -249,11 +258,31 @@ func DefaultDynamicDelegatedStoreFuncs(
 					return nil, err
 				}
 
+				if isApply {
+					// s.Get can hide an existing object (e.g. a label selector
+					// wrapper). Create would fail on it with AlreadyExists; an
+					// apply would modify it, so check first.
+					if _, err := delegate.Get(ctx, name, metav1.GetOptions{}); err == nil {
+						return nil, apierrors.NewAlreadyExists(resource.GroupResource(), name)
+					} else if !apierrors.IsNotFound(err) {
+						return nil, err
+					}
+					return forwardApply(ctx, delegate, name, applyPatch, unstructuredObj, nil, options, subResources)
+				}
+
 				return delegate.Create(ctx, unstructuredObj, updateToCreateOptions(options), subResources...)
 			}
 
 			if err := updateValidation(ctx, obj, oldObj); err != nil {
 				return nil, err
+			}
+
+			if isApply {
+				oldUnstructured, ok := oldObj.(*unstructured.Unstructured)
+				if !ok {
+					return nil, fmt.Errorf("not an Unstructured: %T", oldObj)
+				}
+				return forwardApply(ctx, delegate, name, applyPatch, unstructuredObj, oldUnstructured, options, subResources)
 			}
 
 			return delegate.Update(ctx, unstructuredObj, *options, subResources...)
