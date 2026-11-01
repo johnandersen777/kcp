@@ -99,10 +99,14 @@ export function signInView({ requester = true, identity, local = {}, now = Date.
       return view("signedIn", "warn", `Signed in as ${handle}, not ${typed}.`, did, primary, signOut);
     }
     // A session granted before the page asked for more scopes keeps working;
-    // socialweb offers a sign-in for the new ones without leaving Ready.
-    if (url && identity.pendingAction?.kind === "signInAgain") {
+    // socialweb r133 marks it (pendingAction signInAgain, reason ScopeUpgrade)
+    // without leaving Ready. With an authorize URL the tap opens it, otherwise
+    // it starts a sign-in, which asks for the full scope.
+    const action = identity.pendingAction;
+    if (action?.kind === "signInAgain" && (action.reason === "ScopeUpgrade" || url)) {
       return view("signedIn", "warn", `Signed in as ${handle || did}`,
-        "New permissions are available: sign in again to grant them.", { label: "Grant permissions", action: "open" }, signOut);
+        "New permissions are available: sign in again to grant them.",
+        { label: "Grant permissions", action: url ? "open" : "start" }, signOut);
     }
     return view("signedIn", "ok", `Signed in as ${handle || did}`, detail, primary, signOut);
   }

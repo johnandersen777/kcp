@@ -82,9 +82,17 @@ Deno.test("signInView offers new permissions without leaving Signed in", () => {
   const v = at({ account }, upgrade);
   assertEquals([v.state, v.tone, v.text, v.primary.label, v.primary.action, v.secondary.action],
     ["signedIn", "warn", "Signed in as alice.bsky.social", "Grant permissions", "open", "signOut"]);
-  // once opened (or expired) it is the plain signed-in panel again
-  assertEquals(at({ account, used: [URL1] }, upgrade).primary.action, "switch");
-  assertEquals(signInView({ identity: upgrade, local: { account }, now: Date.parse("2026-10-24T12:06:00Z") }).primary.action, "switch");
+  // once opened (or expired) the tap starts a fresh sign-in instead
+  assertEquals(at({ account, used: [URL1] }, upgrade).primary.action, "start");
+  assertEquals(signInView({ identity: upgrade, local: { account }, now: Date.parse("2026-10-24T12:06:00Z") }).primary.action, "start");
+  // r133 shape without a URL: {kind, reason, message, missingScopes, handle}
+  const noURL = { ...ready, pendingAction: { kind: "signInAgain", reason: "ScopeUpgrade", missingScopes: ["rpc:chat.atirc.revoke?aud=did:web:irc.fedfork.com%23atirc"] } };
+  const start = at({ account }, noURL);
+  assertEquals([start.state, start.primary.label, start.primary.action], ["signedIn", "Grant permissions", "start"]);
+  // a signInAgain on a Ready identity with neither reason nor URL is not an upgrade
+  assertEquals(at({ account }, { ...ready, pendingAction: { kind: "signInAgain" } }).primary.action, "switch");
+  // done: socialweb clears pendingAction
+  assertEquals(at({ account }, ready).primary.action, "switch");
   // a typed other handle still says so first
   assertEquals(at({ account, typed: "bob.test" }, upgrade).text, "Signed in as alice.bsky.social, not bob.test.");
 });
