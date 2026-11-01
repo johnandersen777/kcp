@@ -222,7 +222,7 @@ Option B (on-demand start through `events.guest.agentStart`) over boot-start. Co
 
 - Harness: configured by the user (works). It survives an irc.fedfork.com redeploy only if the data dir is preserved (atirc-dev). The harness installs claude with `curl` at runtime: guest egress to claude.ai and the model endpoint is needed (observation for the user).
 - iroh `endpoint`: tokens may carry an iroh ticket; `agent run` needs guest UDP to the n0 relay. Observation for the user.
-- Long tokens are not revocable; VM release leaves them valid. Only opted-in contracts mint; the idempotent vault check prevents duplicate mints on reload.
+- Long tokens are not revocable; VM release leaves them valid. Follow-up (linux-kcp → atirc-dev, 2026-10-30, atirc seq 741): mint takes an optional `exp` (contract/release deadline) plus revoke-by-subhandle, and the requester revokes on release; tracked with plan 0036. Only opted-in contracts mint; the idempotent vault check prevents duplicate mints on reload.
 - linux/arm64 out of scope → amd64 guests only.
 - Agent on by default → every VM request mints a non-revocable token (user accepted).
 - Scope change forces every page session to sign in again; production metadata must be regenerated first.
