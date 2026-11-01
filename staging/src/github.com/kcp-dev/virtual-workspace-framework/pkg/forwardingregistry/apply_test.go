@@ -744,6 +744,72 @@ func TestApplyThroughVirtualWorkspaceConflictRetries(t *testing.T) {
 	})
 }
 
+// ownsField returns whether the Apply entry of manager owns the FieldsV1 path.
+func ownsField(t *testing.T, obj *unstructured.Unstructured, manager string, path ...string) bool {
+	t.Helper()
+	for _, e := range managedFieldsOf(obj, manager, "") {
+		if e.Operation != metav1.ManagedFieldsOperationApply || e.FieldsV1 == nil {
+			continue
+		}
+		var node map[string]interface{}
+		require.NoError(t, json.Unmarshal(e.FieldsV1.Raw, &node))
+		found := true
+		for _, p := range path {
+			next, ok := node[p].(map[string]interface{})
+			if !ok {
+				found = false
+				break
+			}
+			node = next
+		}
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+// TestApplyThroughVirtualWorkspaceDoesNotAdoptLabels shows the applier only
+// owns the labels it applied and those the virtual workspace's mutating
+// admission added, not labels that were already there.
+func TestApplyThroughVirtualWorkspaceDoesNotAdoptLabels(t *testing.T) {
+	t.Parallel()
+
+	for name, managedFields := range map[string][]metav1.ManagedFieldsEntry{
+		// e.g. an object written before server-side apply, or with managedFields reset
+		"no managedFields": nil,
+		"owned by another manager": {{
+			Manager: "team-controller", Operation: metav1.ManagedFieldsOperationUpdate, APIVersion: "mygroup.example.com/v1beta1",
+			FieldsType: "FieldsV1", FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:metadata":{"f:labels":{".":{},"f:team":{}}}}`)},
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newVWHarness(t, nil)
+			obj := &unstructured.Unstructured{}
+			obj.SetGroupVersionKind(noxuKind)
+			obj.SetNamespace("default")
+			obj.SetName("foo")
+			obj.SetUID("uid-foo")
+			obj.SetLabels(map[string]string{"team": "billing"})
+			obj.SetManagedFields(managedFields)
+			h.backend.set(obj)
+
+			res := h.apply("", "provider", specApplyA)
+			require.Equal(t, http.StatusOK, res.code, res.body)
+			live := h.backend.get("default", "foo")
+			require.False(t, ownsField(t, live, "provider", "f:metadata", "f:labels", "f:team"), "the applier must not own a label it never set:\n%s", describeManagedFields(live))
+			require.True(t, ownsField(t, live, "provider", "f:metadata", "f:labels", "f:"+injectedLabel), "the applier owns the label admission added:\n%s", describeManagedFields(live))
+
+			res = h.apply("", "provider", specApplyA)
+			require.Equal(t, http.StatusOK, res.code, res.body)
+			live = h.backend.get("default", "foo")
+			require.Equal(t, "billing", live.GetLabels()["team"])
+			require.Equal(t, "true", live.GetLabels()[injectedLabel])
+		})
+	}
+}
+
 // TestApplyThroughVirtualWorkspaceKeepsOtherPatchTypes shows a merge patch is
 // still computed by the virtual workspace and stored with an update.
 func TestApplyThroughVirtualWorkspaceKeepsOtherPatchTypes(t *testing.T) {

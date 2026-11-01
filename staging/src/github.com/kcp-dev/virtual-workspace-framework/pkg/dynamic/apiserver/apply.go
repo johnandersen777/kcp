@@ -18,6 +18,7 @@ package apiserver
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"strings"
@@ -33,9 +34,57 @@ import (
 )
 
 // PatchResource is the virtual workspace's PATCH handler: handlers.PatchResource
-// wrapped with CaptureApplyPatch.
+// wrapped with CaptureApplyPatch, with mutating admission recording what it
+// changes on captured apply requests (see TrackApplyAdmission).
 func PatchResource(storage rest.Patcher, scope *handlers.RequestScope, admit admission.Interface, patchTypes []string) http.HandlerFunc {
-	return CaptureApplyPatch(handlers.PatchResource(storage, scope, admit, patchTypes), scope.MaxRequestBodyBytes)
+	return CaptureApplyPatch(handlers.PatchResource(storage, scope, TrackApplyAdmission(admit), patchTypes), scope.MaxRequestBodyBytes)
+}
+
+// TrackApplyAdmission wraps admission so that, on a request carrying a
+// captured server-side apply (dynamiccontext.ApplyPatchFrom), mutating
+// admission records a copy of the object before and after it ran
+// (ApplyPatch.RecordAdmission). The forwarding storage forwards those
+// changes with the apply, as it does not forward the admitted object.
+func TrackApplyAdmission(admit admission.Interface) admission.Interface {
+	if admit == nil {
+		return nil
+	}
+	return &applyAdmissionTracker{delegate: admit}
+}
+
+type applyAdmissionTracker struct {
+	delegate admission.Interface
+}
+
+var _ admission.MutationInterface = &applyAdmissionTracker{}
+var _ admission.ValidationInterface = &applyAdmissionTracker{}
+
+func (a *applyAdmissionTracker) Handles(operation admission.Operation) bool {
+	return a.delegate.Handles(operation)
+}
+
+func (a *applyAdmissionTracker) Admit(ctx context.Context, attrs admission.Attributes, o admission.ObjectInterfaces) error {
+	mutator, ok := a.delegate.(admission.MutationInterface)
+	if !ok {
+		return nil
+	}
+	applyPatch, tracked := dynamiccontext.ApplyPatchFrom(ctx)
+	if !tracked || attrs.GetObject() == nil {
+		return mutator.Admit(ctx, attrs, o)
+	}
+	before := attrs.GetObject().DeepCopyObject()
+	if err := mutator.Admit(ctx, attrs, o); err != nil {
+		return err
+	}
+	applyPatch.RecordAdmission(before, attrs.GetObject().DeepCopyObject())
+	return nil
+}
+
+func (a *applyAdmissionTracker) Validate(ctx context.Context, attrs admission.Attributes, o admission.ObjectInterfaces) error {
+	if validator, ok := a.delegate.(admission.ValidationInterface); ok {
+		return validator.Validate(ctx, attrs, o)
+	}
+	return nil
 }
 
 // CaptureApplyPatch wraps a PATCH handler (handlers.PatchResource). For a

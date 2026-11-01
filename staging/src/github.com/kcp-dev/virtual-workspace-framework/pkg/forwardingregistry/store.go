@@ -237,6 +237,10 @@ func DefaultDynamicDelegatedStoreFuncs(
 			// alone, when the object does not already exist.
 			// For server-side apply, the computed object is used as the body of the
 			// PUT request below, to create the object from the apply patch.
+			if isApply {
+				// Mutating admission records its changes for this attempt only.
+				applyPatch.ResetAdmission()
+			}
 			obj, err := objInfo.UpdatedObject(ctx, oldObj)
 			if err != nil {
 				return nil, err
@@ -268,7 +272,7 @@ func DefaultDynamicDelegatedStoreFuncs(
 					// forwardApply makes the apply fail with AlreadyExists, like
 					// a Create, if an object exists by now, including one s.Get
 					// hides (e.g. a label selector wrapper).
-					return forwardApply(ctx, delegate, resource.GroupResource(), name, applyPatch, unstructuredObj, nil, options, subResources)
+					return forwardApply(ctx, delegate, resource.GroupResource(), name, applyPatch, nil, options, subResources)
 				}
 
 				return delegate.Create(ctx, unstructuredObj, updateToCreateOptions(options), subResources...)
@@ -283,7 +287,7 @@ func DefaultDynamicDelegatedStoreFuncs(
 				if !ok {
 					return nil, fmt.Errorf("not an Unstructured: %T", oldObj)
 				}
-				return forwardApply(ctx, delegate, resource.GroupResource(), name, applyPatch, unstructuredObj, oldUnstructured, options, subResources)
+				return forwardApply(ctx, delegate, resource.GroupResource(), name, applyPatch, oldUnstructured, options, subResources)
 			}
 
 			return delegate.Update(ctx, unstructuredObj, *options, subResources...)

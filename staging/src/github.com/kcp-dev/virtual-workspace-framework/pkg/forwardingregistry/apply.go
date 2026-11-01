@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
 	"sigs.k8s.io/yaml"
 
@@ -40,9 +39,8 @@ import (
 // forwardApply sends a server-side apply to the backend, so that the backend
 // runs the apply itself and records the field manager with operation Apply.
 //
-// admitted is the object the virtual workspace computed from the apply and
-// ran through admission, live the object it was computed from (nil when the
-// object does not exist yet).
+// live is the object the virtual workspace computed the apply from and ran
+// admission on (nil when the object does not exist yet).
 //
 // The body is the client's apply patch with additions that keep the
 // guarantees of the Update or Create this replaces:
@@ -60,17 +58,18 @@ import (
 //     object is deleted between the Get and the apply, the backend rejects the
 //     pinned resourceVersion on its create path; that error is returned as is
 //     (fails closed, not retried);
-//   - labels that the virtual workspace's mutating admission added (e.g. the
-//     APIExport permission claim selector labels) and that the backend would
-//     not keep from the apply alone. The applier owns them, as it owns fields
-//     set by mutating admission in a kube apiserver.
+//   - the labels the virtual workspace's mutating admission added or changed
+//     (e.g. the APIExport permission claim selector labels), as recorded by
+//     apiserver.TrackApplyAdmission. The applier owns them, as it owns fields
+//     set by mutating admission in a kube apiserver. Labels admission did not
+//     touch are not added, so the applier does not adopt labels it never set.
 func forwardApply(
 	ctx context.Context,
 	delegate dynamic.ResourceInterface,
 	groupResource schema.GroupResource,
 	name string,
 	applyPatch *dynamiccontext.ApplyPatch,
-	admitted, live *unstructured.Unstructured,
+	live *unstructured.Unstructured,
 	options *metav1.UpdateOptions,
 	subResources []string,
 ) (*unstructured.Unstructured, error) {
@@ -78,7 +77,11 @@ func forwardApply(
 	if live == nil {
 		createUID = string(uuid.NewUUID())
 	}
-	data, pinnedResourceVersion, err := applyPatchBody(groupResource, name, applyPatch.Data, admitted, live, createUID, options.FieldManager, strings.Join(subResources, "/"))
+	labels, err := admissionLabelChanges(applyPatch)
+	if err != nil {
+		return nil, err
+	}
+	data, pinnedResourceVersion, err := applyPatchBody(groupResource, name, applyPatch.Data, live, createUID, labels)
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +163,7 @@ func isUIDInvalid(err error) bool {
 
 // applyPatchBody returns the apply patch to send to the backend, see
 // forwardApply, and whether it pinned the resourceVersion of live.
-func applyPatchBody(groupResource schema.GroupResource, name string, data []byte, admitted, live *unstructured.Unstructured, createUID, manager, subresource string) ([]byte, bool, error) {
+func applyPatchBody(groupResource schema.GroupResource, name string, data []byte, live *unstructured.Unstructured, createUID string, admissionLabels map[string]string) ([]byte, bool, error) {
 	jsonData, err := yaml.YAMLToJSON(data)
 	if err != nil {
 		return nil, false, apierrors.NewBadRequest(fmt.Sprintf("error decoding apply patch: %v", err))
@@ -201,29 +204,20 @@ func applyPatchBody(groupResource schema.GroupResource, name string, data []byte
 		}
 	}
 
-	patchLabels, _ := metadata["labels"].(map[string]interface{})
-	for key, value := range admitted.GetLabels() {
-		if _, inPatch := patchLabels[key]; inPatch {
-			continue
-		}
-		if live != nil {
-			if liveValue, found := live.GetLabels()[key]; found && liveValue == value && labelOwnedByOthers(live, key, manager, subresource) {
-				// The backend keeps it without the applier.
-				continue
-			}
-		}
+	if len(admissionLabels) > 0 {
+		patchLabels, _ := metadata["labels"].(map[string]interface{})
 		if patchLabels == nil {
 			patchLabels = map[string]interface{}{}
 		}
-		patchLabels[key] = value
+		for key, value := range admissionLabels {
+			patchLabels[key] = value
+		}
+		metadata["labels"] = patchLabels
 		changed = true
 	}
 
 	if !changed {
 		return data, pinned, nil
-	}
-	if patchLabels != nil {
-		metadata["labels"] = patchLabels
 	}
 	patch["metadata"] = metadata
 	body, err := json.Marshal(patch)
@@ -233,25 +227,31 @@ func applyPatchBody(groupResource schema.GroupResource, name string, data []byte
 // optimisticLockErrorMsg is the message of the registry's resourceVersion Conflict.
 const optimisticLockErrorMsg = "the object has been modified; please apply your changes to the latest version and try again"
 
-// labelOwnedByOthers returns whether a managedFields entry of obj other than the
-// Apply entry of manager on subresource owns the label key.
-func labelOwnedByOthers(obj *unstructured.Unstructured, key, manager, subresource string) bool {
-	for _, entry := range obj.GetManagedFields() {
-		if entry.Manager == manager && entry.Operation == metav1.ManagedFieldsOperationApply && entry.Subresource == subresource {
-			continue
-		}
-		if entry.FieldsV1 == nil {
-			continue
-		}
-		var fields map[string]interface{}
-		if err := json.Unmarshal(entry.FieldsV1.Raw, &fields); err != nil {
-			continue
-		}
-		metadata, _ := fields["f:metadata"].(map[string]interface{})
-		labels, _ := metadata["f:labels"].(map[string]interface{})
-		if _, found := labels["f:"+key]; found {
-			return true
-		}
+// admissionLabelChanges returns the labels mutating admission added or
+// changed in the current attempt, as recorded by apiserver.TrackApplyAdmission.
+func admissionLabelChanges(applyPatch *dynamiccontext.ApplyPatch) (map[string]string, error) {
+	before, after, mutated := applyPatch.Admission()
+	if !mutated {
+		return nil, nil
 	}
-	return false
+	beforeObj, ok := before.(*unstructured.Unstructured)
+	if !ok {
+		return nil, fmt.Errorf("not an Unstructured: %T", before)
+	}
+	afterObj, ok := after.(*unstructured.Unstructured)
+	if !ok {
+		return nil, fmt.Errorf("not an Unstructured: %T", after)
+	}
+	beforeLabels := beforeObj.GetLabels()
+	var changes map[string]string
+	for key, value := range afterObj.GetLabels() {
+		if old, found := beforeLabels[key]; found && old == value {
+			continue
+		}
+		if changes == nil {
+			changes = map[string]string{}
+		}
+		changes[key] = value
+	}
+	return changes, nil
 }

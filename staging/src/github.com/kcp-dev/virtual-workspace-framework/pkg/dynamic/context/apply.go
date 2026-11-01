@@ -18,6 +18,9 @@ package context
 
 import (
 	"context"
+	"sync"
+
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // applyPatchContextKeyType is the type of the key for the request context value
@@ -40,6 +43,36 @@ type ApplyPatch struct {
 	Data []byte
 	// Force is the value of the force query parameter.
 	Force bool
+
+	mu             sync.Mutex
+	admittedBefore runtime.Object
+	admittedAfter  runtime.Object
+}
+
+// RecordAdmission records the object before and after mutating admission.
+// Over several calls it keeps the first before and the last after.
+func (p *ApplyPatch) RecordAdmission(before, after runtime.Object) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.admittedBefore == nil {
+		p.admittedBefore = before
+	}
+	p.admittedAfter = after
+}
+
+// ResetAdmission forgets what RecordAdmission recorded, e.g. before a retry.
+func (p *ApplyPatch) ResetAdmission() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.admittedBefore, p.admittedAfter = nil, nil
+}
+
+// Admission returns the object before and after mutating admission, if
+// mutating admission ran since the last ResetAdmission.
+func (p *ApplyPatch) Admission() (before, after runtime.Object, ok bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.admittedBefore, p.admittedAfter, p.admittedBefore != nil && p.admittedAfter != nil
 }
 
 // WithApplyPatch adds a server-side apply patch to the context.
