@@ -53,4 +53,23 @@ export async function fetchWasm(url, fetchFn = globalThis.fetch, { hash = false 
   return [new Response(body, { headers: { "content-type": "application/wasm" } }), bytes, digest];
 }
 
+// wasmBuildId identifies the deployed module build without downloading it:
+// the ETag (else Last-Modified) of whichever file fetchWasm would load, the
+// .gz sibling first. Production ships only `<module>.wasm.gz` (the raw module
+// is a 404 there), so asking for the raw module alone always answered "".
+// "" means no build identity could be read.
+export async function wasmBuildId(url, fetchFn = globalThis.fetch) {
+  for (const candidate of [`${url}.gz`, url]) {
+    try {
+      const res = await fetchFn(candidate, { method: "HEAD" });
+      await res.body?.cancel();
+      if (!res.ok || /^text\/html/i.test(res.headers.get("content-type") ?? "")) continue;
+      return res.headers.get("etag") ?? res.headers.get("last-modified") ?? "";
+    } catch {
+      // try the next candidate
+    }
+  }
+  return "";
+}
+
 export const mib = (bytes) => (bytes / 1048576).toFixed(1);

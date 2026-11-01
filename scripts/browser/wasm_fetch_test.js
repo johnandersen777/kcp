@@ -1,7 +1,7 @@
 // Copyright 2026 The KCP Authors.
 // SPDX-License-Identifier: Apache-2.0
 
-import { fetchWasm } from "./wasm_fetch.js";
+import { fetchWasm, wasmBuildId } from "./wasm_fetch.js";
 
 // Smallest valid module: magic + version.
 const wasm = new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]);
@@ -69,4 +69,45 @@ Deno.test("fetchWasm reports a missing module", async () => {
     message = err.message;
   }
   if (!message.includes("404")) throw new Error(`got ${message}`);
+});
+
+function headFetch(files) {
+  const seen = [];
+  const fn = (url, init) => {
+    seen.push(`${init?.method ?? "GET"} ${url}`);
+    const file = files[url];
+    if (!file) return Promise.resolve(new Response("not found", { status: 404 }));
+    return Promise.resolve(new Response(null, { headers: { "content-type": file.type, ...file.headers } }));
+  };
+  return { fn, seen };
+}
+
+Deno.test("wasmBuildId reads the .gz sibling's ETag (production ships only .gz)", async () => {
+  const { fn, seen } = headFetch({ "/m.wasm.gz": { type: "application/gzip", headers: { etag: '"gz1"' } } });
+  const id = await wasmBuildId("/m.wasm", fn);
+  if (id !== '"gz1"') throw new Error(`id ${id}`);
+  if (seen.join() !== "HEAD /m.wasm.gz") throw new Error(seen.join());
+});
+
+Deno.test("wasmBuildId falls back to the raw module (dev server)", async () => {
+  const { fn, seen } = headFetch({
+    "/m.wasm.gz": { type: "text/html", headers: { etag: '"spa"' } },
+    "/m.wasm": { type: "application/wasm", headers: { etag: '"raw1"' } },
+  });
+  const id = await wasmBuildId("/m.wasm", fn);
+  if (id !== '"raw1"') throw new Error(`id ${id}`);
+  if (seen.join() !== "HEAD /m.wasm.gz,HEAD /m.wasm") throw new Error(seen.join());
+});
+
+Deno.test("wasmBuildId uses Last-Modified without an ETag", async () => {
+  const { fn } = headFetch({ "/m.wasm.gz": { type: "application/gzip", headers: { "last-modified": "Fri, 30 Oct 2026 20:32:25 GMT" } } });
+  const id = await wasmBuildId("/m.wasm", fn);
+  if (id !== "Fri, 30 Oct 2026 20:32:25 GMT") throw new Error(`id ${id}`);
+});
+
+Deno.test("wasmBuildId answers empty when nothing identifies the build", async () => {
+  const { fn } = headFetch({});
+  if ((await wasmBuildId("/m.wasm", fn)) !== "") throw new Error("expected empty");
+  const throwing = () => Promise.reject(new TypeError("offline"));
+  if ((await wasmBuildId("/m.wasm", throwing)) !== "") throw new Error("expected empty on network error");
 });
