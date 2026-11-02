@@ -2719,6 +2719,7 @@ function initSocialwebUI() {
 // here loads kubectl: kcpREST talks to kcp directly.
 
 const computeRequestEl = document.getElementById("compute-request");
+const computeOAuthEl = document.getElementById("compute-oauth");
 const computeStatusEl = document.getElementById("compute-status");
 const computeListEl = document.getElementById("compute-list");
 const vmshellIngressEl = document.getElementById("compute-ingress");
@@ -3133,7 +3134,11 @@ async function requestVMFor(did, gen, association) {
     localStorage.setItem(computePrefs.transport(name), "webrtc");
     // The association ref file (or R2's association request) reaches the
     // guest through the same bundle.
-    if (wootty || agent || association.subject || guestTools) {
+    const oauthClients = vmshell.parseOAuthClients(computeOAuthEl?.value ?? "");
+    if (oauthClients.length > 0) {
+      addLog("info", `${name} may approve OAuth sign-ins as you for ${oauthClients.map((c) => c.clientId).join(", ")}`);
+    }
+    if (wootty || agent || association.subject || guestTools || oauthClients.length > 0) {
       const woottyToken = wootty ? vmshell.randomToken() : "";
       if (woottyToken) localStorage.setItem(computePrefs.token(name), woottyToken);
       // The requester reads the bundle once and fails a contract whose
@@ -3145,7 +3150,7 @@ async function requestVMFor(did, gen, association) {
         bundle: vmshell.secretsBundle({ woottyToken, agent }),
       });
     }
-    const { contract, secret } = vmshell.infraContract({ infra: infraName, short, wootty, agent, sshKeys, association: association.subject, guestTools });
+    const { contract, secret } = vmshell.infraContract({ infra: infraName, short, wootty, agent, sshKeys, association: association.subject, guestTools, oauthClients });
     if (!identityReadyFor(did, gen)) {
       // A sign out in the last moments: drop what this request wrote (the
       // vault bundle stays; it is keyed by a contract that never exists).

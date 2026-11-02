@@ -412,6 +412,9 @@
         <label><span>Associate DID</span>
           <input id="compute-associate" type="text" placeholder="optional: did:plc:… to associate with the VM" autocomplete="off" spellcheck="false">
         </label>
+        <label><span>Allow OAuth apps</span>
+          <textarea id="compute-oauth" rows="2" placeholder="https://irc.fedfork.com/oauth/client-metadata* atproto repo:com.vibescrobble.scrobble?action=create" title="One app per line: its client_id, then the scopes the VM may approve as you. Needs an account on a socialweb-computer PDS; a bsky.social account is refused." spellcheck="false"></textarea>
+        </label>
         <button id="compute-request" type="button" disabled>Request VM</button>
         <button id="compute-testpeer" type="button" hidden>Connect test peer</button>
         <div id="compute-status" class="app-status">sign in to request a VM</div>

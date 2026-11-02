@@ -636,9 +636,9 @@ export function infraContractName(infra, short) {
  * the agent) for the VM short; cc is the ComputeContract name it becomes.
  * The template is the one contractManifest builds.
  */
-export function infraContract({ infra, short, wootty = false, agent = false, sshKeys = [], association = "", guestTools = false }) {
+export function infraContract({ infra, short, wootty = false, agent = false, sshKeys = [], association = "", guestTools = false, oauthClients = [] }) {
   const cc = infraContractName(infra, short);
-  const { spec } = contractManifest({ name: cc, wootty, agent, sshKeys, association, guestTools });
+  const { spec } = contractManifest({ name: cc, wootty, agent, sshKeys, association, guestTools, oauthClients });
   const { secretsRef, ...template } = spec;
   return {
     cc,
@@ -655,12 +655,12 @@ export function infraContract({ infra, short, wootty = false, agent = false, ssh
  * market.association for it; its ref file reaches the guest through the
  * secrets bundle, so it needs the secretsRef too.
  */
-export function contractManifest({ name, ownerDid, wootty = false, agent = false, sshKeys = [], association = "", guestTools = false }) {
+export function contractManifest({ name, ownerDid, wootty = false, agent = false, sshKeys = [], association = "", guestTools = false, oauthClients = [] }) {
   // No bidderDids: the requester's discovery picks the bidders.
   const spec = { vmName: name, policy: REQUESTER_POLICY };
   spec.tunnels = [{ tag: SSH_TAG, port: 22, transport: "webrtc" }];
   if (association && guestTools) throw new Error(R2_ASSOCIATES_ITSELF);
-  if (wootty || agent || association || guestTools) spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
+  if (wootty || agent || association || guestTools || oauthClients.length > 0) spec.secretsRef = { mount: SECRETS_MOUNT, path: secretsPath(name) };
   if (association) spec.association = { subject: association };
   // R2: socialweb-computer in the guest (linux/amd64 bidders only; others
   // fail their bid with GuestToolsUnserved). It associates itself: with
@@ -674,6 +674,7 @@ export function contractManifest({ name, ownerDid, wootty = false, agent = false
     spec.tunnels.unshift({ tag: WOOTTY_TAG, port: WOOTTY_PORT, transport: "opentunnel", shell: { envFile: WOOTTY_ENV } });
   }
   if (sshKeys.length > 0) spec.sshAuthorizedKeys = sshKeys;
+  if (oauthClients.length > 0) spec.oauthClients = oauthClients;
   if (ownerDid) spec.ownerDid = ownerDid;
   return {
     apiVersion: "socialweb.computer/v1alpha1",
@@ -1035,4 +1036,39 @@ export function planInfraGC({ infras, contracts, origin, tabId, did, now = Date.
     }
   }
   return plan;
+}
+
+/**
+ * The "Allow OAuth apps" field: one app per line, its client_id URL then the
+ * atproto scopes the VM's workload identity may approve as the signed-in
+ * account (spaces or commas between them; none means atproto). A * in the
+ * client_id matches a keyed client_id. Full-access and rbac scopes are refused
+ * here as the requester refuses them (docs/pds/oauth-wid.md of
+ * socialweb-computer-kcp).
+ */
+export function parseOAuthClients(text) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of String(text ?? "").split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const [clientId, ...rest] = line.split(/[\s,]+/).filter(Boolean);
+    let url;
+    try {
+      url = new URL(clientId.replaceAll("*", "x"));
+    } catch {
+      throw new Error(`OAuth app ${clientId}: not a URL`);
+    }
+    if (url.protocol !== "https:") throw new Error(`OAuth app ${clientId}: not an https client_id`);
+    if (seen.has(clientId)) throw new Error(`OAuth app ${clientId}: listed twice`);
+    seen.add(clientId);
+    const scopes = rest.length > 0 ? [...new Set(rest)] : ["atproto"];
+    for (const scope of scopes) {
+      if (scope.startsWith("transition:") || scope.startsWith("repo:*") || scope.startsWith("repo:com.fedproxy.rbac")) {
+        throw new Error(`OAuth app ${clientId}: ${scope} is a scope a workload may not approve`);
+      }
+    }
+    out.push({ clientId, scopes });
+  }
+  return out;
 }

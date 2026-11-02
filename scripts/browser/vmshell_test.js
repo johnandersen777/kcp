@@ -10,6 +10,7 @@ import {
   finishedInfraContracts,
   fnv1a64,
   infraContract,
+  parseOAuthClients,
   infraRecordBinding,
   infraRecordStale,
   r2StartShown,
@@ -961,4 +962,32 @@ Deno.test("beforeunload: warns while release work runs in this tab", async () =>
   assert(/computeReleasing = seen\.some\(vmshell\.releaseWorkPending\)/.test(app), "beforeunload state uses releaseWorkPending");
   assert(/const seen = contracts\.map\(\(c\) => vmshell\.withReleaseSent\(c, computeReleaseAsked\.get\(c\?\.name\)\)\)/.test(app),
     "over the contracts as this tab sees them (a Release sent, not yet copied)");
+});
+
+Deno.test("parseOAuthClients: one app per line, scopes after it, atproto by default", () => {
+  const out = parseOAuthClients(
+    "https://irc.fedfork.com/oauth/client-metadata* atproto,repo:com.vibescrobble.scrobble?action=create\n\n# note\nhttps://app.example/client.json",
+  );
+  if (out.length !== 2) throw new Error(JSON.stringify(out));
+  if (out[0].clientId !== "https://irc.fedfork.com/oauth/client-metadata*") throw new Error(out[0].clientId);
+  if (out[0].scopes.join(" ") !== "atproto repo:com.vibescrobble.scrobble?action=create") throw new Error(out[0].scopes.join(" "));
+  if (out[1].scopes.join(" ") !== "atproto") throw new Error(out[1].scopes.join(" "));
+});
+
+Deno.test("parseOAuthClients: refuses http, full access and rbac scopes", () => {
+  for (const bad of ["http://app.example/c.json", "https://app.example/c.json transition:generic", "https://app.example/c.json repo:com.fedproxy.rbac"]) {
+    let threw = false;
+    try {
+      parseOAuthClients(bad);
+    } catch {
+      threw = true;
+    }
+    if (!threw) throw new Error(`accepted ${bad}`);
+  }
+});
+
+Deno.test("infraContract: oauthClients reach the contract template with a secrets bundle", () => {
+  const out = infraContract({ infra: "s1", short: "vmshell-abc", oauthClients: [{ clientId: "https://app.example/c.json", scopes: ["atproto"] }] });
+  if (out.contract.oauthClients?.[0]?.clientId !== "https://app.example/c.json") throw new Error(JSON.stringify(out.contract));
+  if (!out.secret) throw new Error("no secrets entry for the oauth-wid.json bundle");
 });
