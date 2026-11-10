@@ -445,6 +445,15 @@ func (r *schedulingReconciler) updateLogicalClusterPhase(ctx context.Context, sh
 	if err != nil {
 		return err
 	}
+	// A retry after a conflicting Workspace patch lands here again, possibly
+	// after the LogicalCluster finished initializing. Moving it back to
+	// Initializing would make admission re-arm status.initializers from spec,
+	// and initializers that already finished (the APIBinder has nothing left
+	// to react to) would never run again: the Workspace stays Initializing.
+	if phase == corev1alpha1.LogicalClusterPhaseInitializing && logicalCluster.Status.Phase != "" &&
+		logicalCluster.Status.Phase != corev1alpha1.LogicalClusterPhaseScheduling {
+		return nil
+	}
 	logicalCluster.Status.Phase = phase
 	logging.WithObject(klog.FromContext(ctx), logicalCluster).WithValues("phase", phase).Info("updating LogicalCluster phase")
 	_, err = logicalClusterAdminClient.Cluster(cluster).CoreV1alpha1().LogicalClusters().UpdateStatus(ctx, logicalCluster, metav1.UpdateOptions{})
