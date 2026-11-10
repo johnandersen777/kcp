@@ -657,13 +657,6 @@ func (s *Store) Watch(ctx context.Context, key string, opts kstorage.ListOptions
 // the caller-owned object the event carries. view runs on the watcher's
 // goroutine, outside the store lock.
 func (s *Store) watch(ctx context.Context, key string, opts kstorage.ListOptions, bookmark func() runtime.Object, view func(*storedRef) (runtime.Object, error)) (watch.Interface, error) {
-	w := newBufferWatcher()
-	w.onStop = func() {
-		s.mu.Lock()
-		delete(s.watchers, w)
-		s.mu.Unlock()
-	}
-
 	var requestedRV uint64
 	var fromRV bool
 	if opts.ResourceVersion != "" && opts.ResourceVersion != "0" {
@@ -693,8 +686,8 @@ func (s *Store) watch(ctx context.Context, key string, opts kstorage.ListOptions
 	}
 
 	reg := &watchRegistration{key: key, recursive: opts.Recursive, predicate: opts.Predicate}
-	s.watchers[w] = reg
 
+	var replay []watch.Event
 	switch {
 	case sendInitial:
 		// Send the current state as ADDED events.
@@ -708,14 +701,14 @@ func (s *Store) watch(ctx context.Context, key string, opts kstorage.ListOptions
 		for _, k := range keys {
 			obj := s.objects[k]
 			if predicateMatches(opts.Predicate, obj) {
-				w.send(watch.Event{Type: watch.Added, Object: &storedRef{Object: obj, key: k, meta: s.objectMeta[k]}})
+				replay = append(replay, watch.Event{Type: watch.Added, Object: &storedRef{Object: obj, key: k, meta: s.objectMeta[k]}})
 			}
 		}
 		if bookmark != nil && opts.SendInitialEvents != nil && *opts.SendInitialEvents && opts.Predicate.AllowWatchBookmarks {
 			obj := bookmark()
 			if err := s.versioner.UpdateObject(obj, s.rv); err == nil {
 				if err := kstorage.AnnotateInitialEventsEndBookmark(obj); err == nil {
-					w.send(watch.Event{Type: watch.Bookmark, Object: obj})
+					replay = append(replay, watch.Event{Type: watch.Bookmark, Object: obj})
 				}
 			}
 		}
@@ -730,8 +723,21 @@ func (s *Store) watch(ctx context.Context, key string, opts kstorage.ListOptions
 			if !predicateMatches(opts.Predicate, ev.obj) {
 				continue
 			}
-			w.send(watch.Event{Type: ev.typ, Object: &storedRef{Object: ev.obj, key: ev.key, meta: ev.meta}})
+			replay = append(replay, watch.Event{Type: ev.typ, Object: &storedRef{Object: ev.obj, key: ev.key, meta: ev.meta}})
 		}
+	}
+	// The replay is queued before the caller reads a single event, so the
+	// buffer holds all of it: a send dropped here would be lost for good,
+	// with the watch still open (a live overflow closes the watch instead).
+	w := newBufferWatcher(len(replay))
+	w.onStop = func() {
+		s.mu.Lock()
+		delete(s.watchers, w)
+		s.mu.Unlock()
+	}
+	s.watchers[w] = reg
+	for _, ev := range replay {
+		w.send(ev)
 	}
 	s.mu.Unlock()
 
@@ -1199,9 +1205,10 @@ type bufferWatcher struct {
 	onStop  func()
 }
 
-func newBufferWatcher() *bufferWatcher {
+// newBufferWatcher holds replay queued events plus 100 live ones.
+func newBufferWatcher(replay int) *bufferWatcher {
 	return &bufferWatcher{
-		ch:   make(chan watch.Event, 100),
+		ch:   make(chan watch.Event, replay+100),
 		done: make(chan struct{}),
 	}
 }

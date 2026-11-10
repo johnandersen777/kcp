@@ -290,6 +290,39 @@ func TestWatchReplaysFromResourceVersion(t *testing.T) {
 	expectEvent(t, w, watch.Modified, "b")
 }
 
+// A replay longer than the live buffer must arrive whole: the caller reads
+// nothing until Watch returns, so a dropped replay event is lost for good
+// while the watch stays open (the iOS app's Workspace stuck Initializing).
+func TestWatchReplaysMoreThanTheLiveBuffer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := New()
+	defer s.Close()
+
+	var list fetchv1alpha1.FetchList
+	if err := s.GetList(ctx, prefix, kstorage.ListOptions{Recursive: true}, &list); err != nil {
+		t.Fatal(err)
+	}
+	const n = 250
+	for i := range n {
+		if err := s.Create(ctx, key(fmt.Sprintf("f%03d", i)), newFetch(fmt.Sprintf("f%03d", i)), nil, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, rv := range []string{list.ResourceVersion, "0"} {
+		w, err := s.Watch(ctx, prefix, kstorage.ListOptions{Recursive: true, ResourceVersion: rv})
+		if err != nil {
+			t.Fatalf("Watch from %q: %v", rv, err)
+		}
+		for i := range n {
+			expectEvent(t, w, watch.Added, fmt.Sprintf("f%03d", i))
+		}
+		w.Stop()
+	}
+}
+
 func TestClusterAnnotations(t *testing.T) {
 	s := New()
 	defer s.Close()
