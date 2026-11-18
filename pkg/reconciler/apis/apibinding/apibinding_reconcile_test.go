@@ -262,7 +262,7 @@ func TestReconcileBinding(t *testing.T) {
 			wantAPIExportValid: wantAPIExportValid{
 				internalError: true,
 			},
-			wantError: false,
+			wantError: true,
 		},
 		"APIResourceSchema get error - random error": {
 			apiBinding:                binding.Build(),

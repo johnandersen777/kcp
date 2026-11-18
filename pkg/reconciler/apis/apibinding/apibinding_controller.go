@@ -73,6 +73,9 @@ var (
 	SystemBoundCRDsClusterName = logicalcluster.Name("system:bound-crds")
 )
 
+// liveAPIResourceSchemaTimeout bounds the live read of an APIResourceSchema that the informers do not have.
+const liveAPIResourceSchemaTimeout = 10 * time.Second
+
 // NewController returns a new controller for APIBindings.
 func NewController(
 	crdClusterClient kcpapiextensionsclientset.ClusterInterface,
@@ -88,6 +91,8 @@ func NewController(
 	crdInformer kcpapiextensionsv1informers.CustomResourceDefinitionClusterInformer,
 	shardName string,
 ) (*controller, error) {
+	getCachedAPIResourceSchema := informer.NewScopedGetterWithFallback[*apisv1alpha1.APIResourceSchema, apisv1alpha1listers.APIResourceSchemaLister](apiResourceSchemaInformer.Lister(), globalAPIResourceSchemaInformer.Lister())
+
 	c := &controller{
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
@@ -150,7 +155,21 @@ func NewController(
 			return indexers.ByIndexWithFallback[*apisv1alpha2.APIExport](apiExportInformer.Informer().GetIndexer(), globalAPIExportInformer.Informer().GetIndexer(), indexers.APIExportByIdentity, identityHash)
 		},
 
-		getAPIResourceSchema: informer.NewScopedGetterWithFallback[*apisv1alpha1.APIResourceSchema, apisv1alpha1listers.APIResourceSchemaLister](apiResourceSchemaInformer.Lister(), globalAPIResourceSchemaInformer.Lister()),
+		getAPIResourceSchema: func(clusterName logicalcluster.Name, name string) (*apisv1alpha1.APIResourceSchema, error) {
+			sch, err := getCachedAPIResourceSchema(clusterName, name)
+			if !apierrors.IsNotFound(err) {
+				return sch, err
+			}
+			// The informers can miss an APIResourceSchema for as long as their watch lives (a storage backend that
+			// drops a watch event). Schemas are immutable, so a live read is as good as the cached object.
+			ctx, cancel := context.WithTimeout(context.Background(), liveAPIResourceSchemaTimeout)
+			defer cancel()
+			live, liveErr := kcpClusterClient.Cluster(clusterName.Path()).ApisV1alpha1().APIResourceSchemas().Get(ctx, name, metav1.GetOptions{})
+			if liveErr != nil {
+				return nil, err
+			}
+			return live, nil
+		},
 
 		getAPIConversion: informer.NewScopedGetterWithFallback[*apisv1alpha1.APIConversion, apisv1alpha1listers.APIConversionLister](apiConversionInformer.Lister(), globalAPIConversionInformer.Lister()),
 

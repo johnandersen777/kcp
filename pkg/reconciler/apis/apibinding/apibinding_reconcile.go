@@ -229,10 +229,8 @@ func (r *bindingReconciler) reconcile(ctx context.Context, apiBinding *apisv1alp
 				"Invalid APIExport. Please contact the APIExport owner to resolve: APIResourceSchema %q not found", resourceSchema.Schema,
 			)
 
-			if apierrors.IsNotFound(err) {
-				return reconcileStatusContinue, nil
-			}
-
+			// Also for NotFound: the error requeues the binding rate limited, so that a schema created later is
+			// picked up without depending on its informer event.
 			return reconcileStatusContinue, err
 		}
 		schemas[resourceSchema.Schema] = sch
